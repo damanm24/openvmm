@@ -126,15 +126,16 @@ impl SimpleFlowNode for Node {
             },
         ));
 
-        let pre_run_deps = vec![ctx.reqv(crate::install_vmm_tests_deps::Request::Install)];
-
-        let (test_log_path, get_test_log_path) = ctx.new_var();
-
-        let latest_release_igvm_files =
+        let pre_run_deps = vec![
+            ctx.reqv(crate::install_vmm_tests_deps::Request::Install),
             ctx.reqv(|v| crate::download_release_igvm_files::resolve::Request {
                 release_igvm_files: v,
                 release_version: OpenhclReleaseVersion::latest(),
-            });
+            })
+            .into_side_effect(),
+        ];
+
+        let (test_log_path, get_test_log_path) = ctx.new_var();
 
         let extra_env = ctx.reqv(|v| crate::init_vmm_tests_env::Request {
             test_content_dir,
@@ -150,7 +151,6 @@ impl SimpleFlowNode for Node {
             register_openhcl_igvm_files,
             get_test_log_path: Some(get_test_log_path),
             get_env: v,
-            release_igvm_files: latest_release_igvm_files,
             use_relative_paths: false,
         });
 
