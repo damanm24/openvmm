@@ -126,14 +126,17 @@ impl SimpleFlowNode for Node {
             },
         ));
 
-        let pre_run_deps = vec![
+        let mut pre_run_deps = vec![
             ctx.reqv(crate::install_vmm_tests_deps::Request::Install),
-            ctx.reqv(|v| crate::download_release_igvm_files::resolve::Request {
+        ];
+
+        if ctx.backend() != FlowBackend::Ado {
+            pre_run_deps.push(ctx.reqv(|v| crate::download_release_igvm_files::resolve::Request {
                 release_igvm_files: v,
                 release_version: OpenhclReleaseVersion::latest(),
             })
-            .into_side_effect(),
-        ];
+            .into_side_effect());
+        }
 
         let (test_log_path, get_test_log_path) = ctx.new_var();
 
