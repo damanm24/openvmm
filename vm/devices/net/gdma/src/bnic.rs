@@ -177,17 +177,52 @@ impl InspectMut for Vport {
         req.respond()
             .field("mac_address", self.mac_address)
             .field_mut("endpoint", self.endpoint.as_mut())
-            .field("tx_wq", self.queue_cfg.tx.map(|(wq, _cq)| wq))
-            .field("tx_cq", self.queue_cfg.tx.map(|(_wq, cq)| cq))
-            .field("rx_wq", self.queue_cfg.tx.map(|(wq, _cq)| wq))
-            .field("rx_cq", self.queue_cfg.tx.map(|(_wq, cq)| cq))
+            .field("queues", self.queue_cfg.clone())
             .merge(&mut self.task);
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Pair {
+    wq: u32,
+    cq: u32,
+}
+
+impl From<(u32, u32)> for Pair {
+    fn from((wq, cq): (u32, u32)) -> Self {
+        Pair { wq, cq }
+    }
+}
+
+impl From<Pair> for (u32, u32) {
+    fn from(p: Pair) -> Self {
+        (p.wq, p.cq)
+    }
+}
+
+impl inspect::Inspect for Pair {
+    fn inspect(&self, req: inspect::Request<'_>) {
+        req.respond().field("wq", &self.wq).field("cq", &self.cq);
+    }
+}
+
+#[derive(Clone)]
 struct QueueCfg {
-    tx: Option<(u32, u32)>,
-    rx: Option<(u32, u32)>,
+    tx: Vec<Pair>,
+    rx: Vec<Pair>,
+}
+
+impl inspect::Inspect for QueueCfg {
+    fn inspect(&self, req: inspect::Request<'_>) {
+        let mut response = req.respond();
+        for (i, pair) in self.tx.iter().enumerate() {
+            response.field(&format!("tx[{i}]"), pair);
+        }
+
+        for (i, pair) in self.rx.iter().enumerate() {
+            response.field(&format!("rx[{i}]"), pair);
+        }
+    }
 }
 
 impl BasicNic {
@@ -206,7 +241,10 @@ impl BasicNic {
                         mac_address,
                         endpoint,
                         task: TaskControl::new(TxRxState),
-                        queue_cfg: QueueCfg { tx: None, rx: None },
+                        queue_cfg: QueueCfg {
+                            tx: vec![],
+                            rx: vec![],
+                        },
                         serial_no: 0,
                     }
                 },
@@ -275,12 +313,6 @@ impl BasicNic {
                     ty => anyhow::bail!("unsupported queue type: {:?}", ty),
                 };
 
-                if (is_send && vport.queue_cfg.tx.is_some())
-                    || (!is_send && vport.queue_cfg.rx.is_some())
-                {
-                    anyhow::bail!("queue already created");
-                }
-
                 let wq_region = state.get_dma_region(req.wq_gdma_region, req.wq_size)?;
                 let cq_region = state.get_dma_region(req.cq_gdma_region, req.cq_size)?;
 
@@ -294,17 +326,25 @@ impl BasicNic {
                     .alloc_cq(cq_region.clone(), req.cq_parent_qid)
                     .context("failed to allocate cq")?;
 
+                if is_send {
+                    &mut vport.queue_cfg.tx.push(Pair {
+                        wq: wq_id,
+                        cq: cq_id,
+                    });
+                } else {
+                    &mut vport.queue_cfg.rx.push(Pair {
+                        wq: wq_id,
+                        cq: cq_id,
+                    });
+                }
+
+                let handle = ((req.vport) << 32) | (vport.queue_cfg.tx.len() as u64);
+
                 let resp = ManaCreateWqobjResp {
                     wq_id,
                     cq_id,
-                    wq_obj: req.vport, // use the vport # as the handle
+                    wq_obj: handle, // use the vport # as the handle
                 };
-
-                *if is_send {
-                    &mut vport.queue_cfg.tx
-                } else {
-                    &mut vport.queue_cfg.rx
-                } = Some((wq_id, cq_id));
 
                 write.write(resp.as_bytes())?;
 
@@ -317,9 +357,13 @@ impl BasicNic {
                 let req: ManaDestroyWqobjReq = read
                     .read_plain()
                     .context("failed to read destroy wq obj request")?;
+
+                let vport_idx = req.wq_obj_handle >> 32;
+                let wq_obj: u64 = req.wq_obj_handle & 0xFFFF_FFFF;
+
                 let vport = self
                     .vports
-                    .get_mut(req.wq_obj_handle as usize)
+                    .get_mut(vport_idx as usize)
                     .context("invalid obj handle")?;
 
                 if vport.task.has_state() {
@@ -330,9 +374,12 @@ impl BasicNic {
                     GdmaQueueType::GDMA_SQ => (true, &mut vport.queue_cfg.tx),
                     ty => anyhow::bail!("unsupported queue type: {:?}", ty),
                 };
-                let (wq_id, cq_id) = queues.take().context("specified queue does not exist")?;
-                state.queues.free_wq(is_send, wq_id).unwrap();
-                state.queues.free_cq(cq_id).unwrap();
+
+                assert!(wq_obj > 0 && queues.len() > wq_obj as usize);
+                let queues_idx = (wq_obj - 1) as usize;
+                let wq_cq_pair = queues.remove(queues_idx);
+                state.queues.free_wq(is_send, wq_cq_pair.wq).unwrap();
+                state.queues.free_cq(wq_cq_pair.cq).unwrap();
                 0
             }
             ManaCommandCode::MANA_CONFIG_VPORT_RX => {
@@ -352,9 +399,7 @@ impl BasicNic {
                         vport.endpoint.stop().await;
                     }
                     Tristate::TRUE if !vport.task.is_running() => {
-                        if let (Some((sq_id, sq_cq_id)), Some((rq_id, rq_cq_id))) =
-                            (vport.queue_cfg.tx, vport.queue_cfg.rx)
-                        {
+                        if vport.queue_cfg.tx.len() > 0 && vport.queue_cfg.rx.len() > 0 {
                             let rx_packets = Arc::new(Default::default());
 
                             let mut queues = vec![];
@@ -380,19 +425,17 @@ impl BasicNic {
                                 "gdma-bnic",
                                 TxRxTask {
                                     queues: state.queues.clone(),
-                                    epqueue: queues.drain(..).next().unwrap(),
+                                    epqueues: queues,
                                     rx_packets,
-                                    sq_id,
-                                    sq_cq_id,
-                                    rq_id,
-                                    rq_cq_id,
+                                    tx_queues: vport.queue_cfg.tx.clone(),
+                                    rx_queues: vport.queue_cfg.rx.clone(),
                                     tx_segment_buffer: Vec::new(),
                                     rx_buf_count: 0,
                                 },
                             );
                             vport.task.start();
                         } else {
-                            anyhow::bail!("queues not configured");
+                            anyhow::bail!("queues not configured correctly");
                         }
                     }
                     _ => {}
@@ -459,12 +502,10 @@ impl BasicNic {
 
 pub struct TxRxTask {
     queues: Arc<Queues>,
-    epqueue: Box<dyn Queue>,
+    epqueues: Vec<Box<dyn Queue>>,
     rx_packets: Arc<Mutex<Slab<RxPacket>>>,
-    sq_id: u32,
-    sq_cq_id: u32,
-    rq_id: u32,
-    rq_cq_id: u32,
+    tx_queues: Vec<Pair>,
+    rx_queues: Vec<Pair>,
     tx_segment_buffer: Vec<TxSegment>,
     rx_buf_count: u32,
 }
@@ -473,8 +514,10 @@ impl InspectTaskMut<TxRxTask> for TxRxState {
     fn inspect_mut(&mut self, req: inspect::Request<'_>, task: Option<&mut TxRxTask>) {
         let mut resp = req.respond();
         if let Some(task) = task {
-            resp.field_mut("queue", &mut task.epqueue)
-                .field("rx_bufs", task.rx_packets.lock().len());
+            for (i, queue) in task.epqueues.iter_mut().enumerate() {
+                resp.field_mut(&format!("queues[{i}]"), queue);
+            }
+            resp.field("rx_bufs", task.rx_packets.lock().len());
         }
     }
 }
@@ -484,37 +527,58 @@ impl TxRxTask {
         let max_rx_buf = 256;
 
         enum Event {
-            Sqe(Wqe),
-            Rqe(u32, Wqe),
-            Ready,
+            Sqe(Pair, Wqe),
+            Rqe(Pair, u32, Wqe),
+            Ready(u32),
         }
 
         loop {
-            let event = poll_fn(|cx| {
-                if let Poll::Ready(wqe) = self.queues.poll_sq(self.sq_id, cx) {
-                    return Poll::Ready(Event::Sqe(wqe));
-                }
-                if self.rx_buf_count < max_rx_buf {
-                    if let Poll::Ready((wqe_offset, wqe)) = self.queues.poll_rq(self.rq_id, cx) {
-                        self.rx_buf_count += 1;
-                        return Poll::Ready(Event::Rqe(wqe_offset, wqe));
+            let event =
+                poll_fn(|cx| {
+                    if let Some((txq, wqe)) = self.tx_queues.iter().find_map(|&pair| {
+                        match self.queues.poll_sq(pair.wq, cx) {
+                            Poll::Ready(wqe) => Some((pair, wqe)),
+                            Poll::Pending => None,
+                        }
+                    }) {
+                        return Poll::Ready(Event::Sqe(txq, wqe));
                     }
-                }
-                if self.epqueue.poll_ready(cx).is_ready() {
-                    return Poll::Ready(Event::Ready);
-                }
-                Poll::Pending
-            })
-            .await;
+
+                    if self.rx_buf_count < max_rx_buf {
+                        if let Some((rxq, wqe_offset, wqe)) =
+                            self.rx_queues.iter().find_map(|&pair| {
+                                match self.queues.poll_rq(pair.wq, cx) {
+                                    Poll::Ready((wqe_offset, wqe)) => Some((pair, wqe_offset, wqe)),
+                                    Poll::Pending => None,
+                                }
+                            })
+                        {
+                            self.rx_buf_count += 1;
+                            return Poll::Ready(Event::Rqe(rxq, wqe_offset, wqe));
+                        }
+                    }
+
+                    if let Some(idx) = self.epqueues.iter_mut().enumerate().find_map(|(i, eq)| {
+                        match eq.poll_ready(cx).is_ready() {
+                            true => Some(i),
+                            false => None,
+                        }
+                    }) {
+                        return Poll::Ready(Event::Ready(idx as u32));
+                    }
+
+                    Poll::Pending
+                })
+                .await;
             match event {
-                Event::Sqe(sqe) => self.process_sqe(sqe)?,
-                Event::Rqe(wqe_offset, wqe) => self.process_rqe(wqe, wqe_offset)?,
-                Event::Ready => self.process_backend()?,
+                Event::Sqe(txq, sqe) => self.process_sqe(txq, sqe)?,
+                Event::Rqe(rxq, wqe_offset, wqe) => self.process_rqe(rxq, wqe, wqe_offset)?,
+                Event::Ready(idx) => self.process_backend(idx)?,
             }
         }
     }
 
-    fn process_sqe(&mut self, sqe: Wqe) -> anyhow::Result<()> {
+    fn process_sqe(&mut self, txq: Pair, sqe: Wqe) -> anyhow::Result<()> {
         tracing::trace!("tx wqe");
         let oob = sqe.oob();
         let oob = if oob.len() >= size_of::<ManaTxOob>() {
@@ -574,15 +638,21 @@ impl TxRxTask {
                 len: sge.size,
             });
         }
-        let (sync, count) = self.epqueue.tx_avail(tx_segments)?;
+        let txq_index = self
+            .tx_queues
+            .iter()
+            .position(|q| q.wq == txq.wq)
+            .context("tx queue not found")?;
+
+        let (sync, count) = self.epqueues[txq_index].tx_avail(tx_segments)?;
         if sync || count == 0 {
             tracing::trace!("tx sync complete");
-            self.post_tx_completion();
+            self.post_tx_completion(txq);
         }
         Ok(())
     }
 
-    fn post_tx_completion(&mut self) {
+    fn post_tx_completion(&mut self, sq_pair: Pair) {
         let tx_oob = ManaTxCompOob {
             cqe_hdr: ManaCqeHeader::new()
                 .with_client_type(MANA_CQE_COMPLETION)
@@ -592,10 +662,10 @@ impl TxRxTask {
             reserved: [0; 12],
         };
         self.queues
-            .post_cq(self.sq_cq_id, tx_oob.as_bytes(), self.sq_id, true);
+            .post_cq(sq_pair.cq, tx_oob.as_bytes(), sq_pair.wq, true);
     }
 
-    fn process_rqe(&mut self, wqe: Wqe, wqe_offset: u32) -> anyhow::Result<()> {
+    fn process_rqe(&mut self, rxq: Pair, wqe: Wqe, wqe_offset: u32) -> anyhow::Result<()> {
         let segments = wqe
             .sgl()
             .iter()
@@ -614,30 +684,47 @@ impl TxRxTask {
             oob: FromZeros::new_zeroed(),
         };
         let id = RxId(self.rx_packets.lock().insert(packet) as u32);
-        self.epqueue.rx_avail(&[id]);
+
+        let rxq_index = self
+            .rx_queues
+            .iter()
+            .position(|q| q.wq == rxq.wq)
+            .context("rx queue not found")?;
+        let epqueue = &mut self.epqueues[rxq_index];
+        epqueue.rx_avail(&[id]);
+
         Ok(())
     }
 
-    fn process_backend(&mut self) -> anyhow::Result<()> {
-        let mut packets = [RxId(0)];
-        if self.epqueue.rx_poll(&mut packets)? > 0 {
+    fn process_backend(&mut self, idx: u32) -> anyhow::Result<()> {
+        let epqueue = &mut self.epqueues[idx as usize];
+
+        // RX completion
+        let mut rx_ids = [RxId(0)];
+        if epqueue.rx_poll(&mut rx_ids)? > 0 {
             tracing::trace!("rx complete");
+
+            let rx_id = rx_ids[0];
             let packet = self
                 .rx_packets
                 .lock()
-                .try_remove(packets[0].0 as usize)
+                .try_remove(rx_id.0 as usize)
                 .context("invalid rx id")?;
 
+            let rxq = &self.rx_queues[idx as usize];
             self.queues
-                .post_cq(self.rq_cq_id, packet.oob.as_bytes(), self.rq_id, false);
+                .post_cq(rxq.cq, packet.oob.as_bytes(), rxq.wq, false);
 
             self.rx_buf_count -= 1;
         }
 
-        let mut packets = [TxId(0)];
-        if self.epqueue.tx_poll(&mut packets)? > 0 {
+        // TX completion
+        let mut tx_ids = [TxId(0)];
+        if epqueue.tx_poll(&mut tx_ids)? > 0 {
             tracing::trace!("tx async complete");
-            self.post_tx_completion();
+
+            let txq = &self.tx_queues[idx as usize];
+            self.post_tx_completion(*txq);
         }
 
         Ok(())
