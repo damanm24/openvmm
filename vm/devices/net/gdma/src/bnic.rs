@@ -178,6 +178,7 @@ impl InspectMut for Vport {
             .field("mac_address", self.mac_address)
             .field_mut("endpoint", self.endpoint.as_mut())
             .field("queues", self.queue_cfg.clone())
+            .field("marker", "damanmulye")
             .merge(&mut self.task);
     }
 }
@@ -202,7 +203,7 @@ impl From<Pair> for (u32, u32) {
 
 impl inspect::Inspect for Pair {
     fn inspect(&self, req: inspect::Request<'_>) {
-        req.respond().field("wq", &self.wq).field("cq", &self.cq);
+        req.respond().field("wq", self.wq).field("cq", self.cq);
     }
 }
 
@@ -228,7 +229,7 @@ impl inspect::Inspect for QueueCfg {
 impl BasicNic {
     pub fn new(vports: Vec<VportConfig>) -> Self {
         assert!(!vports.is_empty());
-
+        tracing::info!("bnic vport count: {}", vports.len());
         let vports = vports
             .into_iter()
             .map(
@@ -261,6 +262,7 @@ impl BasicNic {
         mut read: Limit<WqeAccess<'_>>,
         mut write: Limit<WqeAccess<'_>>,
     ) -> anyhow::Result<usize> {
+        tracing::info!("handling bnic request");
         tracing::debug!(msg_type = ?ManaCommandCode(hdr.req.msg_type), "bnic request");
 
         let response_len = match ManaCommandCode(hdr.req.msg_type) {
@@ -327,16 +329,19 @@ impl BasicNic {
                     .context("failed to allocate cq")?;
 
                 if is_send {
-                    &mut vport.queue_cfg.tx.push(Pair {
+                    vport.queue_cfg.tx.push(Pair {
                         wq: wq_id,
                         cq: cq_id,
                     });
                 } else {
-                    &mut vport.queue_cfg.rx.push(Pair {
+                    vport.queue_cfg.rx.push(Pair {
                         wq: wq_id,
                         cq: cq_id,
                     });
                 }
+
+                tracing::info!("tx queue size: {}", vport.queue_cfg.tx.len());
+                tracing::info!("rx queue size: {}", vport.queue_cfg.rx.len());
 
                 let handle = ((req.vport) << 32) | (vport.queue_cfg.tx.len() as u64);
 
@@ -399,7 +404,7 @@ impl BasicNic {
                         vport.endpoint.stop().await;
                     }
                     Tristate::TRUE if !vport.task.is_running() => {
-                        if vport.queue_cfg.tx.len() > 0 && vport.queue_cfg.rx.len() > 0 {
+                        if !vport.queue_cfg.tx.is_empty() && !vport.queue_cfg.rx.is_empty() {
                             let rx_packets = Arc::new(Default::default());
 
                             let mut queues = vec![];

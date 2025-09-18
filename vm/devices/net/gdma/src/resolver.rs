@@ -63,6 +63,9 @@ impl AsyncResolveResource<PciDeviceHandleKind, GdmaDeviceHandle> for GdmaDeviceR
         }))
         .await?;
 
+        tracing::info!("resolved {} vports", vports.len());
+        tracing::info!("Resolving device??");
+
         let device = GdmaDevice::new(
             input.driver_source,
             input.guest_memory.clone(),

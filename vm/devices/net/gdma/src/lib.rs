@@ -130,6 +130,8 @@ impl GdmaDevice {
         vports: Vec<VportConfig>,
         mmio_registration: &mut dyn RegisterMmioIntercept,
     ) -> Self {
+        tracing::info!("gdma vport count: {}", vports.len());
+        tracing::info!("Creating GDMA device");
         let (msix, msix_capability) = MsixEmulator::new(4, 64, register_msi);
 
         let hardware_ids = HardwareIds {
