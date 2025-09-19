@@ -477,8 +477,8 @@ impl BasicNic {
                     .context("invalid vport")?;
 
                 let resp = ManaQueryVportCfgResp {
-                    max_num_sq: 1,
-                    max_num_rq: 1,
+                    max_num_sq: 64,
+                    max_num_rq: 64,
                     num_indirection_ent: 128,
                     reserved1: 0,
                     mac_addr: vport.mac_address.to_bytes(),
