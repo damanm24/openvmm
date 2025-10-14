@@ -744,6 +744,7 @@ impl SimpleFlowNode for Node {
         copy_to_dir.push((nextest_config_file.to_owned(), nextest_config_file_src));
         let nextest_config_file = test_content_dir.join(nextest_config_file);
 
+        // Use the list command here
         let nextest_run_cmd = ctx.reqv(|v| flowey_lib_common::gen_cargo_nextest_run_cmd::Request {
             run_kind_deps: RunKindDeps::RunFromArchive {
                 archive_file: ReadVar::from_static(nextest_archive_file.clone()),
