@@ -1949,6 +1949,7 @@ dependencies = [
  "fs-err",
  "igvmfilegen_config",
  "log",
+ "petri_artifacts_vmm_test",
  "serde",
  "serde_json",
  "target-lexicon",

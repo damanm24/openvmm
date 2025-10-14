@@ -30,6 +30,7 @@ use crate::requirements::can_run_test_with_context;
 use crate::tracing::try_init_tracing;
 use anyhow::Context as _;
 use petri_artifacts_core::ArtifactResolver;
+use serde::Serialize;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
 use test_macro_support::TESTS;
@@ -281,13 +282,118 @@ where
     }
 }
 
+#[derive(clap::ValueEnum, Clone)]
+enum ArtifactListFormat {
+    Human,
+    Json,
+}
+
 #[derive(clap::Parser)]
 struct Options {
-    /// Lists the required artifacts for all tests.
-    #[clap(long)]
-    list_required_artifacts: bool,
+    /// Lists the required artifacts for all tests. Choose "human" or "json".
+    #[clap(long = "list-required-artifacts", value_enum)]
+    list_required_artifacts: Option<ArtifactListFormat>,
     #[clap(flatten)]
     inner: libtest_mimic::Arguments,
+}
+
+/// Helper struct for JSON output.
+#[derive(Serialize)]
+struct TestInfo {
+    name: String,
+    required: Vec<String>,
+    optional: Vec<String>,
+}
+
+/// Collect all tests and whether they can run on this host.
+fn collect_tests_with_can_run(host_context: &HostContext) -> Vec<(Test, bool)> {
+    Test::all()
+        .map(|test| {
+            let can_run = can_run_test_with_context(test.test.0.host_requirements(), host_context);
+            (test, can_run)
+        })
+        .collect()
+}
+
+/// Select tests according to libtest-mimic semantics (filter, skip, exact,
+/// include-ignored/ignored).
+fn select_tests<'a>(
+    tests_with_can_run: &'a [(Test, bool)],
+    args: &libtest_mimic::Arguments,
+) -> Vec<&'a Test> {
+    tests_with_can_run
+        .iter()
+        .filter_map(|(test, can_run)| {
+            let name = test.name();
+            // positional filter
+            if let Some(ref filter) = args.filter {
+                if args.exact {
+                    if name != *filter {
+                        return None;
+                    }
+                } else if !name.contains(filter) {
+                    return None;
+                }
+            }
+            // skip filters
+            if args.skip.iter().any(|s| name.contains(s)) {
+                return None;
+            }
+            // ignored/include-ignored handling; we consider "ignored" == !can_run
+            let ignored = !*can_run;
+            if args.ignored {
+                if !ignored {
+                    return None;
+                }
+            } else if !args.include_ignored {
+                if ignored {
+                    return None;
+                }
+            }
+            Some(test)
+        })
+        .collect()
+}
+
+/// Print human-readable artifact requirements for selected tests.
+fn print_human(selected: &[&Test]) {
+    for test in selected {
+        println!("{}:", test.name());
+        for artifact in test.artifact_requirements.required_artifacts() {
+            println!("required: {artifact:?}");
+        }
+        for artifact in test.artifact_requirements.optional_artifacts() {
+            println!("optional: {artifact:?}");
+        }
+        println!();
+    }
+}
+
+/// Print JSON artifact requirements for selected tests.
+fn print_json(selected: &[&Test]) {
+    let infos: Vec<TestInfo> = selected
+        .iter()
+        .map(|test| {
+            let required = test
+                .artifact_requirements
+                .required_artifacts()
+                .map(|a| format!("{a:?}"))
+                .collect();
+            let optional = test
+                .artifact_requirements
+                .optional_artifacts()
+                .map(|a| format!("{a:?}"))
+                .collect();
+            TestInfo {
+                name: test.name(),
+                required,
+                optional,
+            }
+        })
+        .collect();
+
+    serde_json::to_writer_pretty(std::io::stdout(), &infos).expect("failed to write json");
+    println!();
 }
 
 /// Entry point for test binaries.
@@ -295,17 +401,18 @@ pub fn test_main(
     resolve: fn(&str, TestArtifactRequirements) -> anyhow::Result<TestArtifacts>,
 ) -> ! {
     let mut args = <Options as clap::Parser>::parse();
-    if args.list_required_artifacts {
-        // FUTURE: write this in a machine readable format.
-        for test in Test::all() {
-            println!("{}:", test.name());
-            for artifact in test.artifact_requirements.required_artifacts() {
-                println!("required: {artifact:?}");
-            }
-            for artifact in test.artifact_requirements.optional_artifacts() {
-                println!("optional: {artifact:?}");
-            }
-            println!();
+
+    // Create the host context early so we can determine which tests are ignored.
+    let host_context = futures::executor::block_on(HostContext::new());
+
+    // Collect tests with whether they can run.
+    let tests_with_can_run = collect_tests_with_can_run(&host_context);
+
+    if let Some(format) = args.list_required_artifacts {
+        let selected = select_tests(&tests_with_can_run, &args.inner);
+        match format {
+            ArtifactListFormat::Human => print_human(&selected),
+            ArtifactListFormat::Json => print_json(&selected),
         }
         std::process::exit(0);
     }
@@ -319,14 +426,9 @@ pub fn test_main(
     }
     args.inner.test_threads = Some(1);
 
-    // Create the host context once to avoid repeated expensive queries
-    let host_context = futures::executor::block_on(HostContext::new());
-
-    let trials = Test::all()
-        .map(|test| {
-            let can_run = can_run_test_with_context(test.test.0.host_requirements(), &host_context);
-            test.trial(resolve).with_ignored_flag(!can_run)
-        })
+    let trials = tests_with_can_run
+        .into_iter()
+        .map(|(test, can_run)| test.trial(resolve).with_ignored_flag(!can_run))
         .collect();
 
     libtest_mimic::run(&args.inner, trials).exit();

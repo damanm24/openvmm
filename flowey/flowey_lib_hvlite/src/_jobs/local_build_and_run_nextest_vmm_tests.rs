@@ -716,45 +716,9 @@ impl SimpleFlowNode for Node {
             nextest_archive.map(ctx, |x| Some(x.archive_file)),
         ));
 
-        let vmm_test_artifacts_dir = test_content_dir.join("images");
-        fs_err::create_dir_all(&vmm_test_artifacts_dir)?;
-        ctx.req(
-            crate::download_openvmm_vmm_tests_artifacts::Request::CustomCacheDir(
-                vmm_test_artifacts_dir,
-            ),
-        );
-
-        ctx.req(crate::download_openvmm_vmm_tests_artifacts::Request::Download(test_artifacts));
-        let test_artifacts_dir =
-            ctx.reqv(crate::download_openvmm_vmm_tests_artifacts::Request::GetDownloadFolder);
-
-        ctx.req(crate::install_vmm_tests_deps::Request::Select(deps));
-        let dep_install_cmds = ctx.reqv(crate::install_vmm_tests_deps::Request::GetCommands);
-
         // use the copied archive file
         let nextest_archive_file = test_content_dir.join(nextest_archive_file);
-
-        let openvmm_repo_path = ctx.reqv(crate::git_checkout_openvmm_repo::req::GetRepoDir);
-
-        let nextest_config_file = Path::new("nextest.toml");
-        let nextest_config_file_src = openvmm_repo_path.map(ctx, move |p| {
-            Some(p.join(".config").join(nextest_config_file))
-        });
-        copy_to_dir.push((nextest_config_file.to_owned(), nextest_config_file_src));
-        let nextest_config_file = test_content_dir.join(nextest_config_file);
-
-        let cargo_toml_file = Path::new("Cargo.toml");
-        let repo_cargo_toml_file_src =
-            openvmm_repo_path.map(ctx, move |p| Some(p.join(cargo_toml_file)));
-        let crate_cargo_toml_file = PathBuf::new()
-            .join("vmm_tests")
-            .join("vmm_tests")
-            .join(cargo_toml_file);
-        let crate_cargo_toml_file_src = crate_cargo_toml_file.clone();
-        let crate_cargo_toml_file_src =
-            openvmm_repo_path.map(ctx, move |p| Some(p.join(crate_cargo_toml_file_src)));
-        copy_to_dir.push((cargo_toml_file.to_owned(), repo_cargo_toml_file_src));
-        copy_to_dir.push((crate_cargo_toml_file, crate_cargo_toml_file_src));
+        let nextest_profile = crate::run_cargo_nextest_run::NextestProfile::Default;
 
         let target = target.as_triple();
         let nextest_bin = Path::new(match target.operating_system {
@@ -771,6 +735,60 @@ impl SimpleFlowNode for Node {
             .map(ctx, Some);
         copy_to_dir.push((nextest_bin.to_owned(), nextest_bin_src));
         let nextest_bin = test_content_dir.join(nextest_bin);
+
+        let openvmm_repo_path = ctx.reqv(crate::git_checkout_openvmm_repo::req::GetRepoDir);
+        let nextest_config_file = Path::new("nextest.toml");
+        let nextest_config_file_src = openvmm_repo_path.map(ctx, move |p| {
+            Some(p.join(".config").join(nextest_config_file))
+        });
+        copy_to_dir.push((nextest_config_file.to_owned(), nextest_config_file_src));
+        let nextest_config_file = test_content_dir.join(nextest_config_file);
+
+        let nextest_run_cmd = ctx.reqv(|v| flowey_lib_common::gen_cargo_nextest_run_cmd::Request {
+            run_kind_deps: RunKindDeps::RunFromArchive {
+                archive_file: ReadVar::from_static(nextest_archive_file.clone()),
+                nextest_bin: ReadVar::from_static(nextest_bin.clone()),
+                target: ReadVar::from_static(target.clone()),
+            },
+            working_dir: ReadVar::from_static(test_content_dir.clone()),
+            config_file: ReadVar::from_static(nextest_config_file.clone()),
+            tool_config_files: Vec::new(),
+            nextest_profile: nextest_profile.as_str().to_owned(),
+            nextest_filter_expr: Some(nextest_filter_expr.clone()),
+            run_ignored: false,
+            fail_fast: None,
+            extra_env: Some(extra_env.clone()),
+            portable: true,
+            command: v,
+        });
+
+        let vmm_test_artifacts_dir = test_content_dir.join("images");
+        fs_err::create_dir_all(&vmm_test_artifacts_dir)?;
+        ctx.req(
+            crate::download_openvmm_vmm_tests_artifacts::Request::CustomCacheDir(
+                vmm_test_artifacts_dir,
+            ),
+        );
+
+        ctx.req(crate::download_openvmm_vmm_tests_artifacts::Request::Download(test_artifacts));
+        let test_artifacts_dir =
+            ctx.reqv(crate::download_openvmm_vmm_tests_artifacts::Request::GetDownloadFolder);
+
+        ctx.req(crate::install_vmm_tests_deps::Request::Select(deps));
+        let dep_install_cmds = ctx.reqv(crate::install_vmm_tests_deps::Request::GetCommands);
+
+        let cargo_toml_file = Path::new("Cargo.toml");
+        let repo_cargo_toml_file_src =
+            openvmm_repo_path.map(ctx, move |p| Some(p.join(cargo_toml_file)));
+        let crate_cargo_toml_file = PathBuf::new()
+            .join("vmm_tests")
+            .join("vmm_tests")
+            .join(cargo_toml_file);
+        let crate_cargo_toml_file_src = crate_cargo_toml_file.clone();
+        let crate_cargo_toml_file_src =
+            openvmm_repo_path.map(ctx, move |p| Some(p.join(crate_cargo_toml_file_src)));
+        copy_to_dir.push((cargo_toml_file.to_owned(), repo_cargo_toml_file_src));
+        copy_to_dir.push((crate_cargo_toml_file, crate_cargo_toml_file_src));
 
         let release_igvm_files =
             ctx.reqv(
