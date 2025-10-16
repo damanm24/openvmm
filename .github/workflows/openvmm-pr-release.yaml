@@ -16,7 +16,14 @@ on:
     - main
     - release/*
     types:
+    - opened
+    - synchronize
+    - reopened
+    - ready_for_review
     - labeled
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   job0:
     name: xtask fmt (windows)
@@ -437,7 +444,7 @@ jobs:
     - name: check if openvmm needs to be cloned
       run: |-
         flowey.exe e 10 flowey_lib_common::git_checkout 0
-        flowey.exe v 10 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar6
+        flowey.exe v 10 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar5
         flowey.exe v 10 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
       shell: bash
     - id: flowey_lib_common__git_checkout__1
@@ -445,7 +452,7 @@ jobs:
       with:
         fetch-depth: '1'
         path: repo0
-        persist-credentials: ${{ env.floweyvar6 }}
+        persist-credentials: ${{ env.floweyvar5 }}
       name: checkout repo openvmm
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report cloned repo directories
@@ -465,14 +472,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 10 flowey_lib_common::cache 4
-        flowey.exe v 10 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 10 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 10 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 10 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__5
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -539,14 +546,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 10 flowey_lib_common::cache 0
-        flowey.exe v 10 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar2
-        flowey.exe v 10 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 10 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar1
+        flowey.exe v 10 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar2
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar2 }}
-        path: ${{ env.floweyvar3 }}
+        key: ${{ env.floweyvar1 }}
+        path: ${{ env.floweyvar2 }}
       name: 'Restore cache: cargo-nextest'
     - name: downloading cargo-nextest
       run: |-
@@ -586,17 +593,7 @@ jobs:
         flowey.exe e 10 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 0
         flowey.exe e 10 flowey_lib_common::publish_test_results 0
         flowey.exe e 10 flowey_lib_common::publish_test_results 1
-        flowey.exe e 10 flowey_lib_common::publish_test_results 2
-        flowey.exe v 10 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 10 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-windows-unit-tests-junit-xml
-        path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-windows-unit-tests (JUnit XML)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 10 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 1
       shell: bash
@@ -710,14 +707,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 11 flowey_lib_common::cache 4
-        flowey v 11 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey v 11 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey v 11 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey v 11 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__5
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -736,7 +733,7 @@ jobs:
     - name: check if openvmm needs to be cloned
       run: |-
         flowey e 11 flowey_lib_common::git_checkout 0
-        flowey v 11 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar6
+        flowey v 11 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar5
         flowey v 11 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
       shell: bash
     - id: flowey_lib_common__git_checkout__1
@@ -744,7 +741,7 @@ jobs:
       with:
         fetch-depth: '1'
         path: repo0
-        persist-credentials: ${{ env.floweyvar6 }}
+        persist-credentials: ${{ env.floweyvar5 }}
       name: checkout repo openvmm
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report cloned repo directories
@@ -837,14 +834,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 11 flowey_lib_common::cache 0
-        flowey v 11 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar2
-        flowey v 11 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar3
+        flowey v 11 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar1
+        flowey v 11 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar2
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar2 }}
-        path: ${{ env.floweyvar3 }}
+        key: ${{ env.floweyvar1 }}
+        path: ${{ env.floweyvar2 }}
       name: 'Restore cache: cargo-nextest'
     - name: downloading cargo-nextest
       run: |-
@@ -889,17 +886,7 @@ jobs:
         flowey e 11 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 0
         flowey e 11 flowey_lib_common::publish_test_results 0
         flowey e 11 flowey_lib_common::publish_test_results 1
-        flowey e 11 flowey_lib_common::publish_test_results 2
-        flowey v 11 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey v 11 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-linux-unit-tests-junit-xml
-        path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-linux-unit-tests (JUnit XML)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey e 11 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 1
       shell: bash
@@ -1004,7 +991,7 @@ jobs:
     - name: check if openvmm needs to be cloned
       run: |-
         flowey e 12 flowey_lib_common::git_checkout 0
-        flowey v 12 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar6
+        flowey v 12 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar5
         flowey v 12 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
       shell: bash
     - id: flowey_lib_common__git_checkout__1
@@ -1012,7 +999,7 @@ jobs:
       with:
         fetch-depth: '1'
         path: repo0
-        persist-credentials: ${{ env.floweyvar6 }}
+        persist-credentials: ${{ env.floweyvar5 }}
       name: checkout repo openvmm
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report cloned repo directories
@@ -1036,14 +1023,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 12 flowey_lib_common::cache 4
-        flowey v 12 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey v 12 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey v 12 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey v 12 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__5
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -1143,14 +1130,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 12 flowey_lib_common::cache 0
-        flowey v 12 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar2
-        flowey v 12 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar3
+        flowey v 12 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar1
+        flowey v 12 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar2
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar2 }}
-        path: ${{ env.floweyvar3 }}
+        key: ${{ env.floweyvar1 }}
+        path: ${{ env.floweyvar2 }}
       name: 'Restore cache: cargo-nextest'
     - name: downloading cargo-nextest
       run: |-
@@ -1195,17 +1182,7 @@ jobs:
         flowey e 12 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 0
         flowey e 12 flowey_lib_common::publish_test_results 0
         flowey e 12 flowey_lib_common::publish_test_results 1
-        flowey e 12 flowey_lib_common::publish_test_results 2
-        flowey v 12 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey v 12 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-linux-musl-unit-tests-junit-xml
-        path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-linux-musl-unit-tests (JUnit XML)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey e 12 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 1
       shell: bash
@@ -1308,14 +1285,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 13 flowey_lib_common::cache 0
-        flowey.exe v 13 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar2
-        flowey.exe v 13 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 13 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar1
+        flowey.exe v 13 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar2
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar2 }}
-        path: ${{ env.floweyvar3 }}
+        key: ${{ env.floweyvar1 }}
+        path: ${{ env.floweyvar2 }}
       name: 'Restore cache: cargo-nextest'
     - name: downloading cargo-nextest
       run: |-
@@ -1343,7 +1320,7 @@ jobs:
     - name: check if openvmm needs to be cloned
       run: |-
         flowey.exe e 13 flowey_lib_common::git_checkout 0
-        flowey.exe v 13 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar6
+        flowey.exe v 13 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar5
         flowey.exe v 13 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
       shell: bash
     - id: flowey_lib_common__git_checkout__1
@@ -1351,7 +1328,7 @@ jobs:
       with:
         fetch-depth: '1'
         path: repo0
-        persist-credentials: ${{ env.floweyvar6 }}
+        persist-credentials: ${{ env.floweyvar5 }}
       name: checkout repo openvmm
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report cloned repo directories
@@ -1371,14 +1348,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 13 flowey_lib_common::cache 4
-        flowey.exe v 13 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 13 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 13 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 13 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__5
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -1426,17 +1403,7 @@ jobs:
         flowey.exe e 13 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 0
         flowey.exe e 13 flowey_lib_common::publish_test_results 0
         flowey.exe e 13 flowey_lib_common::publish_test_results 1
-        flowey.exe e 13 flowey_lib_common::publish_test_results 2
-        flowey.exe v 13 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 13 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
-      uses: actions/upload-artifact@v4
-      with:
-        name: aarch64-windows-unit-tests-junit-xml
-        path: ${{ env.floweyvar1 }}
-      name: 'publish test results: aarch64-windows-unit-tests (JUnit XML)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 13 flowey_lib_hvlite::_jobs::build_and_run_nextest_unit_tests 1
       shell: bash
@@ -1486,6 +1453,10 @@ jobs:
         cat <<'EOF' | flowey.exe v 14 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-intel-vmm-tests-results"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-intel-vmm-tests-results" | flowey.exe v 14 'artifact_publish_from_x64-windows-intel-vmm-tests-results' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-intel-vmm-tests-results-junit-xml"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-intel-vmm-tests-results-junit-xml" | flowey.exe v 14 'artifact_publish_from_x64-windows-intel-vmm-tests-results-junit-xml' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-guest_test_uefi" | flowey.exe v 14 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-pipette" | flowey.exe v 14 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-tmk_vmm" | flowey.exe v 14 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
@@ -1498,8 +1469,55 @@ jobs:
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmgstool" | flowey.exe v 14 'artifact_use_from_x64-windows-vmgstool' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmm-tests-archive" | flowey.exe v 14 'artifact_use_from_x64-windows-vmm-tests-archive' --is-raw-string update
       shell: bash
-    - name: creating new test content dir
+    - name: create cargo-nextest cache dir
       run: |-
+        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 0
+        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 1
+        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 2
+        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey.exe e 14 flowey_lib_common::cache 4
+        flowey.exe v 14 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 14 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar6
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar5 }}
+        path: ${{ env.floweyvar6 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 14 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 14 flowey_lib_common::cache 6
+        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: check if openvmm needs to be cloned
+      run: |-
+        flowey.exe e 14 flowey_lib_common::git_checkout 0
+        flowey.exe v 14 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar2
+        flowey.exe v 14 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__git_checkout__1
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '1'
+        path: repo0
+        persist-credentials: ${{ env.floweyvar2 }}
+      name: checkout repo openvmm
+      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
+    - name: report cloned repo directories
+      run: |-
+        flowey.exe v 14 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        ${{ github.workspace }}
+        EOF
+        flowey.exe e 14 flowey_lib_common::git_checkout 3
+        flowey.exe e 14 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey.exe e 14 flowey_lib_hvlite::run_cargo_nextest_run 0
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 4
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 5
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 1
@@ -1508,7 +1526,9 @@ jobs:
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 2
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 3
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 8
-        flowey.exe e 14 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: creating new test content dir
+      run: flowey.exe e 14 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
       shell: bash
     - name: resolve OpenHCL igvm artifact
       run: flowey.exe e 14 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
@@ -1519,14 +1539,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 14 flowey_lib_common::cache 0
-        flowey.exe v 14 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 14 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 14 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 14 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: azcopy'
     - name: installing azcopy
       run: |-
@@ -1550,14 +1570,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 14 flowey_lib_common::cache 8
-        flowey.exe v 14 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar8
-        flowey.exe v 14 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 14 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar7
+        flowey.exe v 14 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar8
       shell: bash
     - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar8 }}
-        path: ${{ env.floweyvar9 }}
+        key: ${{ env.floweyvar7 }}
+        path: ${{ env.floweyvar8 }}
       name: 'Restore cache: gh-cli'
     - name: installing gh
       run: |-
@@ -1588,14 +1608,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 14 flowey_lib_common::cache 12
-        flowey.exe v 14 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar10
-        flowey.exe v 14 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar11
+        flowey.exe v 14 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 14 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar10
       shell: bash
     - id: flowey_lib_common__cache__13
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar10 }}
-        path: ${{ env.floweyvar11 }}
+        key: ${{ env.floweyvar9 }}
+        path: ${{ env.floweyvar10 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -1612,57 +1632,8 @@ jobs:
       run: flowey.exe e 14 flowey_lib_hvlite::download_uefi_mu_msvm 0
       shell: bash
     - name: setting up vmm_tests env
-      run: flowey.exe e 14 flowey_lib_hvlite::init_vmm_tests_env 0
-      shell: bash
-    - name: create cargo-nextest cache dir
       run: |-
-        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 0
-        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 1
-        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 2
-        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 3
-      shell: bash
-    - name: Pre-processing cache vars
-      run: |-
-        flowey.exe e 14 flowey_lib_common::cache 4
-        flowey.exe v 14 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
-        flowey.exe v 14 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
-      shell: bash
-    - id: flowey_lib_common__cache__5
-      uses: actions/cache@v4
-      with:
-        key: ${{ env.floweyvar6 }}
-        path: ${{ env.floweyvar7 }}
-      name: 'Restore cache: cargo-nextest'
-    - name: downloading cargo-nextest
-      run: |-
-        flowey.exe v 14 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
-        EOF
-        flowey.exe e 14 flowey_lib_common::cache 6
-        flowey.exe e 14 flowey_lib_common::download_cargo_nextest 4
-      shell: bash
-    - name: check if openvmm needs to be cloned
-      run: |-
-        flowey.exe e 14 flowey_lib_common::git_checkout 0
-        flowey.exe v 14 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar3
-        flowey.exe v 14 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__git_checkout__1
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: '1'
-        path: repo0
-        persist-credentials: ${{ env.floweyvar3 }}
-      name: checkout repo openvmm
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: report cloned repo directories
-      run: |-
-        flowey.exe v 14 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
-        ${{ github.workspace }}
-        EOF
-        flowey.exe e 14 flowey_lib_common::git_checkout 3
-        flowey.exe e 14 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-        flowey.exe e 14 flowey_lib_hvlite::run_cargo_nextest_run 0
+        flowey.exe e 14 flowey_lib_hvlite::init_vmm_tests_env 0
         flowey.exe e 14 flowey_lib_hvlite::run_cargo_nextest_run 1
         flowey.exe e 14 flowey_core::pipeline::artifact::resolve 9
         flowey.exe e 14 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
@@ -1677,34 +1648,25 @@ jobs:
       run: |-
         flowey.exe e 14 flowey_lib_common::run_cargo_nextest_run 0
         flowey.exe e 14 flowey_lib_common::run_cargo_nextest_run 1
-        flowey.exe e 14 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-        flowey.exe e 14 flowey_lib_common::publish_test_results 4
-        flowey.exe e 14 flowey_lib_common::publish_test_results 5
-        flowey.exe v 14 'flowey_lib_common::publish_test_results:9:flowey_lib_common/src/publish_test_results.rs:152:62' --is-raw-string --condvar flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57 write-to-env github floweyvar2
-        flowey.exe v 14 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__publish_test_results__6
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-windows-intel-vmm-tests-logs
-        path: ${{ env.floweyvar2 }}
-      name: 'publish test results: x64-windows-intel-vmm-tests (logs)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: 🦀 flowey rust steps
-      run: |-
         flowey.exe e 14 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
         flowey.exe e 14 flowey_lib_common::publish_test_results 0
         flowey.exe e 14 flowey_lib_common::publish_test_results 1
-        flowey.exe e 14 flowey_lib_common::publish_test_results 2
-        flowey.exe v 14 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 14 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
+    - name: 'copy test results to artifact directory: x64-windows-intel-vmm-tests (JUnit XML)'
+      run: |-
+        flowey.exe e 14 flowey_lib_common::publish_test_results 2
+        flowey.exe e 14 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
+        flowey.exe e 14 flowey_lib_common::publish_test_results 3
+        flowey.exe e 14 flowey_lib_common::publish_test_results 4
+        flowey.exe v 14 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:151:70' --is-raw-string --condvar flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65 write-to-env github floweyvar1
+        flowey.exe v 14 'flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__publish_test_results__5
       uses: actions/upload-artifact@v4
       with:
-        name: x64-windows-intel-vmm-tests-junit-xml
+        name: x64-windows-intel-vmm-tests-logs
         path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-windows-intel-vmm-tests (JUnit XML)'
+      name: 'publish test results: x64-windows-intel-vmm-tests (logs)'
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 14 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
@@ -1721,6 +1683,20 @@ jobs:
     - name: 'validate cache entry: gh-release-download'
       run: flowey.exe e 14 flowey_lib_common::cache 15
       shell: bash
+    - name: 🌼📦 Publish x64-windows-intel-vmm-tests-results
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-intel-vmm-tests-results
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-intel-vmm-tests-results/
+        include-hidden-files: true
+      if: always()
+    - name: 🌼📦 Publish x64-windows-intel-vmm-tests-results-junit-xml
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-intel-vmm-tests-results-junit-xml
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-intel-vmm-tests-results-junit-xml/
+        include-hidden-files: true
+      if: always()
   job15:
     name: run vmm-tests [x64-windows-intel-tdx]
     runs-on:
@@ -1760,6 +1736,10 @@ jobs:
         cat <<'EOF' | flowey.exe v 15 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-intel-tdx-vmm-tests-results"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-intel-tdx-vmm-tests-results" | flowey.exe v 15 'artifact_publish_from_x64-windows-intel-tdx-vmm-tests-results' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-intel-tdx-vmm-tests-results-junit-xml"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-intel-tdx-vmm-tests-results-junit-xml" | flowey.exe v 15 'artifact_publish_from_x64-windows-intel-tdx-vmm-tests-results-junit-xml' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-guest_test_uefi" | flowey.exe v 15 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-pipette" | flowey.exe v 15 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-tmk_vmm" | flowey.exe v 15 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
@@ -1772,8 +1752,55 @@ jobs:
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmgstool" | flowey.exe v 15 'artifact_use_from_x64-windows-vmgstool' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmm-tests-archive" | flowey.exe v 15 'artifact_use_from_x64-windows-vmm-tests-archive' --is-raw-string update
       shell: bash
-    - name: creating new test content dir
+    - name: create cargo-nextest cache dir
       run: |-
+        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 0
+        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 1
+        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 2
+        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey.exe e 15 flowey_lib_common::cache 4
+        flowey.exe v 15 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 15 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar6
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar5 }}
+        path: ${{ env.floweyvar6 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 15 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 15 flowey_lib_common::cache 6
+        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: check if openvmm needs to be cloned
+      run: |-
+        flowey.exe e 15 flowey_lib_common::git_checkout 0
+        flowey.exe v 15 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar2
+        flowey.exe v 15 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__git_checkout__1
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '1'
+        path: repo0
+        persist-credentials: ${{ env.floweyvar2 }}
+      name: checkout repo openvmm
+      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
+    - name: report cloned repo directories
+      run: |-
+        flowey.exe v 15 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        ${{ github.workspace }}
+        EOF
+        flowey.exe e 15 flowey_lib_common::git_checkout 3
+        flowey.exe e 15 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey.exe e 15 flowey_lib_hvlite::run_cargo_nextest_run 0
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 4
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 5
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 1
@@ -1782,7 +1809,9 @@ jobs:
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 2
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 3
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 8
-        flowey.exe e 15 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: creating new test content dir
+      run: flowey.exe e 15 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
       shell: bash
     - name: resolve OpenHCL igvm artifact
       run: flowey.exe e 15 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
@@ -1793,14 +1822,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 15 flowey_lib_common::cache 0
-        flowey.exe v 15 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 15 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 15 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 15 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: azcopy'
     - name: installing azcopy
       run: |-
@@ -1824,14 +1853,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 15 flowey_lib_common::cache 8
-        flowey.exe v 15 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar8
-        flowey.exe v 15 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 15 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar7
+        flowey.exe v 15 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar8
       shell: bash
     - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar8 }}
-        path: ${{ env.floweyvar9 }}
+        key: ${{ env.floweyvar7 }}
+        path: ${{ env.floweyvar8 }}
       name: 'Restore cache: gh-cli'
     - name: installing gh
       run: |-
@@ -1862,14 +1891,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 15 flowey_lib_common::cache 12
-        flowey.exe v 15 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar10
-        flowey.exe v 15 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar11
+        flowey.exe v 15 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 15 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar10
       shell: bash
     - id: flowey_lib_common__cache__13
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar10 }}
-        path: ${{ env.floweyvar11 }}
+        key: ${{ env.floweyvar9 }}
+        path: ${{ env.floweyvar10 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -1886,57 +1915,8 @@ jobs:
       run: flowey.exe e 15 flowey_lib_hvlite::download_uefi_mu_msvm 0
       shell: bash
     - name: setting up vmm_tests env
-      run: flowey.exe e 15 flowey_lib_hvlite::init_vmm_tests_env 0
-      shell: bash
-    - name: create cargo-nextest cache dir
       run: |-
-        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 0
-        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 1
-        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 2
-        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 3
-      shell: bash
-    - name: Pre-processing cache vars
-      run: |-
-        flowey.exe e 15 flowey_lib_common::cache 4
-        flowey.exe v 15 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
-        flowey.exe v 15 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
-      shell: bash
-    - id: flowey_lib_common__cache__5
-      uses: actions/cache@v4
-      with:
-        key: ${{ env.floweyvar6 }}
-        path: ${{ env.floweyvar7 }}
-      name: 'Restore cache: cargo-nextest'
-    - name: downloading cargo-nextest
-      run: |-
-        flowey.exe v 15 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
-        EOF
-        flowey.exe e 15 flowey_lib_common::cache 6
-        flowey.exe e 15 flowey_lib_common::download_cargo_nextest 4
-      shell: bash
-    - name: check if openvmm needs to be cloned
-      run: |-
-        flowey.exe e 15 flowey_lib_common::git_checkout 0
-        flowey.exe v 15 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar3
-        flowey.exe v 15 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__git_checkout__1
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: '1'
-        path: repo0
-        persist-credentials: ${{ env.floweyvar3 }}
-      name: checkout repo openvmm
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: report cloned repo directories
-      run: |-
-        flowey.exe v 15 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
-        ${{ github.workspace }}
-        EOF
-        flowey.exe e 15 flowey_lib_common::git_checkout 3
-        flowey.exe e 15 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-        flowey.exe e 15 flowey_lib_hvlite::run_cargo_nextest_run 0
+        flowey.exe e 15 flowey_lib_hvlite::init_vmm_tests_env 0
         flowey.exe e 15 flowey_lib_hvlite::run_cargo_nextest_run 1
         flowey.exe e 15 flowey_core::pipeline::artifact::resolve 9
         flowey.exe e 15 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
@@ -1956,34 +1936,25 @@ jobs:
       run: |-
         flowey.exe e 15 flowey_lib_common::run_cargo_nextest_run 0
         flowey.exe e 15 flowey_lib_common::run_cargo_nextest_run 1
-        flowey.exe e 15 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-        flowey.exe e 15 flowey_lib_common::publish_test_results 4
-        flowey.exe e 15 flowey_lib_common::publish_test_results 5
-        flowey.exe v 15 'flowey_lib_common::publish_test_results:9:flowey_lib_common/src/publish_test_results.rs:152:62' --is-raw-string --condvar flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57 write-to-env github floweyvar2
-        flowey.exe v 15 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__publish_test_results__6
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-windows-intel-tdx-vmm-tests-logs
-        path: ${{ env.floweyvar2 }}
-      name: 'publish test results: x64-windows-intel-tdx-vmm-tests (logs)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: 🦀 flowey rust steps
-      run: |-
         flowey.exe e 15 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
         flowey.exe e 15 flowey_lib_common::publish_test_results 0
         flowey.exe e 15 flowey_lib_common::publish_test_results 1
-        flowey.exe e 15 flowey_lib_common::publish_test_results 2
-        flowey.exe v 15 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 15 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
+    - name: 'copy test results to artifact directory: x64-windows-intel-tdx-vmm-tests (JUnit XML)'
+      run: |-
+        flowey.exe e 15 flowey_lib_common::publish_test_results 2
+        flowey.exe e 15 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
+        flowey.exe e 15 flowey_lib_common::publish_test_results 3
+        flowey.exe e 15 flowey_lib_common::publish_test_results 4
+        flowey.exe v 15 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:151:70' --is-raw-string --condvar flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65 write-to-env github floweyvar1
+        flowey.exe v 15 'flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__publish_test_results__5
       uses: actions/upload-artifact@v4
       with:
-        name: x64-windows-intel-tdx-vmm-tests-junit-xml
+        name: x64-windows-intel-tdx-vmm-tests-logs
         path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-windows-intel-tdx-vmm-tests (JUnit XML)'
+      name: 'publish test results: x64-windows-intel-tdx-vmm-tests (logs)'
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 15 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
@@ -2000,6 +1971,20 @@ jobs:
     - name: 'validate cache entry: gh-release-download'
       run: flowey.exe e 15 flowey_lib_common::cache 15
       shell: bash
+    - name: 🌼📦 Publish x64-windows-intel-tdx-vmm-tests-results
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-intel-tdx-vmm-tests-results
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-intel-tdx-vmm-tests-results/
+        include-hidden-files: true
+      if: always()
+    - name: 🌼📦 Publish x64-windows-intel-tdx-vmm-tests-results-junit-xml
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-intel-tdx-vmm-tests-results-junit-xml
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-intel-tdx-vmm-tests-results-junit-xml/
+        include-hidden-files: true
+      if: always()
   job16:
     name: run vmm-tests [x64-windows-amd]
     runs-on:
@@ -2037,6 +2022,10 @@ jobs:
         cat <<'EOF' | flowey.exe v 16 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-amd-vmm-tests-results"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-amd-vmm-tests-results" | flowey.exe v 16 'artifact_publish_from_x64-windows-amd-vmm-tests-results' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-amd-vmm-tests-results-junit-xml"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-amd-vmm-tests-results-junit-xml" | flowey.exe v 16 'artifact_publish_from_x64-windows-amd-vmm-tests-results-junit-xml' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-guest_test_uefi" | flowey.exe v 16 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-pipette" | flowey.exe v 16 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-tmk_vmm" | flowey.exe v 16 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
@@ -2049,8 +2038,55 @@ jobs:
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmgstool" | flowey.exe v 16 'artifact_use_from_x64-windows-vmgstool' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmm-tests-archive" | flowey.exe v 16 'artifact_use_from_x64-windows-vmm-tests-archive' --is-raw-string update
       shell: bash
-    - name: creating new test content dir
+    - name: create cargo-nextest cache dir
       run: |-
+        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 0
+        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 1
+        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 2
+        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey.exe e 16 flowey_lib_common::cache 4
+        flowey.exe v 16 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 16 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar6
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar5 }}
+        path: ${{ env.floweyvar6 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 16 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 16 flowey_lib_common::cache 6
+        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: check if openvmm needs to be cloned
+      run: |-
+        flowey.exe e 16 flowey_lib_common::git_checkout 0
+        flowey.exe v 16 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar2
+        flowey.exe v 16 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__git_checkout__1
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '1'
+        path: repo0
+        persist-credentials: ${{ env.floweyvar2 }}
+      name: checkout repo openvmm
+      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
+    - name: report cloned repo directories
+      run: |-
+        flowey.exe v 16 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        ${{ github.workspace }}
+        EOF
+        flowey.exe e 16 flowey_lib_common::git_checkout 3
+        flowey.exe e 16 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey.exe e 16 flowey_lib_hvlite::run_cargo_nextest_run 0
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 4
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 5
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 1
@@ -2059,7 +2095,9 @@ jobs:
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 2
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 3
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 8
-        flowey.exe e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: creating new test content dir
+      run: flowey.exe e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
       shell: bash
     - name: resolve OpenHCL igvm artifact
       run: flowey.exe e 16 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
@@ -2070,14 +2108,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 16 flowey_lib_common::cache 0
-        flowey.exe v 16 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 16 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 16 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 16 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: azcopy'
     - name: installing azcopy
       run: |-
@@ -2101,14 +2139,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 16 flowey_lib_common::cache 8
-        flowey.exe v 16 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar8
-        flowey.exe v 16 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 16 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar7
+        flowey.exe v 16 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar8
       shell: bash
     - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar8 }}
-        path: ${{ env.floweyvar9 }}
+        key: ${{ env.floweyvar7 }}
+        path: ${{ env.floweyvar8 }}
       name: 'Restore cache: gh-cli'
     - name: installing gh
       run: |-
@@ -2139,14 +2177,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 16 flowey_lib_common::cache 12
-        flowey.exe v 16 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar10
-        flowey.exe v 16 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar11
+        flowey.exe v 16 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 16 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar10
       shell: bash
     - id: flowey_lib_common__cache__13
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar10 }}
-        path: ${{ env.floweyvar11 }}
+        key: ${{ env.floweyvar9 }}
+        path: ${{ env.floweyvar10 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -2163,57 +2201,8 @@ jobs:
       run: flowey.exe e 16 flowey_lib_hvlite::download_uefi_mu_msvm 0
       shell: bash
     - name: setting up vmm_tests env
-      run: flowey.exe e 16 flowey_lib_hvlite::init_vmm_tests_env 0
-      shell: bash
-    - name: create cargo-nextest cache dir
       run: |-
-        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 0
-        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 1
-        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 2
-        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 3
-      shell: bash
-    - name: Pre-processing cache vars
-      run: |-
-        flowey.exe e 16 flowey_lib_common::cache 4
-        flowey.exe v 16 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
-        flowey.exe v 16 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
-      shell: bash
-    - id: flowey_lib_common__cache__5
-      uses: actions/cache@v4
-      with:
-        key: ${{ env.floweyvar6 }}
-        path: ${{ env.floweyvar7 }}
-      name: 'Restore cache: cargo-nextest'
-    - name: downloading cargo-nextest
-      run: |-
-        flowey.exe v 16 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
-        EOF
-        flowey.exe e 16 flowey_lib_common::cache 6
-        flowey.exe e 16 flowey_lib_common::download_cargo_nextest 4
-      shell: bash
-    - name: check if openvmm needs to be cloned
-      run: |-
-        flowey.exe e 16 flowey_lib_common::git_checkout 0
-        flowey.exe v 16 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar3
-        flowey.exe v 16 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__git_checkout__1
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: '1'
-        path: repo0
-        persist-credentials: ${{ env.floweyvar3 }}
-      name: checkout repo openvmm
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: report cloned repo directories
-      run: |-
-        flowey.exe v 16 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
-        ${{ github.workspace }}
-        EOF
-        flowey.exe e 16 flowey_lib_common::git_checkout 3
-        flowey.exe e 16 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-        flowey.exe e 16 flowey_lib_hvlite::run_cargo_nextest_run 0
+        flowey.exe e 16 flowey_lib_hvlite::init_vmm_tests_env 0
         flowey.exe e 16 flowey_lib_hvlite::run_cargo_nextest_run 1
         flowey.exe e 16 flowey_core::pipeline::artifact::resolve 9
         flowey.exe e 16 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
@@ -2228,34 +2217,25 @@ jobs:
       run: |-
         flowey.exe e 16 flowey_lib_common::run_cargo_nextest_run 0
         flowey.exe e 16 flowey_lib_common::run_cargo_nextest_run 1
-        flowey.exe e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-        flowey.exe e 16 flowey_lib_common::publish_test_results 4
-        flowey.exe e 16 flowey_lib_common::publish_test_results 5
-        flowey.exe v 16 'flowey_lib_common::publish_test_results:9:flowey_lib_common/src/publish_test_results.rs:152:62' --is-raw-string --condvar flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57 write-to-env github floweyvar2
-        flowey.exe v 16 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__publish_test_results__6
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-windows-amd-vmm-tests-logs
-        path: ${{ env.floweyvar2 }}
-      name: 'publish test results: x64-windows-amd-vmm-tests (logs)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: 🦀 flowey rust steps
-      run: |-
         flowey.exe e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
         flowey.exe e 16 flowey_lib_common::publish_test_results 0
         flowey.exe e 16 flowey_lib_common::publish_test_results 1
-        flowey.exe e 16 flowey_lib_common::publish_test_results 2
-        flowey.exe v 16 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 16 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
+    - name: 'copy test results to artifact directory: x64-windows-amd-vmm-tests (JUnit XML)'
+      run: |-
+        flowey.exe e 16 flowey_lib_common::publish_test_results 2
+        flowey.exe e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
+        flowey.exe e 16 flowey_lib_common::publish_test_results 3
+        flowey.exe e 16 flowey_lib_common::publish_test_results 4
+        flowey.exe v 16 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:151:70' --is-raw-string --condvar flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65 write-to-env github floweyvar1
+        flowey.exe v 16 'flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__publish_test_results__5
       uses: actions/upload-artifact@v4
       with:
-        name: x64-windows-amd-vmm-tests-junit-xml
+        name: x64-windows-amd-vmm-tests-logs
         path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-windows-amd-vmm-tests (JUnit XML)'
+      name: 'publish test results: x64-windows-amd-vmm-tests (logs)'
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
@@ -2272,6 +2252,20 @@ jobs:
     - name: 'validate cache entry: gh-release-download'
       run: flowey.exe e 16 flowey_lib_common::cache 15
       shell: bash
+    - name: 🌼📦 Publish x64-windows-amd-vmm-tests-results
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-amd-vmm-tests-results
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-amd-vmm-tests-results/
+        include-hidden-files: true
+      if: always()
+    - name: 🌼📦 Publish x64-windows-amd-vmm-tests-results-junit-xml
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-amd-vmm-tests-results-junit-xml
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-amd-vmm-tests-results-junit-xml/
+        include-hidden-files: true
+      if: always()
   job17:
     name: run vmm-tests [x64-windows-amd-snp]
     runs-on:
@@ -2311,6 +2305,10 @@ jobs:
         cat <<'EOF' | flowey.exe v 17 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-amd-snp-vmm-tests-results"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-amd-snp-vmm-tests-results" | flowey.exe v 17 'artifact_publish_from_x64-windows-amd-snp-vmm-tests-results' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-amd-snp-vmm-tests-results-junit-xml"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-amd-snp-vmm-tests-results-junit-xml" | flowey.exe v 17 'artifact_publish_from_x64-windows-amd-snp-vmm-tests-results-junit-xml' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-guest_test_uefi" | flowey.exe v 17 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-pipette" | flowey.exe v 17 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-linux-musl-tmk_vmm" | flowey.exe v 17 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
@@ -2323,8 +2321,55 @@ jobs:
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmgstool" | flowey.exe v 17 'artifact_use_from_x64-windows-vmgstool' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\x64-windows-vmm-tests-archive" | flowey.exe v 17 'artifact_use_from_x64-windows-vmm-tests-archive' --is-raw-string update
       shell: bash
-    - name: creating new test content dir
+    - name: create cargo-nextest cache dir
       run: |-
+        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 0
+        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 1
+        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 2
+        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey.exe e 17 flowey_lib_common::cache 4
+        flowey.exe v 17 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 17 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar6
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar5 }}
+        path: ${{ env.floweyvar6 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 17 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 17 flowey_lib_common::cache 6
+        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: check if openvmm needs to be cloned
+      run: |-
+        flowey.exe e 17 flowey_lib_common::git_checkout 0
+        flowey.exe v 17 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar2
+        flowey.exe v 17 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__git_checkout__1
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '1'
+        path: repo0
+        persist-credentials: ${{ env.floweyvar2 }}
+      name: checkout repo openvmm
+      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
+    - name: report cloned repo directories
+      run: |-
+        flowey.exe v 17 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        ${{ github.workspace }}
+        EOF
+        flowey.exe e 17 flowey_lib_common::git_checkout 3
+        flowey.exe e 17 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey.exe e 17 flowey_lib_hvlite::run_cargo_nextest_run 0
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 4
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 5
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 1
@@ -2333,7 +2378,9 @@ jobs:
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 2
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 3
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 8
-        flowey.exe e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: creating new test content dir
+      run: flowey.exe e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
       shell: bash
     - name: resolve OpenHCL igvm artifact
       run: flowey.exe e 17 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
@@ -2344,14 +2391,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 17 flowey_lib_common::cache 0
-        flowey.exe v 17 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 17 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 17 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 17 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: azcopy'
     - name: installing azcopy
       run: |-
@@ -2375,14 +2422,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 17 flowey_lib_common::cache 8
-        flowey.exe v 17 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar8
-        flowey.exe v 17 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 17 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar7
+        flowey.exe v 17 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar8
       shell: bash
     - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar8 }}
-        path: ${{ env.floweyvar9 }}
+        key: ${{ env.floweyvar7 }}
+        path: ${{ env.floweyvar8 }}
       name: 'Restore cache: gh-cli'
     - name: installing gh
       run: |-
@@ -2413,14 +2460,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 17 flowey_lib_common::cache 12
-        flowey.exe v 17 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar10
-        flowey.exe v 17 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar11
+        flowey.exe v 17 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 17 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar10
       shell: bash
     - id: flowey_lib_common__cache__13
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar10 }}
-        path: ${{ env.floweyvar11 }}
+        key: ${{ env.floweyvar9 }}
+        path: ${{ env.floweyvar10 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -2437,57 +2484,8 @@ jobs:
       run: flowey.exe e 17 flowey_lib_hvlite::download_uefi_mu_msvm 0
       shell: bash
     - name: setting up vmm_tests env
-      run: flowey.exe e 17 flowey_lib_hvlite::init_vmm_tests_env 0
-      shell: bash
-    - name: create cargo-nextest cache dir
       run: |-
-        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 0
-        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 1
-        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 2
-        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 3
-      shell: bash
-    - name: Pre-processing cache vars
-      run: |-
-        flowey.exe e 17 flowey_lib_common::cache 4
-        flowey.exe v 17 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
-        flowey.exe v 17 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
-      shell: bash
-    - id: flowey_lib_common__cache__5
-      uses: actions/cache@v4
-      with:
-        key: ${{ env.floweyvar6 }}
-        path: ${{ env.floweyvar7 }}
-      name: 'Restore cache: cargo-nextest'
-    - name: downloading cargo-nextest
-      run: |-
-        flowey.exe v 17 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
-        EOF
-        flowey.exe e 17 flowey_lib_common::cache 6
-        flowey.exe e 17 flowey_lib_common::download_cargo_nextest 4
-      shell: bash
-    - name: check if openvmm needs to be cloned
-      run: |-
-        flowey.exe e 17 flowey_lib_common::git_checkout 0
-        flowey.exe v 17 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar3
-        flowey.exe v 17 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__git_checkout__1
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: '1'
-        path: repo0
-        persist-credentials: ${{ env.floweyvar3 }}
-      name: checkout repo openvmm
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: report cloned repo directories
-      run: |-
-        flowey.exe v 17 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
-        ${{ github.workspace }}
-        EOF
-        flowey.exe e 17 flowey_lib_common::git_checkout 3
-        flowey.exe e 17 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-        flowey.exe e 17 flowey_lib_hvlite::run_cargo_nextest_run 0
+        flowey.exe e 17 flowey_lib_hvlite::init_vmm_tests_env 0
         flowey.exe e 17 flowey_lib_hvlite::run_cargo_nextest_run 1
         flowey.exe e 17 flowey_core::pipeline::artifact::resolve 9
         flowey.exe e 17 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
@@ -2507,34 +2505,25 @@ jobs:
       run: |-
         flowey.exe e 17 flowey_lib_common::run_cargo_nextest_run 0
         flowey.exe e 17 flowey_lib_common::run_cargo_nextest_run 1
-        flowey.exe e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-        flowey.exe e 17 flowey_lib_common::publish_test_results 4
-        flowey.exe e 17 flowey_lib_common::publish_test_results 5
-        flowey.exe v 17 'flowey_lib_common::publish_test_results:9:flowey_lib_common/src/publish_test_results.rs:152:62' --is-raw-string --condvar flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57 write-to-env github floweyvar2
-        flowey.exe v 17 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__publish_test_results__6
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-windows-amd-snp-vmm-tests-logs
-        path: ${{ env.floweyvar2 }}
-      name: 'publish test results: x64-windows-amd-snp-vmm-tests (logs)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: 🦀 flowey rust steps
-      run: |-
         flowey.exe e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
         flowey.exe e 17 flowey_lib_common::publish_test_results 0
         flowey.exe e 17 flowey_lib_common::publish_test_results 1
-        flowey.exe e 17 flowey_lib_common::publish_test_results 2
-        flowey.exe v 17 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 17 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
+    - name: 'copy test results to artifact directory: x64-windows-amd-snp-vmm-tests (JUnit XML)'
+      run: |-
+        flowey.exe e 17 flowey_lib_common::publish_test_results 2
+        flowey.exe e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
+        flowey.exe e 17 flowey_lib_common::publish_test_results 3
+        flowey.exe e 17 flowey_lib_common::publish_test_results 4
+        flowey.exe v 17 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:151:70' --is-raw-string --condvar flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65 write-to-env github floweyvar1
+        flowey.exe v 17 'flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__publish_test_results__5
       uses: actions/upload-artifact@v4
       with:
-        name: x64-windows-amd-snp-vmm-tests-junit-xml
+        name: x64-windows-amd-snp-vmm-tests-logs
         path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-windows-amd-snp-vmm-tests (JUnit XML)'
+      name: 'publish test results: x64-windows-amd-snp-vmm-tests (logs)'
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
@@ -2551,6 +2540,20 @@ jobs:
     - name: 'validate cache entry: gh-release-download'
       run: flowey.exe e 17 flowey_lib_common::cache 15
       shell: bash
+    - name: 🌼📦 Publish x64-windows-amd-snp-vmm-tests-results
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-amd-snp-vmm-tests-results
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-amd-snp-vmm-tests-results/
+        include-hidden-files: true
+      if: always()
+    - name: 🌼📦 Publish x64-windows-amd-snp-vmm-tests-results-junit-xml
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-amd-snp-vmm-tests-results-junit-xml
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-amd-snp-vmm-tests-results-junit-xml/
+        include-hidden-files: true
+      if: always()
   job18:
     name: run vmm-tests [x64-linux]
     runs-on:
@@ -2588,6 +2591,10 @@ jobs:
         cat <<'EOF' | flowey v 18 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-linux-vmm-tests-results"
+        echo "$AgentTempDirNormal/publish_artifacts/x64-linux-vmm-tests-results" | flowey v 18 'artifact_publish_from_x64-linux-vmm-tests-results' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-linux-vmm-tests-results-junit-xml"
+        echo "$AgentTempDirNormal/publish_artifacts/x64-linux-vmm-tests-results-junit-xml" | flowey v 18 'artifact_publish_from_x64-linux-vmm-tests-results-junit-xml' --is-raw-string update
         echo "$AgentTempDirNormal/used_artifacts/x64-guest_test_uefi" | flowey v 18 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
         echo "$AgentTempDirNormal/used_artifacts/x64-linux-musl-pipette" | flowey v 18 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
         echo "$AgentTempDirNormal/used_artifacts/x64-linux-musl-tmk_vmm" | flowey v 18 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
@@ -2596,15 +2603,67 @@ jobs:
         echo "$AgentTempDirNormal/used_artifacts/x64-tmks" | flowey v 18 'artifact_use_from_x64-tmks' --is-raw-string update
         echo "$AgentTempDirNormal/used_artifacts/x64-windows-pipette" | flowey v 18 'artifact_use_from_x64-windows-pipette' --is-raw-string update
       shell: bash
-    - name: creating new test content dir
+    - name: ensure /dev/kvm is accessible
+      run: flowey e 18 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: create cargo-nextest cache dir
       run: |-
+        flowey e 18 flowey_lib_common::download_cargo_nextest 0
+        flowey e 18 flowey_lib_common::download_cargo_nextest 1
+        flowey e 18 flowey_lib_common::download_cargo_nextest 2
+        flowey e 18 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey e 18 flowey_lib_common::cache 4
+        flowey v 18 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar5
+        flowey v 18 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar6
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar5 }}
+        path: ${{ env.floweyvar6 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey v 18 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey e 18 flowey_lib_common::cache 6
+        flowey e 18 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: check if openvmm needs to be cloned
+      run: |-
+        flowey e 18 flowey_lib_common::git_checkout 0
+        flowey v 18 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar2
+        flowey v 18 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__git_checkout__1
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '1'
+        path: repo0
+        persist-credentials: ${{ env.floweyvar2 }}
+      name: checkout repo openvmm
+      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
+    - name: report cloned repo directories
+      run: |-
+        flowey v 18 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        ${{ github.workspace }}
+        EOF
+        flowey e 18 flowey_lib_common::git_checkout 3
+        flowey e 18 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey e 18 flowey_lib_hvlite::run_cargo_nextest_run 0
         flowey e 18 flowey_core::pipeline::artifact::resolve 3
         flowey e 18 flowey_core::pipeline::artifact::resolve 6
         flowey e 18 flowey_core::pipeline::artifact::resolve 1
         flowey e 18 flowey_core::pipeline::artifact::resolve 0
         flowey e 18 flowey_core::pipeline::artifact::resolve 2
         flowey e 18 flowey_core::pipeline::artifact::resolve 5
-        flowey e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: creating new test content dir
+      run: flowey e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
       shell: bash
     - name: create azcopy cache dir
       run: flowey e 18 flowey_lib_common::download_azcopy 0
@@ -2612,14 +2671,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 18 flowey_lib_common::cache 0
-        flowey v 18 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey v 18 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey v 18 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey v 18 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: azcopy'
     - name: checking if packages need to be installed
       run: |-
@@ -2649,14 +2708,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 18 flowey_lib_common::cache 8
-        flowey v 18 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar8
-        flowey v 18 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar9
+        flowey v 18 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar7
+        flowey v 18 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar8
       shell: bash
     - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar8 }}
-        path: ${{ env.floweyvar9 }}
+        key: ${{ env.floweyvar7 }}
+        path: ${{ env.floweyvar8 }}
       name: 'Restore cache: gh-cli'
     - name: installing gh
       run: |-
@@ -2687,14 +2746,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey e 18 flowey_lib_common::cache 12
-        flowey v 18 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar10
-        flowey v 18 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar11
+        flowey v 18 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar9
+        flowey v 18 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar10
       shell: bash
     - id: flowey_lib_common__cache__13
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar10 }}
-        path: ${{ env.floweyvar11 }}
+        key: ${{ env.floweyvar9 }}
+        path: ${{ env.floweyvar10 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -2711,60 +2770,8 @@ jobs:
       run: flowey e 18 flowey_lib_hvlite::download_uefi_mu_msvm 0
       shell: bash
     - name: setting up vmm_tests env
-      run: flowey e 18 flowey_lib_hvlite::init_vmm_tests_env 0
-      shell: bash
-    - name: ensure /dev/kvm is accessible
-      run: flowey e 18 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
-      shell: bash
-    - name: create cargo-nextest cache dir
       run: |-
-        flowey e 18 flowey_lib_common::download_cargo_nextest 0
-        flowey e 18 flowey_lib_common::download_cargo_nextest 1
-        flowey e 18 flowey_lib_common::download_cargo_nextest 2
-        flowey e 18 flowey_lib_common::download_cargo_nextest 3
-      shell: bash
-    - name: Pre-processing cache vars
-      run: |-
-        flowey e 18 flowey_lib_common::cache 4
-        flowey v 18 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
-        flowey v 18 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
-      shell: bash
-    - id: flowey_lib_common__cache__5
-      uses: actions/cache@v4
-      with:
-        key: ${{ env.floweyvar6 }}
-        path: ${{ env.floweyvar7 }}
-      name: 'Restore cache: cargo-nextest'
-    - name: downloading cargo-nextest
-      run: |-
-        flowey v 18 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
-        EOF
-        flowey e 18 flowey_lib_common::cache 6
-        flowey e 18 flowey_lib_common::download_cargo_nextest 4
-      shell: bash
-    - name: check if openvmm needs to be cloned
-      run: |-
-        flowey e 18 flowey_lib_common::git_checkout 0
-        flowey v 18 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar3
-        flowey v 18 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__git_checkout__1
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: '1'
-        path: repo0
-        persist-credentials: ${{ env.floweyvar3 }}
-      name: checkout repo openvmm
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: report cloned repo directories
-      run: |-
-        flowey v 18 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
-        ${{ github.workspace }}
-        EOF
-        flowey e 18 flowey_lib_common::git_checkout 3
-        flowey e 18 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-        flowey e 18 flowey_lib_hvlite::run_cargo_nextest_run 0
+        flowey e 18 flowey_lib_hvlite::init_vmm_tests_env 0
         flowey e 18 flowey_lib_hvlite::run_cargo_nextest_run 1
         flowey e 18 flowey_core::pipeline::artifact::resolve 4
         flowey e 18 flowey_lib_hvlite::test_nextest_vmm_tests_archive 1
@@ -2779,34 +2786,25 @@ jobs:
       run: |-
         flowey e 18 flowey_lib_common::run_cargo_nextest_run 0
         flowey e 18 flowey_lib_common::run_cargo_nextest_run 1
-        flowey e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-        flowey e 18 flowey_lib_common::publish_test_results 4
-        flowey e 18 flowey_lib_common::publish_test_results 5
-        flowey v 18 'flowey_lib_common::publish_test_results:9:flowey_lib_common/src/publish_test_results.rs:152:62' --is-raw-string --condvar flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57 write-to-env github floweyvar2
-        flowey v 18 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__publish_test_results__6
-      uses: actions/upload-artifact@v4
-      with:
-        name: x64-linux-vmm-tests-logs
-        path: ${{ env.floweyvar2 }}
-      name: 'publish test results: x64-linux-vmm-tests (logs)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: 🦀 flowey rust steps
-      run: |-
         flowey e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
         flowey e 18 flowey_lib_common::publish_test_results 0
         flowey e 18 flowey_lib_common::publish_test_results 1
-        flowey e 18 flowey_lib_common::publish_test_results 2
-        flowey v 18 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey v 18 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
+    - name: 'copy test results to artifact directory: x64-linux-vmm-tests (JUnit XML)'
+      run: |-
+        flowey e 18 flowey_lib_common::publish_test_results 2
+        flowey e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
+        flowey e 18 flowey_lib_common::publish_test_results 3
+        flowey e 18 flowey_lib_common::publish_test_results 4
+        flowey v 18 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:151:70' --is-raw-string --condvar flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65 write-to-env github floweyvar1
+        flowey v 18 'flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__publish_test_results__5
       uses: actions/upload-artifact@v4
       with:
-        name: x64-linux-vmm-tests-junit-xml
+        name: x64-linux-vmm-tests-logs
         path: ${{ env.floweyvar1 }}
-      name: 'publish test results: x64-linux-vmm-tests (JUnit XML)'
+      name: 'publish test results: x64-linux-vmm-tests (logs)'
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
@@ -2823,6 +2821,20 @@ jobs:
     - name: 'validate cache entry: gh-release-download'
       run: flowey e 18 flowey_lib_common::cache 15
       shell: bash
+    - name: 🌼📦 Publish x64-linux-vmm-tests-results
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-linux-vmm-tests-results
+        path: ${{ runner.temp }}/publish_artifacts/x64-linux-vmm-tests-results/
+        include-hidden-files: true
+      if: always()
+    - name: 🌼📦 Publish x64-linux-vmm-tests-results-junit-xml
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-linux-vmm-tests-results-junit-xml
+        path: ${{ runner.temp }}/publish_artifacts/x64-linux-vmm-tests-results-junit-xml/
+        include-hidden-files: true
+      if: always()
   job19:
     name: run vmm-tests [aarch64-windows]
     runs-on:
@@ -2910,6 +2922,10 @@ jobs:
         cat <<'EOF' | flowey.exe v 19 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/aarch64-windows-vmm-tests-results"
+        echo "${{ runner.temp }}\\publish_artifacts\\aarch64-windows-vmm-tests-results" | flowey.exe v 19 'artifact_publish_from_aarch64-windows-vmm-tests-results' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/aarch64-windows-vmm-tests-results-junit-xml"
+        echo "${{ runner.temp }}\\publish_artifacts\\aarch64-windows-vmm-tests-results-junit-xml" | flowey.exe v 19 'artifact_publish_from_aarch64-windows-vmm-tests-results-junit-xml' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\aarch64-guest_test_uefi" | flowey.exe v 19 'artifact_use_from_aarch64-guest_test_uefi' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\aarch64-linux-musl-pipette" | flowey.exe v 19 'artifact_use_from_aarch64-linux-musl-pipette' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\aarch64-linux-musl-tmk_vmm" | flowey.exe v 19 'artifact_use_from_aarch64-linux-musl-tmk_vmm' --is-raw-string update
@@ -2921,8 +2937,55 @@ jobs:
         echo "${{ runner.temp }}\\used_artifacts\\aarch64-windows-vmgstool" | flowey.exe v 19 'artifact_use_from_aarch64-windows-vmgstool' --is-raw-string update
         echo "${{ runner.temp }}\\used_artifacts\\aarch64-windows-vmm-tests-archive" | flowey.exe v 19 'artifact_use_from_aarch64-windows-vmm-tests-archive' --is-raw-string update
       shell: bash
-    - name: creating new test content dir
+    - name: create cargo-nextest cache dir
       run: |-
+        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 0
+        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 1
+        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 2
+        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey.exe e 19 flowey_lib_common::cache 4
+        flowey.exe v 19 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 19 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar6
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar5 }}
+        path: ${{ env.floweyvar6 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 19 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 19 flowey_lib_common::cache 6
+        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: check if openvmm needs to be cloned
+      run: |-
+        flowey.exe e 19 flowey_lib_common::git_checkout 0
+        flowey.exe v 19 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar2
+        flowey.exe v 19 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__git_checkout__1
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: '1'
+        path: repo0
+        persist-credentials: ${{ env.floweyvar2 }}
+      name: checkout repo openvmm
+      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
+    - name: report cloned repo directories
+      run: |-
+        flowey.exe v 19 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        ${{ github.workspace }}
+        EOF
+        flowey.exe e 19 flowey_lib_common::git_checkout 3
+        flowey.exe e 19 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey.exe e 19 flowey_lib_hvlite::run_cargo_nextest_run 0
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 4
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 5
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 1
@@ -2931,7 +2994,9 @@ jobs:
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 2
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 3
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 7
-        flowey.exe e 19 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
+      shell: bash
+    - name: creating new test content dir
+      run: flowey.exe e 19 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
       shell: bash
     - name: resolve OpenHCL igvm artifact
       run: flowey.exe e 19 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
@@ -2942,14 +3007,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 19 flowey_lib_common::cache 0
-        flowey.exe v 19 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 19 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe v 19 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar3
+        flowey.exe v 19 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar4
       shell: bash
     - id: flowey_lib_common__cache__1
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar3 }}
+        path: ${{ env.floweyvar4 }}
       name: 'Restore cache: azcopy'
     - name: installing azcopy
       run: |-
@@ -2973,14 +3038,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 19 flowey_lib_common::cache 8
-        flowey.exe v 19 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar8
-        flowey.exe v 19 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 19 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar7
+        flowey.exe v 19 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar8
       shell: bash
     - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar8 }}
-        path: ${{ env.floweyvar9 }}
+        key: ${{ env.floweyvar7 }}
+        path: ${{ env.floweyvar8 }}
       name: 'Restore cache: gh-cli'
     - name: installing gh
       run: |-
@@ -3011,14 +3076,14 @@ jobs:
     - name: Pre-processing cache vars
       run: |-
         flowey.exe e 19 flowey_lib_common::cache 12
-        flowey.exe v 19 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar10
-        flowey.exe v 19 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar11
+        flowey.exe v 19 'flowey_lib_common::cache:26:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar9
+        flowey.exe v 19 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar10
       shell: bash
     - id: flowey_lib_common__cache__13
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar10 }}
-        path: ${{ env.floweyvar11 }}
+        key: ${{ env.floweyvar9 }}
+        path: ${{ env.floweyvar10 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
@@ -3035,57 +3100,8 @@ jobs:
       run: flowey.exe e 19 flowey_lib_hvlite::download_uefi_mu_msvm 0
       shell: bash
     - name: setting up vmm_tests env
-      run: flowey.exe e 19 flowey_lib_hvlite::init_vmm_tests_env 0
-      shell: bash
-    - name: create cargo-nextest cache dir
       run: |-
-        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 0
-        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 1
-        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 2
-        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 3
-      shell: bash
-    - name: Pre-processing cache vars
-      run: |-
-        flowey.exe e 19 flowey_lib_common::cache 4
-        flowey.exe v 19 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
-        flowey.exe v 19 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
-      shell: bash
-    - id: flowey_lib_common__cache__5
-      uses: actions/cache@v4
-      with:
-        key: ${{ env.floweyvar6 }}
-        path: ${{ env.floweyvar7 }}
-      name: 'Restore cache: cargo-nextest'
-    - name: downloading cargo-nextest
-      run: |-
-        flowey.exe v 19 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
-        EOF
-        flowey.exe e 19 flowey_lib_common::cache 6
-        flowey.exe e 19 flowey_lib_common::download_cargo_nextest 4
-      shell: bash
-    - name: check if openvmm needs to be cloned
-      run: |-
-        flowey.exe e 19 flowey_lib_common::git_checkout 0
-        flowey.exe v 19 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar3
-        flowey.exe v 19 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__git_checkout__1
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: '1'
-        path: repo0
-        persist-credentials: ${{ env.floweyvar3 }}
-      name: checkout repo openvmm
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: report cloned repo directories
-      run: |-
-        flowey.exe v 19 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
-        ${{ github.workspace }}
-        EOF
-        flowey.exe e 19 flowey_lib_common::git_checkout 3
-        flowey.exe e 19 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-        flowey.exe e 19 flowey_lib_hvlite::run_cargo_nextest_run 0
+        flowey.exe e 19 flowey_lib_hvlite::init_vmm_tests_env 0
         flowey.exe e 19 flowey_lib_hvlite::run_cargo_nextest_run 1
         flowey.exe e 19 flowey_core::pipeline::artifact::resolve 8
         flowey.exe e 19 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
@@ -3100,34 +3116,25 @@ jobs:
       run: |-
         flowey.exe e 19 flowey_lib_common::run_cargo_nextest_run 0
         flowey.exe e 19 flowey_lib_common::run_cargo_nextest_run 1
-        flowey.exe e 19 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-        flowey.exe e 19 flowey_lib_common::publish_test_results 4
-        flowey.exe e 19 flowey_lib_common::publish_test_results 5
-        flowey.exe v 19 'flowey_lib_common::publish_test_results:9:flowey_lib_common/src/publish_test_results.rs:152:62' --is-raw-string --condvar flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57 write-to-env github floweyvar2
-        flowey.exe v 19 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:144:57' write-to-env github FLOWEY_CONDITION
-      shell: bash
-    - id: flowey_lib_common__publish_test_results__6
-      uses: actions/upload-artifact@v4
-      with:
-        name: aarch64-windows-vmm-tests-logs
-        path: ${{ env.floweyvar2 }}
-      name: 'publish test results: aarch64-windows-vmm-tests (logs)'
-      if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
-    - name: 🦀 flowey rust steps
-      run: |-
         flowey.exe e 19 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
         flowey.exe e 19 flowey_lib_common::publish_test_results 0
         flowey.exe e 19 flowey_lib_common::publish_test_results 1
-        flowey.exe e 19 flowey_lib_common::publish_test_results 2
-        flowey.exe v 19 'flowey_lib_common::publish_test_results:4:flowey_lib_common/src/publish_test_results.rs:95:47' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env github floweyvar1
-        flowey.exe v 19 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env github FLOWEY_CONDITION
       shell: bash
-    - id: flowey_lib_common__publish_test_results__3
+    - name: 'copy test results to artifact directory: aarch64-windows-vmm-tests (JUnit XML)'
+      run: |-
+        flowey.exe e 19 flowey_lib_common::publish_test_results 2
+        flowey.exe e 19 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
+        flowey.exe e 19 flowey_lib_common::publish_test_results 3
+        flowey.exe e 19 flowey_lib_common::publish_test_results 4
+        flowey.exe v 19 'flowey_lib_common::publish_test_results:7:flowey_lib_common/src/publish_test_results.rs:151:70' --is-raw-string --condvar flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65 write-to-env github floweyvar1
+        flowey.exe v 19 'flowey_lib_common::publish_test_results:5:flowey_lib_common/src/publish_test_results.rs:143:65' write-to-env github FLOWEY_CONDITION
+      shell: bash
+    - id: flowey_lib_common__publish_test_results__5
       uses: actions/upload-artifact@v4
       with:
-        name: aarch64-windows-vmm-tests-junit-xml
+        name: aarch64-windows-vmm-tests-logs
         path: ${{ env.floweyvar1 }}
-      name: 'publish test results: aarch64-windows-vmm-tests (JUnit XML)'
+      name: 'publish test results: aarch64-windows-vmm-tests (logs)'
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report test results to overall pipeline status
       run: flowey.exe e 19 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
@@ -3144,6 +3151,20 @@ jobs:
     - name: 'validate cache entry: gh-release-download'
       run: flowey.exe e 19 flowey_lib_common::cache 15
       shell: bash
+    - name: 🌼📦 Publish aarch64-windows-vmm-tests-results
+      uses: actions/upload-artifact@v4
+      with:
+        name: aarch64-windows-vmm-tests-results
+        path: ${{ runner.temp }}/publish_artifacts/aarch64-windows-vmm-tests-results/
+        include-hidden-files: true
+      if: always()
+    - name: 🌼📦 Publish aarch64-windows-vmm-tests-results-junit-xml
+      uses: actions/upload-artifact@v4
+      with:
+        name: aarch64-windows-vmm-tests-results-junit-xml
+        path: ${{ runner.temp }}/publish_artifacts/aarch64-windows-vmm-tests-results-junit-xml/
+        include-hidden-files: true
+      if: always()
   job2:
     name: build artifacts (not for VMM tests) [aarch64-windows]
     runs-on:
@@ -3358,6 +3379,66 @@ jobs:
         path: ${{ runner.temp }}/publish_artifacts/aarch64-windows-vmgs_lib/
         include-hidden-files: true
   job20:
+    name: verify all tests run at least once
+    runs-on:
+    - self-hosted
+    - 1ES.Pool=OpenVMM-GitHub-Linux-Pool-WestUS3
+    - 1ES.ImageOverride=MMSUbuntu22.04-256GB
+    permissions:
+      contents: read
+      id-token: write
+    needs:
+    - job14
+    - job15
+    - job16
+    - job17
+    - job18
+    - job19
+    - job3
+    - job5
+    - job7
+    if: contains(github.event.pull_request.labels.*.name, 'release-ci-required') && github.event.pull_request.draft == false
+    steps:
+    - name: 🌼📦 Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: '{_internal-flowey-bootstrap-x86_64-linux-uid-6,aarch64-windows-nextest-list-json,aarch64-windows-vmm-tests-results-junit-xml,x64-linux-nextest-list-json,x64-linux-vmm-tests-results-junit-xml,x64-windows-amd-snp-vmm-tests-results-junit-xml,x64-windows-amd-vmm-tests-results-junit-xml,x64-windows-intel-tdx-vmm-tests-results-junit-xml,x64-windows-intel-vmm-tests-results-junit-xml,x64-windows-nextest-list-json}'
+        path: ${{ runner.temp }}/used_artifacts/
+    - run: echo "${{ runner.temp }}/used_artifacts/_internal-flowey-bootstrap-x86_64-linux-uid-6" >> $GITHUB_PATH
+      shell: bash
+      name: 🌼📦 Add flowey to PATH
+    - name: 🌼🛫 Initialize job
+      run: |
+        AgentTempDirNormal="${{ runner.temp }}"
+        AgentTempDirNormal=$(echo "$AgentTempDirNormal" | sed -e 's|\\|\/|g' -e 's|^\([A-Za-z]\)\:/\(.*\)|/\L\1\E/\2|')
+        echo "AgentTempDirNormal=$AgentTempDirNormal" >> $GITHUB_ENV
+
+        chmod +x $AgentTempDirNormal/used_artifacts/_internal-flowey-bootstrap-x86_64-linux-uid-6/flowey
+
+        echo '"debug"' | flowey v 20 'FLOWEY_LOG' update
+        echo "${{ runner.temp }}/work" | flowey v 20 '_internal_WORKING_DIR' --is-raw-string update
+
+        cat <<'EOF' | flowey v 20 'verbose' update
+        ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
+        EOF
+        echo "$AgentTempDirNormal/used_artifacts/aarch64-windows-nextest-list-json" | flowey v 20 'artifact_use_from_aarch64-windows-nextest-list-json' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/aarch64-windows-vmm-tests-results-junit-xml" | flowey v 20 'artifact_use_from_aarch64-windows-vmm-tests-results-junit-xml' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-linux-nextest-list-json" | flowey v 20 'artifact_use_from_x64-linux-nextest-list-json' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-linux-vmm-tests-results-junit-xml" | flowey v 20 'artifact_use_from_x64-linux-vmm-tests-results-junit-xml' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-windows-amd-snp-vmm-tests-results-junit-xml" | flowey v 20 'artifact_use_from_x64-windows-amd-snp-vmm-tests-results-junit-xml' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-windows-amd-vmm-tests-results-junit-xml" | flowey v 20 'artifact_use_from_x64-windows-amd-vmm-tests-results-junit-xml' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-windows-intel-tdx-vmm-tests-results-junit-xml" | flowey v 20 'artifact_use_from_x64-windows-intel-tdx-vmm-tests-results-junit-xml' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-windows-intel-vmm-tests-results-junit-xml" | flowey v 20 'artifact_use_from_x64-windows-intel-vmm-tests-results-junit-xml' --is-raw-string update
+        echo "$AgentTempDirNormal/used_artifacts/x64-windows-nextest-list-json" | flowey v 20 'artifact_use_from_x64-windows-nextest-list-json' --is-raw-string update
+      shell: bash
+    - name: parse and analyze junit logs and nextest list output
+      run: |-
+        flowey e 20 flowey_core::pipeline::artifact::resolve 0
+        flowey e 20 flowey_core::pipeline::artifact::resolve 2
+        flowey e 20 flowey_core::pipeline::artifact::resolve 1
+        flowey e 20 flowey_lib_hvlite::_jobs::verify_all_tests_run 0
+      shell: bash
+  job21:
     name: test flowey local backend
     runs-on:
     - self-hosted
@@ -3428,18 +3509,18 @@ jobs:
 
         chmod +x $AgentTempDirNormal/bootstrapped-flowey/flowey
 
-        echo '"debug"' | flowey v 20 'FLOWEY_LOG' update
-        echo "${{ runner.temp }}/work" | flowey v 20 '_internal_WORKING_DIR' --is-raw-string update
+        echo '"debug"' | flowey v 21 'FLOWEY_LOG' update
+        echo "${{ runner.temp }}/work" | flowey v 21 '_internal_WORKING_DIR' --is-raw-string update
 
-        cat <<'EOF' | flowey v 20 'verbose' update
+        cat <<'EOF' | flowey v 21 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
       shell: bash
     - name: check if openvmm needs to be cloned
       run: |-
-        flowey e 20 flowey_lib_common::git_checkout 0
-        flowey v 20 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar1
-        flowey v 20 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
+        flowey e 21 flowey_lib_common::git_checkout 0
+        flowey v 21 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:469:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46 write-to-env github floweyvar1
+        flowey v 21 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:470:46' write-to-env github FLOWEY_CONDITION
       shell: bash
     - id: flowey_lib_common__git_checkout__1
       uses: actions/checkout@v4
@@ -3451,24 +3532,24 @@ jobs:
       if: ${{ fromJSON(env.FLOWEY_CONDITION) }}
     - name: report cloned repo directories
       run: |-
-        flowey v 20 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
+        flowey v 21 'flowey_lib_common::git_checkout:4:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.workspace <<EOF
         ${{ github.workspace }}
         EOF
-        flowey e 20 flowey_lib_common::git_checkout 3
-        flowey e 20 flowey_lib_hvlite::git_checkout_openvmm_repo 0
+        flowey e 21 flowey_lib_common::git_checkout 3
+        flowey e 21 flowey_lib_hvlite::git_checkout_openvmm_repo 0
       shell: bash
     - name: add default cargo home to path
-      run: flowey e 20 flowey_lib_common::install_rust 0
+      run: flowey e 21 flowey_lib_common::install_rust 0
       shell: bash
     - name: install Rust
       run: |-
-        flowey e 20 flowey_lib_common::install_rust 1
-        flowey v 20 'flowey_lib_hvlite::_jobs::test_local_flowey_build_igvm:2:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.token <<EOF
+        flowey e 21 flowey_lib_common::install_rust 1
+        flowey v 21 'flowey_lib_hvlite::_jobs::test_local_flowey_build_igvm:2:flowey_core/src/node/github_context.rs:55:41' --is-raw-string update --env-source github.token <<EOF
         ${{ github.token }}
         EOF
       shell: bash
     - name: test cargo xflowey build-igvm x64 --install-missing-deps
-      run: flowey e 20 flowey_lib_hvlite::_jobs::test_local_flowey_build_igvm 1
+      run: flowey e 21 flowey_lib_hvlite::_jobs::test_local_flowey_build_igvm 1
       shell: bash
   job3:
     name: build artifacts (for VMM tests) [aarch64-windows]
@@ -3544,6 +3625,8 @@ jobs:
         cat <<'EOF' | flowey.exe v 3 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/aarch64-windows-nextest-list-json"
+        echo "${{ runner.temp }}\\publish_artifacts\\aarch64-windows-nextest-list-json" | flowey.exe v 3 'artifact_publish_from_aarch64-windows-nextest-list-json' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/aarch64-windows-openvmm"
         echo "${{ runner.temp }}\\publish_artifacts\\aarch64-windows-openvmm" | flowey.exe v 3 'artifact_publish_from_aarch64-windows-openvmm' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/aarch64-windows-pipette"
@@ -3598,22 +3681,22 @@ jobs:
       shell: bash
     - name: Pre-processing cache vars
       run: |-
-        flowey.exe e 3 flowey_lib_common::cache 4
-        flowey.exe v 3 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 3 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe e 3 flowey_lib_common::cache 8
+        flowey.exe v 3 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
+        flowey.exe v 3 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
       shell: bash
-    - id: flowey_lib_common__cache__5
+    - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar6 }}
+        path: ${{ env.floweyvar7 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
-        flowey.exe v 3 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        flowey.exe v 3 'flowey_lib_common::cache:20:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__9.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__9.outputs.cache-hit }}
         EOF
-        flowey.exe e 3 flowey_lib_common::cache 6
+        flowey.exe e 3 flowey_lib_common::cache 10
         flowey.exe e 3 flowey_lib_common::download_gh_release 1
       shell: bash
     - name: unpack protoc
@@ -3631,7 +3714,7 @@ jobs:
         flowey.exe e 3 flowey_lib_common::run_cargo_build 2
         flowey.exe e 3 flowey_lib_hvlite::run_cargo_build 2
         flowey.exe e 3 flowey_lib_hvlite::build_prep_steps 0
-        flowey.exe e 3 flowey_core::pipeline::artifact::publish 3
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 4
         flowey.exe e 3 flowey_lib_hvlite::init_cross_build 2
       shell: bash
     - name: cargo build vmgstool
@@ -3639,7 +3722,7 @@ jobs:
         flowey.exe e 3 flowey_lib_common::run_cargo_build 4
         flowey.exe e 3 flowey_lib_hvlite::run_cargo_build 4
         flowey.exe e 3 flowey_lib_hvlite::build_vmgstool 0
-        flowey.exe e 3 flowey_core::pipeline::artifact::publish 4
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 5
       shell: bash
     - name: create cargo-nextest cache dir
       run: |-
@@ -3647,6 +3730,41 @@ jobs:
         flowey.exe e 3 flowey_lib_common::download_cargo_nextest 1
         flowey.exe e 3 flowey_lib_common::download_cargo_nextest 2
         flowey.exe e 3 flowey_lib_common::download_cargo_nextest 3
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
+        flowey.exe e 3 flowey_lib_common::cache 4
+        flowey.exe v 3 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
+        flowey.exe v 3 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar4 }}
+        path: ${{ env.floweyvar5 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 3 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 3 flowey_lib_common::cache 6
+        flowey.exe e 3 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: report $CARGO_HOME
+      run: flowey.exe e 3 flowey_lib_common::install_rust 3
+      shell: bash
+    - name: installing cargo-nextest
+      run: |-
+        flowey.exe e 3 flowey_lib_common::install_cargo_nextest 0
+        flowey.exe e 3 flowey_lib_hvlite::init_cross_build 0
+      shell: bash
+    - name: build + archive 'vmm_tests' nextests
+      run: |-
+        flowey.exe e 3 flowey_lib_common::run_cargo_nextest_archive 0
+        flowey.exe e 3 flowey_lib_common::download_cargo_nextest 5
+        flowey.exe e 3 flowey_lib_common::download_cargo_nextest 6
+        flowey.exe e 3 flowey_lib_common::download_cargo_nextest 7
       shell: bash
     - name: Pre-processing cache vars
       run: |-
@@ -3666,21 +3784,21 @@ jobs:
         ${{ steps.flowey_lib_common__cache__1.outputs.cache-hit }}
         EOF
         flowey.exe e 3 flowey_lib_common::cache 2
-        flowey.exe e 3 flowey_lib_common::download_cargo_nextest 4
+        flowey.exe e 3 flowey_lib_common::download_cargo_nextest 8
+        flowey.exe e 3 flowey_lib_hvlite::run_cargo_nextest_list 0
       shell: bash
-    - name: report $CARGO_HOME
-      run: flowey.exe e 3 flowey_lib_common::install_rust 3
+    - name: generate nextest command
+      run: flowey.exe e 3 flowey_lib_common::gen_cargo_nextest_run_cmd 0
       shell: bash
-    - name: installing cargo-nextest
+    - name: generate nextest list command
+      run: flowey.exe e 3 flowey_lib_common::gen_cargo_nextest_list_cmd 0
+      shell: bash
+    - name: run cargo-nextest list
       run: |-
-        flowey.exe e 3 flowey_lib_common::install_cargo_nextest 0
-        flowey.exe e 3 flowey_lib_hvlite::init_cross_build 0
-      shell: bash
-    - name: build + archive 'vmm_tests' nextests
-      run: |-
-        flowey.exe e 3 flowey_lib_common::run_cargo_nextest_archive 0
+        flowey.exe e 3 flowey_lib_common::run_cargo_nextest_list 0
         flowey.exe e 3 flowey_lib_hvlite::build_nextest_vmm_tests 0
-        flowey.exe e 3 flowey_core::pipeline::artifact::publish 5
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 6
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 0
       shell: bash
     - name: unpack Microsoft.WSL.LxUtil.AARCH64.zip
       run: flowey.exe e 3 flowey_lib_hvlite::download_lxutil 0
@@ -3695,7 +3813,7 @@ jobs:
         flowey.exe e 3 flowey_lib_common::run_cargo_build 0
         flowey.exe e 3 flowey_lib_hvlite::run_cargo_build 0
         flowey.exe e 3 flowey_lib_hvlite::build_openvmm 0
-        flowey.exe e 3 flowey_core::pipeline::artifact::publish 0
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 1
         flowey.exe e 3 flowey_lib_hvlite::init_cross_build 4
       shell: bash
     - name: cargo build pipette
@@ -3703,7 +3821,7 @@ jobs:
         flowey.exe e 3 flowey_lib_common::run_cargo_build 1
         flowey.exe e 3 flowey_lib_hvlite::run_cargo_build 1
         flowey.exe e 3 flowey_lib_hvlite::build_pipette 0
-        flowey.exe e 3 flowey_core::pipeline::artifact::publish 1
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 2
         flowey.exe e 3 flowey_lib_hvlite::init_cross_build 1
       shell: bash
     - name: cargo build tmk_vmm
@@ -3711,14 +3829,23 @@ jobs:
         flowey.exe e 3 flowey_lib_common::run_cargo_build 3
         flowey.exe e 3 flowey_lib_hvlite::run_cargo_build 3
         flowey.exe e 3 flowey_lib_hvlite::build_tmk_vmm 0
-        flowey.exe e 3 flowey_core::pipeline::artifact::publish 2
+        flowey.exe e 3 flowey_core::pipeline::artifact::publish 3
       shell: bash
     - name: 'validate cache entry: cargo-nextest'
       run: flowey.exe e 3 flowey_lib_common::cache 3
       shell: bash
-    - name: 'validate cache entry: gh-release-download'
+    - name: 'validate cache entry: cargo-nextest'
       run: flowey.exe e 3 flowey_lib_common::cache 7
       shell: bash
+    - name: 'validate cache entry: gh-release-download'
+      run: flowey.exe e 3 flowey_lib_common::cache 11
+      shell: bash
+    - name: 🌼📦 Publish aarch64-windows-nextest-list-json
+      uses: actions/upload-artifact@v4
+      with:
+        name: aarch64-windows-nextest-list-json
+        path: ${{ runner.temp }}/publish_artifacts/aarch64-windows-nextest-list-json/
+        include-hidden-files: true
     - name: 🌼📦 Publish aarch64-windows-openvmm
       uses: actions/upload-artifact@v4
       with:
@@ -4046,6 +4173,8 @@ jobs:
         cat <<'EOF' | flowey.exe v 5 'verbose' update
         ${{ inputs.verbose != '' && inputs.verbose || 'false' }}
         EOF
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-nextest-list-json"
+        echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-nextest-list-json" | flowey.exe v 5 'artifact_publish_from_x64-windows-nextest-list-json' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-openvmm"
         echo "${{ runner.temp }}\\publish_artifacts\\x64-windows-openvmm" | flowey.exe v 5 'artifact_publish_from_x64-windows-openvmm' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-windows-pipette"
@@ -4075,22 +4204,22 @@ jobs:
       shell: bash
     - name: Pre-processing cache vars
       run: |-
-        flowey.exe e 5 flowey_lib_common::cache 4
-        flowey.exe v 5 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey.exe v 5 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey.exe e 5 flowey_lib_common::cache 8
+        flowey.exe v 5 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
+        flowey.exe v 5 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
       shell: bash
-    - id: flowey_lib_common__cache__5
+    - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar6 }}
+        path: ${{ env.floweyvar7 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
-        flowey.exe v 5 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        flowey.exe v 5 'flowey_lib_common::cache:20:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__9.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__9.outputs.cache-hit }}
         EOF
-        flowey.exe e 5 flowey_lib_common::cache 6
+        flowey.exe e 5 flowey_lib_common::cache 10
         flowey.exe e 5 flowey_lib_common::download_gh_release 1
       shell: bash
     - name: unpack Microsoft.WSL.LxUtil.x64.zip
@@ -4181,6 +4310,41 @@ jobs:
       shell: bash
     - name: Pre-processing cache vars
       run: |-
+        flowey.exe e 5 flowey_lib_common::cache 4
+        flowey.exe v 5 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
+        flowey.exe v 5 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar4 }}
+        path: ${{ env.floweyvar5 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey.exe v 5 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey.exe e 5 flowey_lib_common::cache 6
+        flowey.exe e 5 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: report $CARGO_HOME
+      run: flowey.exe e 5 flowey_lib_common::install_rust 3
+      shell: bash
+    - name: installing cargo-nextest
+      run: |-
+        flowey.exe e 5 flowey_lib_common::install_cargo_nextest 0
+        flowey.exe e 5 flowey_lib_hvlite::init_cross_build 0
+      shell: bash
+    - name: build + archive 'vmm_tests' nextests
+      run: |-
+        flowey.exe e 5 flowey_lib_common::run_cargo_nextest_archive 0
+        flowey.exe e 5 flowey_lib_common::download_cargo_nextest 5
+        flowey.exe e 5 flowey_lib_common::download_cargo_nextest 6
+        flowey.exe e 5 flowey_lib_common::download_cargo_nextest 7
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
         flowey.exe e 5 flowey_lib_common::cache 0
         flowey.exe v 5 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar2
         flowey.exe v 5 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar3
@@ -4197,28 +4361,37 @@ jobs:
         ${{ steps.flowey_lib_common__cache__1.outputs.cache-hit }}
         EOF
         flowey.exe e 5 flowey_lib_common::cache 2
-        flowey.exe e 5 flowey_lib_common::download_cargo_nextest 4
+        flowey.exe e 5 flowey_lib_common::download_cargo_nextest 8
+        flowey.exe e 5 flowey_lib_hvlite::run_cargo_nextest_list 0
       shell: bash
-    - name: report $CARGO_HOME
-      run: flowey.exe e 5 flowey_lib_common::install_rust 3
+    - name: generate nextest command
+      run: flowey.exe e 5 flowey_lib_common::gen_cargo_nextest_run_cmd 0
       shell: bash
-    - name: installing cargo-nextest
+    - name: generate nextest list command
+      run: flowey.exe e 5 flowey_lib_common::gen_cargo_nextest_list_cmd 0
+      shell: bash
+    - name: run cargo-nextest list
       run: |-
-        flowey.exe e 5 flowey_lib_common::install_cargo_nextest 0
-        flowey.exe e 5 flowey_lib_hvlite::init_cross_build 0
-      shell: bash
-    - name: build + archive 'vmm_tests' nextests
-      run: |-
-        flowey.exe e 5 flowey_lib_common::run_cargo_nextest_archive 0
+        flowey.exe e 5 flowey_lib_common::run_cargo_nextest_list 0
         flowey.exe e 5 flowey_lib_hvlite::build_nextest_vmm_tests 0
         flowey.exe e 5 flowey_core::pipeline::artifact::publish 5
+        flowey.exe e 5 flowey_core::pipeline::artifact::publish 6
       shell: bash
     - name: 'validate cache entry: cargo-nextest'
       run: flowey.exe e 5 flowey_lib_common::cache 3
       shell: bash
-    - name: 'validate cache entry: gh-release-download'
+    - name: 'validate cache entry: cargo-nextest'
       run: flowey.exe e 5 flowey_lib_common::cache 7
       shell: bash
+    - name: 'validate cache entry: gh-release-download'
+      run: flowey.exe e 5 flowey_lib_common::cache 11
+      shell: bash
+    - name: 🌼📦 Publish x64-windows-nextest-list-json
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-windows-nextest-list-json
+        path: ${{ runner.temp }}/publish_artifacts/x64-windows-nextest-list-json/
+        include-hidden-files: true
     - name: 🌼📦 Publish x64-windows-openvmm
       uses: actions/upload-artifact@v4
       with:
@@ -4647,6 +4820,8 @@ jobs:
         echo "$AgentTempDirNormal/publish_artifacts/x64-guest_test_uefi" | flowey v 7 'artifact_publish_from_x64-guest_test_uefi' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-linux-igvmfilegen"
         echo "$AgentTempDirNormal/publish_artifacts/x64-linux-igvmfilegen" | flowey v 7 'artifact_publish_from_x64-linux-igvmfilegen' --is-raw-string update
+        mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-linux-nextest-list-json"
+        echo "$AgentTempDirNormal/publish_artifacts/x64-linux-nextest-list-json" | flowey v 7 'artifact_publish_from_x64-linux-nextest-list-json' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-linux-ohcldiag-dev"
         echo "$AgentTempDirNormal/publish_artifacts/x64-linux-ohcldiag-dev" | flowey v 7 'artifact_publish_from_x64-linux-ohcldiag-dev' --is-raw-string update
         mkdir -p "$AgentTempDirNormal/publish_artifacts/x64-linux-openvmm"
@@ -4682,22 +4857,22 @@ jobs:
       shell: bash
     - name: Pre-processing cache vars
       run: |-
-        flowey e 7 flowey_lib_common::cache 4
-        flowey v 7 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
-        flowey v 7 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+        flowey e 7 flowey_lib_common::cache 8
+        flowey v 7 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar6
+        flowey v 7 'flowey_lib_common::cache:17:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar7
       shell: bash
-    - id: flowey_lib_common__cache__5
+    - id: flowey_lib_common__cache__9
       uses: actions/cache@v4
       with:
-        key: ${{ env.floweyvar4 }}
-        path: ${{ env.floweyvar5 }}
+        key: ${{ env.floweyvar6 }}
+        path: ${{ env.floweyvar7 }}
       name: 'Restore cache: gh-release-download'
     - name: download artifacts from github releases
       run: |-
-        flowey v 7 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
-        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        flowey v 7 'flowey_lib_common::cache:20:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__9.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__9.outputs.cache-hit }}
         EOF
-        flowey e 7 flowey_lib_common::cache 6
+        flowey e 7 flowey_lib_common::cache 10
         flowey e 7 flowey_lib_common::download_gh_release 1
       shell: bash
     - name: unpack Microsoft.WSL.LxUtil.x64.zip
@@ -4839,6 +5014,41 @@ jobs:
       shell: bash
     - name: Pre-processing cache vars
       run: |-
+        flowey e 7 flowey_lib_common::cache 4
+        flowey v 7 'flowey_lib_common::cache:10:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar4
+        flowey v 7 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar5
+      shell: bash
+    - id: flowey_lib_common__cache__5
+      uses: actions/cache@v4
+      with:
+        key: ${{ env.floweyvar4 }}
+        path: ${{ env.floweyvar5 }}
+      name: 'Restore cache: cargo-nextest'
+    - name: downloading cargo-nextest
+      run: |-
+        flowey v 7 'flowey_lib_common::cache:12:flowey_lib_common/src/cache.rs:462:70' --is-raw-string update --env-source steps.flowey_lib_common__cache__5.outputs.cache-hit <<EOF
+        ${{ steps.flowey_lib_common__cache__5.outputs.cache-hit }}
+        EOF
+        flowey e 7 flowey_lib_common::cache 6
+        flowey e 7 flowey_lib_common::download_cargo_nextest 4
+      shell: bash
+    - name: report $CARGO_HOME
+      run: flowey e 7 flowey_lib_common::install_rust 3
+      shell: bash
+    - name: installing cargo-nextest
+      run: |-
+        flowey e 7 flowey_lib_common::install_cargo_nextest 0
+        flowey e 7 flowey_lib_hvlite::init_cross_build 1
+      shell: bash
+    - name: build + archive 'vmm_tests' nextests
+      run: |-
+        flowey e 7 flowey_lib_common::run_cargo_nextest_archive 0
+        flowey e 7 flowey_lib_common::download_cargo_nextest 5
+        flowey e 7 flowey_lib_common::download_cargo_nextest 6
+        flowey e 7 flowey_lib_common::download_cargo_nextest 7
+      shell: bash
+    - name: Pre-processing cache vars
+      run: |-
         flowey e 7 flowey_lib_common::cache 0
         flowey v 7 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:407:72' --is-raw-string write-to-env github floweyvar2
         flowey v 7 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:406:72' --is-raw-string write-to-env github floweyvar3
@@ -4855,27 +5065,30 @@ jobs:
         ${{ steps.flowey_lib_common__cache__1.outputs.cache-hit }}
         EOF
         flowey e 7 flowey_lib_common::cache 2
-        flowey e 7 flowey_lib_common::download_cargo_nextest 4
+        flowey e 7 flowey_lib_common::download_cargo_nextest 8
+        flowey e 7 flowey_lib_hvlite::run_cargo_nextest_list 0
       shell: bash
-    - name: report $CARGO_HOME
-      run: flowey e 7 flowey_lib_common::install_rust 3
+    - name: generate nextest command
+      run: flowey e 7 flowey_lib_common::gen_cargo_nextest_run_cmd 0
       shell: bash
-    - name: installing cargo-nextest
+    - name: generate nextest list command
+      run: flowey e 7 flowey_lib_common::gen_cargo_nextest_list_cmd 0
+      shell: bash
+    - name: run cargo-nextest list
       run: |-
-        flowey e 7 flowey_lib_common::install_cargo_nextest 0
-        flowey e 7 flowey_lib_hvlite::init_cross_build 1
-      shell: bash
-    - name: build + archive 'vmm_tests' nextests
-      run: |-
-        flowey e 7 flowey_lib_common::run_cargo_nextest_archive 0
+        flowey e 7 flowey_lib_common::run_cargo_nextest_list 0
         flowey e 7 flowey_lib_hvlite::build_nextest_vmm_tests 0
         flowey e 7 flowey_core::pipeline::artifact::publish 7
+        flowey e 7 flowey_core::pipeline::artifact::publish 8
       shell: bash
     - name: 'validate cache entry: cargo-nextest'
       run: flowey e 7 flowey_lib_common::cache 3
       shell: bash
-    - name: 'validate cache entry: gh-release-download'
+    - name: 'validate cache entry: cargo-nextest'
       run: flowey e 7 flowey_lib_common::cache 7
+      shell: bash
+    - name: 'validate cache entry: gh-release-download'
+      run: flowey e 7 flowey_lib_common::cache 11
       shell: bash
     - name: 🌼📦 Publish x64-guest_test_uefi
       uses: actions/upload-artifact@v4
@@ -4888,6 +5101,12 @@ jobs:
       with:
         name: x64-linux-igvmfilegen
         path: ${{ runner.temp }}/publish_artifacts/x64-linux-igvmfilegen/
+        include-hidden-files: true
+    - name: 🌼📦 Publish x64-linux-nextest-list-json
+      uses: actions/upload-artifact@v4
+      with:
+        name: x64-linux-nextest-list-json
+        path: ${{ runner.temp }}/publish_artifacts/x64-linux-nextest-list-json/
         include-hidden-files: true
     - name: 🌼📦 Publish x64-linux-ohcldiag-dev
       uses: actions/upload-artifact@v4

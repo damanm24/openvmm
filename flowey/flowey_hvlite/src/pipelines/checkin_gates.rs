@@ -85,14 +85,12 @@ impl IntoPipeline for CheckinGatesCli {
                         .gh_set_name("[flowey] OpenVMM PR");
                 }
                 PipelineConfig::PrRelease => {
-                    // This workflow is triggered when a specific label is added to a PR.
+                    // This workflow is triggered when a specific label is present on a PR.
+                    let mut triggers = GhPrTriggers::new_draftable();
+                    triggers.branches = branches;
+                    triggers.types.push("labeled".into());
                     pipeline
-                        .gh_set_pr_triggers(GhPrTriggers {
-                            branches,
-                            types: vec!["labeled".into()],
-                            auto_cancel: false,
-                            exclude_branches: vec![],
-                        })
+                        .gh_set_pr_triggers(triggers)
                         .gh_set_name("[flowey] OpenVMM Release PR");
                 }
             }
@@ -166,11 +164,22 @@ impl IntoPipeline for CheckinGatesCli {
         let (pub_vmm_tests_archive_windows_aarch64, use_vmm_tests_archive_windows_aarch64) =
             pipeline.new_typed_artifact("aarch64-windows-vmm-tests-archive");
 
+        let (pub_nextest_list_json_linux_x86, use_nextest_list_json_linux_x86) =
+            pipeline.new_typed_artifact("x64-linux-nextest-list-json");
+        let (pub_nextest_list_json_windows_x86, use_nextest_list_json_windows_x86) =
+            pipeline.new_typed_artifact("x64-windows-nextest-list-json");
+        let (pub_nextest_list_json_windows_aarch64, use_nextest_list_json_windows_aarch64) =
+            pipeline.new_typed_artifact("aarch64-windows-nextest-list-json");
+
         // wrap each publish handle in an option, so downstream code can
         // `.take()` the handle when emitting the corresponding job
         let mut pub_vmm_tests_archive_linux_x86 = Some(pub_vmm_tests_archive_linux_x86);
         let mut pub_vmm_tests_archive_windows_x86 = Some(pub_vmm_tests_archive_windows_x86);
         let mut pub_vmm_tests_archive_windows_aarch64 = Some(pub_vmm_tests_archive_windows_aarch64);
+
+        let mut pub_nextest_list_json_linux_x86 = Some(pub_nextest_list_json_linux_x86);
+        let mut pub_nextest_list_json_windows_x86 = Some(pub_nextest_list_json_windows_x86);
+        let mut pub_nextest_list_json_windows_aarch64 = Some(pub_nextest_list_json_windows_aarch64);
 
         // initialize the various "VmmTestsArtifactsBuilder" containers, which
         // are used to "skim off" various artifacts that the VMM test jobs
@@ -407,24 +416,32 @@ impl IntoPipeline for CheckinGatesCli {
                 CommonArch::X86_64 => {
                     let pub_vmm_tests_archive_windows_x86 =
                         pub_vmm_tests_archive_windows_x86.take().unwrap();
-                    job = job.dep_on(|ctx|
+
+                    let pub_nextest_list_json_windows_x86 =
+                        pub_nextest_list_json_windows_x86.take().unwrap();
+                    job = job.dep_on(move |ctx|
                         flowey_lib_hvlite::build_nextest_vmm_tests::Request {
                         target: CommonTriple::X86_64_WINDOWS_MSVC.as_triple(),
                         profile: CommonProfile::from_release(release),
-                        build_mode: flowey_lib_hvlite::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive(
-                            ctx.publish_typed_artifact(pub_vmm_tests_archive_windows_x86),
-                        ),
+                        build_mode: flowey_lib_hvlite::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive {
+                            nextest_list_json_file: Some(ctx.publish_typed_artifact(pub_nextest_list_json_windows_x86)),
+                            vmm_test_archive: ctx.publish_typed_artifact(pub_vmm_tests_archive_windows_x86),
+                        },
                     });
                 }
                 CommonArch::Aarch64 => {
                     let pub_vmm_tests_archive_windows_aarch64 =
                         pub_vmm_tests_archive_windows_aarch64.take().unwrap();
-                    job = job.dep_on(|ctx| flowey_lib_hvlite::build_nextest_vmm_tests::Request {
+
+                    let pub_nextest_list_json_windows_aarch64 =
+                        pub_nextest_list_json_windows_aarch64.take().unwrap();
+                    job = job.dep_on(move |ctx| flowey_lib_hvlite::build_nextest_vmm_tests::Request {
                         target: CommonTriple::AARCH64_WINDOWS_MSVC.as_triple(),
                         profile: CommonProfile::from_release(release),
-                        build_mode: flowey_lib_hvlite::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive(
-                            ctx.publish_typed_artifact(pub_vmm_tests_archive_windows_aarch64),
-                        ),
+                        build_mode: flowey_lib_hvlite::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive {
+                            nextest_list_json_file: Some(ctx.publish_typed_artifact(pub_nextest_list_json_windows_aarch64)),
+                            vmm_test_archive: ctx.publish_typed_artifact(pub_vmm_tests_archive_windows_aarch64),
+                        },
                     });
                 }
             }
@@ -555,12 +572,16 @@ impl IntoPipeline for CheckinGatesCli {
             if matches!(arch, CommonArch::X86_64) {
                 let pub_vmm_tests_archive_linux_x86 =
                     pub_vmm_tests_archive_linux_x86.take().unwrap();
-                job = job.dep_on(|ctx| flowey_lib_hvlite::build_nextest_vmm_tests::Request {
+
+                let pub_nextest_list_json_linux_x86 =
+                    pub_nextest_list_json_linux_x86.take().unwrap();
+                job = job.dep_on(move |ctx| flowey_lib_hvlite::build_nextest_vmm_tests::Request {
                     target: CommonTriple::X86_64_LINUX_GNU.as_triple(),
                     profile: CommonProfile::from_release(release),
-                    build_mode: flowey_lib_hvlite::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive(
-                        ctx.publish_typed_artifact(pub_vmm_tests_archive_linux_x86),
-                    ),
+                    build_mode: flowey_lib_hvlite::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive{
+                        nextest_list_json_file: Some(ctx.publish_typed_artifact(pub_nextest_list_json_linux_x86)),
+                        vmm_test_archive: ctx.publish_typed_artifact(pub_vmm_tests_archive_linux_x86),
+                    },
                 });
             }
 
@@ -915,6 +936,7 @@ impl IntoPipeline for CheckinGatesCli {
             KnownTestArtifacts::Gen2WindowsDataCenterCore2022X64Vhd,
             KnownTestArtifacts::Gen2WindowsDataCenterCore2025X64Vhd,
             KnownTestArtifacts::Ubuntu2404ServerX64Vhd,
+            KnownTestArtifacts::Ubuntu2504ServerX64Vhd,
             KnownTestArtifacts::VmgsWithBootEntry,
         ];
 
@@ -922,8 +944,10 @@ impl IntoPipeline for CheckinGatesCli {
         let cvm_x64_test_artifacts = vec![
             KnownTestArtifacts::Gen2WindowsDataCenterCore2022X64Vhd,
             KnownTestArtifacts::Gen2WindowsDataCenterCore2025X64Vhd,
-            KnownTestArtifacts::Ubuntu2404ServerX64Vhd,
+            KnownTestArtifacts::Ubuntu2504ServerX64Vhd,
         ];
+
+        let mut vmm_tests_results_artifacts = vec![];
 
         for VmmTestJobParams {
             platform,
@@ -1010,11 +1034,16 @@ impl IntoPipeline for CheckinGatesCli {
         ] {
             let test_label = format!("{label}-vmm-tests");
 
-            let pub_vmm_tests_results = if matches!(backend_hint, PipelineBackendHint::Local) {
-                Some(pipeline.new_artifact(&test_label).0)
-            } else {
-                None
-            };
+            let (pub_vmm_tests_results_full, _) =
+                pipeline.new_artifact(format!("{label}-vmm-tests-results"));
+
+            let (pub_vmm_tests_junit_xml, use_vmm_tests_junit_xml) =
+                pipeline.new_artifact(format!("{label}-vmm-tests-results-junit-xml"));
+
+            pipeline.force_publish_artifact(&pub_vmm_tests_results_full);
+            pipeline.force_publish_artifact(&pub_vmm_tests_junit_xml);
+
+            vmm_tests_results_artifacts.push((label.to_string(), (use_vmm_tests_junit_xml)));
 
             let use_vmm_tests_archive = match target {
                 CommonTriple::X86_64_WINDOWS_MSVC => &use_vmm_tests_archive_windows_x86,
@@ -1037,7 +1066,9 @@ impl IntoPipeline for CheckinGatesCli {
                         dep_artifact_dirs: resolve_vmm_tests_artifacts(ctx),
                         test_artifacts,
                         fail_job_on_test_fail: true,
-                        artifact_dir: pub_vmm_tests_results.map(|x| ctx.publish_artifact(x)),
+                        junit_xml_output_dir: ctx.publish_artifact(pub_vmm_tests_junit_xml),
+                        test_results_full_output_dir: ctx
+                            .publish_artifact(pub_vmm_tests_results_full),
                         needs_prep_run,
                         done: ctx.new_done_handle(),
                     }
@@ -1057,6 +1088,34 @@ impl IntoPipeline for CheckinGatesCli {
             if arch != FlowArch::Aarch64 {
                 all_jobs.push(vmm_tests_run_job.finish());
             }
+        }
+
+        {
+            let job = pipeline
+                .new_job(
+                    FlowPlatform::Linux(FlowPlatformLinuxDistro::Ubuntu),
+                    FlowArch::X86_64,
+                    "verify all tests run at least once",
+                )
+                .gh_set_pool(crate::pipelines_shared::gh_pools::default_x86_pool(
+                    FlowPlatform::Linux(FlowPlatformLinuxDistro::Ubuntu),
+                ))
+                .dep_on(
+                    |ctx| flowey_lib_hvlite::_jobs::verify_all_tests_run::Request {
+                        junit_xml_files: vmm_tests_results_artifacts
+                            .iter()
+                            .map(|elem| (elem.0.clone(), ctx.use_artifact(&elem.1)))
+                            .collect(),
+                        nextest_list_json_files: vec![
+                            ctx.use_typed_artifact(&use_nextest_list_json_windows_x86),
+                            ctx.use_typed_artifact(&use_nextest_list_json_linux_x86),
+                            ctx.use_typed_artifact(&use_nextest_list_json_windows_aarch64),
+                        ],
+                        done: ctx.new_done_handle(),
+                    },
+                )
+                .finish();
+            all_jobs.push(job);
         }
 
         // test the flowey local backend by running cargo xflowey build-igvm on x64

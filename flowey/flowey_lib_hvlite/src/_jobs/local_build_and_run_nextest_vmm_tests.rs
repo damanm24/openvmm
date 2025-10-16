@@ -17,7 +17,6 @@ use crate::run_cargo_build::common::CommonTriple;
 use flowey::node::prelude::*;
 use flowey_lib_common::gen_cargo_nextest_run_cmd::CommandShell;
 use flowey_lib_common::gen_cargo_nextest_run_cmd::RunKindDeps;
-use std::collections::BTreeMap;
 use std::str::FromStr;
 use vmm_test_images::KnownTestArtifacts;
 
@@ -338,6 +337,7 @@ impl SimpleFlowNode for Node {
                         }
                         if ubuntu {
                             artifacts.push(KnownTestArtifacts::Ubuntu2404ServerX64Vhd);
+                            artifacts.push(KnownTestArtifacts::Ubuntu2504ServerX64Vhd);
                         }
                         if windows && uefi {
                             artifacts.push(KnownTestArtifacts::Gen2WindowsDataCenterCore2022X64Vhd);
@@ -708,7 +708,10 @@ impl SimpleFlowNode for Node {
         let nextest_archive = ctx.reqv(|v| crate::build_nextest_vmm_tests::Request {
             target: target.as_triple(),
             profile: CommonProfile::from_release(release),
-            build_mode: crate::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive(v),
+            build_mode: crate::build_nextest_vmm_tests::BuildNextestVmmTestsMode::Archive {
+                nextest_list_json_file: None,
+                vmm_test_archive: v,
+            },
         });
         let nextest_archive_file = Path::new("vmm-tests-archive.tar.zst");
         copy_to_dir.push((
@@ -946,13 +949,14 @@ impl SimpleFlowNode for Node {
 
             let junit_xml = results.map(ctx, |r| r.junit_xml);
             let published_results =
-                ctx.reqv(|v| flowey_lib_common::publish_test_results::Request {
-                    junit_xml,
-                    test_label,
-                    attachments: BTreeMap::new(), // the logs are already there
-                    output_dir: Some(ReadVar::from_static(test_content_dir)),
-                    done: v,
-                });
+                ctx.reqv(
+                    |v| flowey_lib_common::publish_test_results::Request::PublishJunitXml {
+                        junit_xml,
+                        test_label,
+                        output_dir: Some(ReadVar::from_static(test_content_dir)),
+                        done: v,
+                    },
+                );
 
             ctx.emit_rust_step("report test results", |ctx| {
                 published_results.claim(ctx);
