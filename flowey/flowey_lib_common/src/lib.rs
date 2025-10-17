@@ -54,4 +54,5 @@ pub mod run_cargo_doc;
 pub mod run_cargo_nextest_archive;
 pub mod run_cargo_nextest_list;
 pub mod run_cargo_nextest_run;
+pub mod run_cargo_test;
 pub mod use_gh_cli;

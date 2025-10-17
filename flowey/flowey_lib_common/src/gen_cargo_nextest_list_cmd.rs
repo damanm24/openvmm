@@ -8,12 +8,7 @@ use std::collections::BTreeMap;
 
 flowey_request! {
     pub struct Request {
-        /// Path to nextest archive file
-        pub archive_file: ReadVar<PathBuf>,
-        /// Path to nextest binary
-        pub nextest_bin: ReadVar<PathBuf>,
-        /// Target triple for the build
-        pub target: ReadVar<target_lexicon::Triple>,
+        pub run_kind_deps: gen_cargo_nextest_run_cmd::RunKindDeps,
         /// Working directory the test archive was created from.
         pub working_dir: ReadVar<PathBuf>,
         /// Path to `.config/nextest.toml`
@@ -42,9 +37,7 @@ impl FlowNode for Node {
 
     fn emit(requests: Vec<Request>, ctx: &mut NodeCtx<'_>) -> anyhow::Result<()> {
         for Request {
-            archive_file,
-            nextest_bin,
-            target,
+            run_kind_deps,
             working_dir,
             config_file,
             nextest_profile,
@@ -55,11 +48,7 @@ impl FlowNode for Node {
         } in requests
         {
             let run_cmd = ctx.reqv(|v| gen_cargo_nextest_run_cmd::Request {
-                run_kind_deps: gen_cargo_nextest_run_cmd::RunKindDeps::RunFromArchive {
-                    archive_file,
-                    nextest_bin,
-                    target,
-                },
+                run_kind_deps,
                 working_dir,
                 config_file,
                 tool_config_files: Vec::new(), // Ignored

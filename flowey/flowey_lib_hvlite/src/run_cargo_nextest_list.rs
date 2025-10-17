@@ -7,12 +7,8 @@ use std::collections::BTreeMap;
 
 flowey_request! {
     pub struct Request {
-        /// Path to nextest archive file
-        pub archive_file: ReadVar<PathBuf>,
-        /// Path to nextest binary
-        pub nextest_bin: Option<ReadVar<PathBuf>>,
-        /// Target triple for the build
-        pub target: Option<ReadVar<target_lexicon::Triple>>,
+        /// Nextest run mode to use (either build inline or run from archive)
+        pub run_kind: flowey_lib_common::run_cargo_nextest_run::NextestRunKind,
         /// Working directory the test archive was created from.
         pub working_dir: Option<ReadVar<PathBuf>>,
         /// Path to `.config/nextest.toml`
@@ -55,9 +51,7 @@ impl SimpleFlowNode for Node {
         let base_env = crate::run_cargo_nextest_run::base_env();
 
         let Request {
-            archive_file,
-            nextest_bin,
-            target,
+            run_kind,
             working_dir,
             config_file,
             nextest_profile,
@@ -85,9 +79,7 @@ impl SimpleFlowNode for Node {
         );
 
         ctx.req(flowey_lib_common::run_cargo_nextest_list::Request {
-            archive_file,
-            nextest_bin,
-            target,
+            run_kind,
             working_dir,
             config_file,
             nextest_profile,

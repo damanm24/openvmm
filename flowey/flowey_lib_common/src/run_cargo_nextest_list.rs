@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 //! Run cargo-nextest list command.
+use crate::gen_cargo_nextest_run_cmd::RunKindDeps;
+use crate::run_cargo_nextest_run::NextestRunKind;
 use flowey::node::prelude::*;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -10,12 +12,8 @@ use std::process::Stdio;
 
 flowey_request! {
     pub struct Request {
-        /// Path to nextest archive file
-        pub archive_file: ReadVar<PathBuf>,
-        /// Path to nextest binary
-        pub nextest_bin: Option<ReadVar<PathBuf>>,
-        /// Target triple for the build
-        pub target: Option<ReadVar<target_lexicon::Triple>>,
+        // Nextest run mode to use
+        pub run_kind: NextestRunKind,
         /// Working directory the test archive was created from.
         pub working_dir: ReadVar<PathBuf>,
         /// Path to `.config/nextest.toml`
@@ -43,15 +41,16 @@ impl SimpleFlowNode for Node {
     type Request = Request;
 
     fn imports(ctx: &mut ImportCtx<'_>) {
+        ctx.import::<crate::cfg_cargo_common_flags::Node>();
+        ctx.import::<crate::install_cargo_nextest::Node>();
         ctx.import::<crate::download_cargo_nextest::Node>();
+        ctx.import::<crate::install_rust::Node>();
         ctx.import::<crate::gen_cargo_nextest_list_cmd::Node>();
     }
 
     fn process_request(request: Self::Request, ctx: &mut NodeCtx<'_>) -> anyhow::Result<()> {
         let Request {
-            archive_file,
-            nextest_bin,
-            target,
+            run_kind,
             working_dir,
             config_file,
             nextest_profile,
@@ -63,16 +62,46 @@ impl SimpleFlowNode for Node {
             output_file,
         } = request;
 
-        let target = target.unwrap_or(ReadVar::from_static(target_lexicon::Triple::host()));
+        let run_kind_deps = match run_kind {
+            NextestRunKind::BuildAndRun(params) => {
+                let cargo_flags = ctx.reqv(crate::cfg_cargo_common_flags::Request::GetFlags);
 
-        let nextest_bin = nextest_bin.unwrap_or_else(|| {
-            ctx.reqv(|v| crate::download_cargo_nextest::Request::Get(target.clone(), v))
-        });
+                let nextest_installed = ctx.reqv(crate::install_cargo_nextest::Request);
+
+                let rust_toolchain = ctx.reqv(crate::install_rust::Request::GetRustupToolchain);
+
+                ctx.req(crate::install_rust::Request::InstallTargetTriple(
+                    params.target.clone(),
+                ));
+
+                RunKindDeps::BuildAndRun {
+                    params,
+                    nextest_installed,
+                    rust_toolchain,
+                    cargo_flags,
+                }
+            }
+            NextestRunKind::RunFromArchive {
+                archive_file,
+                target,
+                nextest_bin,
+            } => {
+                let target = target.unwrap_or(ReadVar::from_static(target_lexicon::Triple::host()));
+
+                let nextest_bin = nextest_bin.unwrap_or_else(|| {
+                    ctx.reqv(|v| crate::download_cargo_nextest::Request::Get(target.clone(), v))
+                });
+
+                RunKindDeps::RunFromArchive {
+                    archive_file,
+                    nextest_bin,
+                    target,
+                }
+            }
+        };
 
         let cmd = ctx.reqv(|v| crate::gen_cargo_nextest_list_cmd::Request {
-            archive_file,
-            nextest_bin,
-            target,
+            run_kind_deps,
             working_dir: working_dir.clone(),
             config_file,
             nextest_profile,

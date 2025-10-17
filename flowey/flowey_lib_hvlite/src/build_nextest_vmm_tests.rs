@@ -185,9 +185,11 @@ impl FlowNode for Node {
 
                     let nextest_list_json = if nextest_list_json_write.as_ref().is_some() {
                         Some(ctx.reqv(|v| crate::run_cargo_nextest_list::Request {
-                            archive_file: archive_file.clone(),
-                            nextest_bin: None,
-                            target: None,
+                            run_kind: flowey_lib_common::run_cargo_nextest_run::NextestRunKind::RunFromArchive {
+                                archive_file: archive_file.clone(),
+                                nextest_bin: None,
+                                target: None,
+                            },
                             working_dir: None,
                             config_file: None,
                             nextest_profile: "ci".into(),

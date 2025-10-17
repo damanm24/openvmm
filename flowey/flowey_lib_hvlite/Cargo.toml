@@ -9,7 +9,8 @@ rust-version.workspace = true
 [dependencies]
 flowey.workspace = true
 flowey_lib_common.workspace = true
-
+petri_artifacts_common.workspace = true
+petri_artifacts_core = { workspace = true }
 petri_artifacts_vmm_test = { workspace = true }
 powershell_builder.workspace = true
 vmm_test_images = { workspace = true, features = ["serde"] }

@@ -301,8 +301,8 @@ struct Options {
 #[derive(Serialize)]
 struct TestInfo {
     name: String,
-    required: Vec<String>,
-    optional: Vec<String>,
+    required: Vec<petri_artifacts_core::ErasedArtifactHandle>,
+    optional: Vec<petri_artifacts_core::ErasedArtifactHandle>,
 }
 
 /// Collect all tests and whether they can run on this host.
@@ -374,16 +374,8 @@ fn print_json(selected: &[&Test]) {
     let infos: Vec<TestInfo> = selected
         .iter()
         .map(|test| {
-            let required = test
-                .artifact_requirements
-                .required_artifacts()
-                .map(|a| format!("{a:?}"))
-                .collect();
-            let optional = test
-                .artifact_requirements
-                .optional_artifacts()
-                .map(|a| format!("{a:?}"))
-                .collect();
+            let required = test.artifact_requirements.required_artifacts().collect();
+            let optional = test.artifact_requirements.optional_artifacts().collect();
             TestInfo {
                 name: test.name(),
                 required,
@@ -392,7 +384,7 @@ fn print_json(selected: &[&Test]) {
         })
         .collect();
 
-    serde_json::to_writer_pretty(std::io::stdout(), &infos).expect("failed to write json");
+    serde_json::to_writer(std::io::stdout(), &infos).expect("failed to write json");
     println!();
 }
 

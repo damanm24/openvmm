@@ -191,6 +191,37 @@ pub struct ErasedArtifactHandle {
     artifact_id_str: &'static str,
 }
 
+impl ErasedArtifactHandle {
+    /// Get the artifact ID string (its unique identifier)
+    pub fn id(&self) -> &'static str {
+        self.artifact_id_str
+    }
+}
+
+impl serde::Serialize for ErasedArtifactHandle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.artifact_id_str)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ErasedArtifactHandle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let id = String::deserialize(deserializer)?;
+        // Leak the string to get a 'static reference
+        // This is acceptable because artifact IDs are effectively static
+        // and we only deserialize a small, bounded set of them
+        Ok(Self {
+            artifact_id_str: Box::leak(id.into_boxed_str()),
+        })
+    }
+}
+
 impl std::fmt::Debug for ErasedArtifactHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // the `declare_artifacts!` macro uses `module_path!` under-the-hood to

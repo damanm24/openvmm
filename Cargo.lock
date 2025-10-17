@@ -1949,6 +1949,8 @@ dependencies = [
  "fs-err",
  "igvmfilegen_config",
  "log",
+ "petri_artifacts_common",
+ "petri_artifacts_core",
  "petri_artifacts_vmm_test",
  "powershell_builder",
  "quick-xml",
@@ -5677,6 +5679,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "paste",
+ "serde",
 ]
 
 [[package]]
