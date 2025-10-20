@@ -15,12 +15,9 @@ use crate::run_cargo_build::common::CommonPlatform;
 use crate::run_cargo_build::common::CommonProfile;
 use crate::run_cargo_build::common::CommonTriple;
 use anyhow::Ok;
-use anyhow::anyhow;
 use flowey::node::prelude::*;
 use flowey_lib_common::gen_cargo_nextest_run_cmd::CommandShell;
 use flowey_lib_common::gen_cargo_nextest_run_cmd::RunKindDeps;
-use flowey_lib_common::run_cargo_build::CargoBuildProfile;
-use serde_json::Value;
 use std::str::FromStr;
 use vmm_test_images::KnownTestArtifacts;
 
@@ -106,7 +103,7 @@ define_vmm_test_selection_flags! {
     vmgstool: true,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildSelections {
     pub openhcl: bool,
     pub openvmm: bool,
@@ -190,9 +187,8 @@ impl SimpleFlowNode for Node {
         ctx.import::<flowey_lib_common::gen_cargo_nextest_run_cmd::Node>();
         ctx.import::<crate::install_vmm_tests_deps::Node>();
         ctx.import::<crate::run_prep_steps::Node>();
-        ctx.import::<flowey_lib_common::run_cargo_nextest_list::Node>();
         ctx.import::<crate::build_vmgstool::Node>();
-        ctx.import::<flowey_lib_common::run_cargo_test::Node>();
+        ctx.import::<crate::gen_build_selections_for_vmm_tests::Node>();
     }
 
     fn process_request(request: Self::Request, ctx: &mut NodeCtx<'_>) -> anyhow::Result<()> {
@@ -754,37 +750,17 @@ impl SimpleFlowNode for Node {
         copy_to_dir.push((nextest_config_file.to_owned(), nextest_config_file_src));
         let nextest_config_file = test_content_dir.join(nextest_config_file);
 
-        // Use the list command here
-        let nextest_list_cmd = ctx.reqv(|v| flowey_lib_common::run_cargo_nextest_list::Request {
-            run_kind: flowey_lib_common::run_cargo_nextest_run::NextestRunKind::RunFromArchive {
-                archive_file: ReadVar::from_static(nextest_archive_file.clone()),
-                target: Some(ReadVar::from_static(target.clone())),
-                nextest_bin: Some(ReadVar::from_static(nextest_bin.clone())),
-            },
+        let build_selections = ctx.reqv(|v| crate::gen_build_selections_for_vmm_tests::Request {
+            archive_file: ReadVar::from_static(nextest_archive_file.clone()),
+            target: ReadVar::from_static(target.clone()),
+            nextest_bin: ReadVar::from_static(nextest_bin.clone()),
             working_dir: ReadVar::from_static(test_content_dir.clone()),
             config_file: ReadVar::from_static(nextest_config_file.clone()),
             nextest_profile: nextest_profile.as_str().to_owned(),
-            nextest_filter_expr: Some(nextest_filter_expr.clone()),
-            run_ignored: false,
-            extra_env: None,
+            nextest_filter_expr: nextest_filter_expr.clone(),
             output_dir: ReadVar::from_static(test_content_dir.clone()),
-            pre_run_deps: vec![],
-            output_file: v,
-        });
-
-        let test_artifact_requirements = ctx.reqv(|v| flowey_lib_common::run_cargo_test::Request {
-            packages:
-                flowey_lib_common::run_cargo_nextest_run::build_params::TestPackages::Crates {
-                    crates: vec!["vmm_tests".into()],
-                },
-            profile: match release {
-                true => flowey_lib_common::run_cargo_build::CargoBuildProfile::Release,
-                false => flowey_lib_common::run_cargo_build::CargoBuildProfile::Debug,
-            },
-            features: Default::default(),
-            target: target.clone(),
-            extra_args: Some(vec!["--list-required-artifacts=json".into()]),
-            output: v,
+            release,
+            build_selections: v,
         });
 
         let vmm_test_artifacts_dir = test_content_dir.join("images");
@@ -845,7 +821,6 @@ impl SimpleFlowNode for Node {
         });
 
         let mut side_effects = Vec::new();
-
         side_effects.push(
             ctx.emit_rust_step("copy additional files to test content dir", |ctx| {
                 let copy_to_dir = copy_to_dir
@@ -877,100 +852,6 @@ impl SimpleFlowNode for Node {
                 }
             }),
         );
-
-        side_effects.push(ctx.emit_rust_step("get list of tests to run", |ctx| {
-            let nextest_list_cmd = nextest_list_cmd.claim(ctx);
-            let test_artifact_requirements = test_artifact_requirements.claim(ctx);
-            move |rt| {
-                let nextest_list_path = rt.read(nextest_list_cmd);
-                let requirements_json = rt.read(test_artifact_requirements);
-                let nextest_list_output = fs_err::read(nextest_list_path)?;
-                let v: Value = serde_json::from_slice(&nextest_list_output)?;
-                let rust_suites = v.get("rust-suites").and_then(Value::as_object).ok_or_else(|| anyhow!("missing rust-suites"))?;
-
-                let mut matched_names = Vec::new();
-
-                for (_suite_name, suite_val) in rust_suites {
-                    if let Some(testcases) = suite_val.get("testcases").and_then(Value::as_object) {
-                        for (test_name, test_val) in testcases {
-                            let status = test_val.get("filter-match").and_then(|fm| fm.get("status")).and_then(Value::as_str);
-                            if status == Some("matches") {
-                                matched_names.push(test_name.clone());
-                            }
-                        }
-
-                    }
-                }
-                log::info!("Output: {matched_names:#?}");
-
-                // Define a struct that matches the JSON output from petri
-                // This now uses the actual ErasedArtifactHandle type!
-                #[derive(serde::Deserialize, Debug)]
-                struct TestArtifactInfo {
-                    name: String,
-                    required: Vec<petri_artifacts_core::ErasedArtifactHandle>,
-                    optional: Vec<petri_artifacts_core::ErasedArtifactHandle>,
-                }
-
-                // The output may contain multiple JSON arrays (one per target/configuration)
-                // Parse each non-empty line as a separate JSON blob
-                let mut all_required_artifacts = std::collections::BTreeSet::new();
-                let mut all_optional_artifacts = std::collections::BTreeSet::new();
-
-                // Convert matched_names to a HashSet for efficient lookup
-                let matched_names_set: std::collections::HashSet<_> = matched_names.iter().collect();
-
-                for line in requirements_json.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    let test_infos: Vec<TestArtifactInfo> = serde_json::from_str(line)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to parse test artifact requirements from line: {}\nError: {}",
-                                line,
-                                e
-                            )
-                        })?;
-
-                    for test_info in &test_infos {
-                        // Only process artifact requirements for tests that match the filter
-                        if !matched_names_set.contains(&test_info.name) {
-                            continue;
-                        }
-
-                        log::info!(
-                            "Test '{}' requires {} artifacts",
-                            test_info.name,
-                            test_info.required.len()
-                        );
-
-                        for artifact in &test_info.required {
-                            all_required_artifacts.insert(*artifact);
-                        }
-
-                        for artifact in &test_info.optional {
-                            all_optional_artifacts.insert(*artifact);
-                        }
-                    }
-                }
-
-                log::info!(
-                    "Unique required artifacts ({}): {:?}",
-                    all_required_artifacts.len(),
-                    all_required_artifacts
-                );
-                log::info!(
-                    "Unique optional artifacts ({}): {:?}",
-                    all_optional_artifacts.len(),
-                    all_optional_artifacts
-                );
-
-                Ok(())
-            }
-        }));
 
         side_effects.push(ctx.emit_rust_step("write dep install script", |ctx| {
             let dep_install_cmds = dep_install_cmds.claim(ctx);
