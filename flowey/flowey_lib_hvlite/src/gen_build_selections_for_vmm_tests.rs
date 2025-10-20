@@ -1,9 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::_jobs::local_build_and_run_nextest_vmm_tests::BuildSelections;
 use anyhow::Ok;
 use anyhow::anyhow;
 use flowey::node::prelude::*;
+use petri_artifacts_common::artifacts as common;
+use petri_artifacts_vmm_test::artifacts::*;
 use serde_json::Value;
 
 flowey_request! {
@@ -17,7 +20,7 @@ flowey_request! {
         pub nextest_filter_expr: String,
         pub output_dir: ReadVar<PathBuf>,
         pub release: bool,
-        pub build_selections: WriteVar<crate::_jobs::local_build_and_run_nextest_vmm_tests::BuildSelections>,
+        pub build_selections: WriteVar<BuildSelections>,
     }
 }
 
@@ -54,7 +57,7 @@ impl SimpleFlowNode for Node {
             working_dir,
             config_file,
             nextest_profile: nextest_profile.as_str().to_owned(),
-            nextest_filter_expr: Some(nextest_filter_expr),
+            nextest_filter_expr: Some(nextest_filter_expr.clone()),
             run_ignored: false,
             extra_env: None,
             output_dir,
@@ -79,12 +82,13 @@ impl SimpleFlowNode for Node {
 
         // Analyze artifact requirements to determine what needs to be built
         // This happens after building the test binary but before building artifacts
-        let computed_build_selections = ctx.emit_rust_stepv(
+        ctx.emit_rust_step(
             "analyze artifact requirements and determine build selections",
             |ctx| {
                 let nextest_list_cmd = nextest_list_cmd.claim(ctx);
                 let test_artifact_requirements = test_artifact_requirements.claim(ctx);
                 let nextest_filter_expr = nextest_filter_expr.clone();
+                let build_selections = build_selections.claim(ctx);
 
                 move |rt| {
                     let nextest_list_path = rt.read(nextest_list_cmd);
@@ -151,20 +155,8 @@ impl SimpleFlowNode for Node {
                         }
                     }
 
-                    log::info!(
-                        "Unique required artifacts ({}): {:?}",
-                        all_required_artifacts.len(),
-                        all_required_artifacts
-                    );
-                    log::info!(
-                        "Unique optional artifacts ({}): {:?}",
-                        all_optional_artifacts.len(),
-                        all_optional_artifacts
-                    );
-
-                    // Determine what needs to be built based on the artifact requirements
-                    use petri_artifacts_common::artifacts as common;
-                    use petri_artifacts_vmm_test::artifacts::*;
+                    log::info!("All required artifacts: {:?}", all_required_artifacts);
+                    log::info!("All optional artifacts: {:?}", all_optional_artifacts);
 
                     let mut computed_build = BuildSelections::default();
 
@@ -196,7 +188,7 @@ impl SimpleFlowNode for Node {
                         }
 
                         // OpenVMM native executable
-                        if id == OPENVMM_NATIVE {
+                        if id == OPENVMM_WIN_X64 || id == OPENVMM_LINUX_X64 || id == OPENVMM_WIN_AARCH64 || id == OPENVMM_LINUX_AARCH64 {
                             computed_build.openvmm = true;
                         }
 
@@ -256,7 +248,8 @@ impl SimpleFlowNode for Node {
 
                     log::info!("Computed build selections based on artifacts: {:#?}", computed_build);
 
-                    Ok(computed_build)
+                    rt.write(build_selections, &computed_build);
+                    Ok(())
                 }
             },
         );
