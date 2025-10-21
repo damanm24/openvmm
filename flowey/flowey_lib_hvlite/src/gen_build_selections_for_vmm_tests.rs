@@ -158,19 +158,19 @@ impl SimpleFlowNode for Node {
                     log::info!("All required artifacts: {:?}", all_required_artifacts);
                     log::info!("All optional artifacts: {:?}", all_optional_artifacts);
 
-                    let mut computed_build = BuildSelections::default();
-
-                    // Start with everything disabled
-                    computed_build.openhcl = false;
-                    computed_build.openvmm = false;
-                    computed_build.pipette_windows = false;
-                    computed_build.pipette_linux = false;
-                    computed_build.prep_steps = false;
-                    computed_build.guest_test_uefi = false;
-                    computed_build.tmks = false;
-                    computed_build.tmk_vmm_windows = false;
-                    computed_build.tmk_vmm_linux = false;
-                    computed_build.vmgstool = false;
+                    let mut computed_build = BuildSelections {
+                        openhcl: false,
+                        openvmm: false,
+                        pipette_windows: false,
+                        pipette_linux: false,
+                        prep_steps: false,
+                        guest_test_uefi: false,
+                        release_openhcl_igvm_files: false,
+                        tmks: false,
+                        tmk_vmm_windows: false,
+                        tmk_vmm_linux: false,
+                        vmgstool: false,
+                    };
 
                     // Check both required and optional artifacts to determine what to build
                     let all_artifacts: Vec<_> = all_required_artifacts.iter()
@@ -199,12 +199,15 @@ impl SimpleFlowNode for Node {
                             || id == openhcl_igvm::LATEST_LINUX_DIRECT_TEST_X64
                             || id == openhcl_igvm::LATEST_STANDARD_AARCH64
                             || id == openhcl_igvm::LATEST_STANDARD_DEV_KERNEL_AARCH64
-                            || id == openhcl_igvm::RELEASE_25_05_STANDARD_X64
-                            || id == openhcl_igvm::RELEASE_25_05_LINUX_DIRECT_X64
-                            || id == openhcl_igvm::RELEASE_25_05_STANDARD_AARCH64
                             || id == openhcl_igvm::um_bin::LATEST_LINUX_DIRECT_TEST_X64
                             || id == openhcl_igvm::um_dbg::LATEST_LINUX_DIRECT_TEST_X64 {
                             computed_build.openhcl = true;
+                        }
+
+                        if id == openhcl_igvm::RELEASE_25_05_STANDARD_X64
+                        || id == openhcl_igvm::RELEASE_25_05_LINUX_DIRECT_X64
+                        || id == openhcl_igvm::RELEASE_25_05_STANDARD_AARCH64 {
+                            computed_build.release_openhcl_igvm_files = true;
                         }
 
                         // Guest test UEFI disk

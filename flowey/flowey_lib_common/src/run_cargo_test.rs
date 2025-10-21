@@ -3,8 +3,6 @@
 
 //! Test
 
-use std::io::stdout;
-
 use crate::run_cargo_build::CargoBuildProfile;
 use crate::run_cargo_build::CargoFeatureSet;
 use crate::run_cargo_nextest_run::build_params::TestPackages;
@@ -96,7 +94,7 @@ impl FlowNode for Node {
                     };
 
                     let feature_strings = features.to_cargo_arg_strings();
-                    args.extend(feature_strings.iter().map(|s| s.to_string()));
+                    args.extend(feature_strings.iter().cloned());
                     args.push("--target".into());
                     args.push(target);
                     args.push("--profile".into());

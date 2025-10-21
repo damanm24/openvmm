@@ -111,6 +111,7 @@ pub struct BuildSelections {
     pub pipette_linux: bool,
     pub prep_steps: bool,
     pub guest_test_uefi: bool,
+    pub release_openhcl_igvm_files: bool,
     pub tmks: bool,
     pub tmk_vmm_windows: bool,
     pub tmk_vmm_linux: bool,
@@ -122,15 +123,16 @@ impl Default for BuildSelections {
     fn default() -> Self {
         Self {
             prep_steps: false,
-            openhcl: true,
-            openvmm: true,
-            pipette_windows: true,
-            pipette_linux: true,
-            guest_test_uefi: true,
-            tmks: true,
-            tmk_vmm_windows: true,
-            tmk_vmm_linux: true,
-            vmgstool: true,
+            openhcl: false,
+            openvmm: false,
+            pipette_windows: false,
+            pipette_linux: false,
+            guest_test_uefi: false,
+            release_openhcl_igvm_files: false,
+            tmks: false,
+            tmk_vmm_windows: false,
+            tmk_vmm_linux: false,
+            vmgstool: false,
         }
     }
 }
@@ -391,7 +393,9 @@ impl SimpleFlowNode for Node {
             }
         };
 
-        if !linux_host {
+        if !linux_host
+            || target.as_triple().operating_system != target_lexicon::OperatingSystem::Linux
+        {
             build.openhcl = false;
             build.pipette_linux = false;
             build.tmk_vmm_linux = false;
@@ -466,6 +470,7 @@ impl SimpleFlowNode for Node {
                 build.pipette_linux &= build_selections.pipette_linux;
                 build.prep_steps &= build_selections.prep_steps;
                 build.guest_test_uefi &= build_selections.guest_test_uefi;
+                build.release_openhcl_igvm_files &= build_selections.release_openhcl_igvm_files;
                 build.tmks &= build_selections.tmks;
                 build.tmk_vmm_windows &= build_selections.tmk_vmm_windows;
                 build.tmk_vmm_linux &= build_selections.tmk_vmm_linux;
@@ -816,7 +821,7 @@ impl SimpleFlowNode for Node {
         copy_to_dir.push((cargo_toml_file.to_owned(), repo_cargo_toml_file_src));
         copy_to_dir.push((crate_cargo_toml_file, crate_cargo_toml_file_src));
 
-        let release_igvm_files =
+        let release_igvm_files = build.release_openhcl_igvm_files.then(|| {
             ctx.reqv(
                 |v| crate::download_release_igvm_files_from_gh::resolve::Request {
                     arch,
@@ -824,7 +829,8 @@ impl SimpleFlowNode for Node {
                     release_version:
                         crate::download_release_igvm_files_from_gh::OpenhclReleaseVersion::latest(),
                 },
-            );
+            )
+        });
 
         let target = target.as_triple();
 
@@ -843,7 +849,7 @@ impl SimpleFlowNode for Node {
             register_openhcl_igvm_files,
             get_test_log_path: None,
             get_env: v,
-            release_igvm_files: Some(release_igvm_files),
+            release_igvm_files,
             use_relative_paths: build_only,
         });
 
