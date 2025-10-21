@@ -31,7 +31,7 @@
     curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
     ./rustup-init.exe -y --default-toolchain={{RUSTUP_TOOLCHAIN}}
     echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-  condition: eq(variables.Agent.OS, 'Windows')
+  condition: eq(variables.Agent.OS, 'Windows_NT')
   displayName: rustup (Windows X64)
 
 - checkout: self
