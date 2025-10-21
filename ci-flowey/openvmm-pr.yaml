@@ -34,14 +34,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -284,14 +284,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -546,14 +546,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -772,14 +772,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -989,14 +989,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -1388,14 +1388,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -1684,14 +1684,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -2003,14 +2003,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -2270,14 +2270,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -3389,14 +3389,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -3585,14 +3585,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -3843,14 +3843,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -4035,14 +4035,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
@@ -4193,14 +4193,14 @@ jobs:
       . "$HOME/.cargo/env"
       echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       rustup show
-    condition: eq(variables.Agent.OS, 'Linux')
+    condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
       echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
-    condition: eq(variables.Agent.OS, 'Windows')
+    condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
