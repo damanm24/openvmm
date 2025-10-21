@@ -1075,9 +1075,13 @@ impl IntoPipeline for CheckinGatesCli {
             },
         ] {
             // Skip ARM jobs entirely for ADO backend (no ARM pool support)
-            if matches!(arch, FlowArch::Aarch64) && matches!(backend_hint, PipelineBackendHint::Ado)
-            {
-                continue;
+            if matches!(backend_hint, PipelineBackendHint::Ado) {
+                if matches!(arch, FlowArch::Aarch64)
+                    || label.contains("tdx")
+                    || label.contains("snp")
+                {
+                    continue;
+                }
             }
             let test_label = format!("{label}-vmm-tests");
 

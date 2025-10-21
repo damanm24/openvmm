@@ -22,19 +22,7 @@ pub fn get_template_ado(ado_hvlite_repo_resource_id: &AdoResourcesRepositoryId) 
             ado_hvlite_repo_resource_id.dangerous_get_raw_id(),
         )
         .replace(
-            "{{MSRUSTUP_VERSION}}",
-            flowey_lib_hvlite::_jobs::cfg_versions::MSRUSTUP_VERSION,
-        )
-        .replace(
-            "{{MSRUSTUP_TOOLCHAIN_FEED}}",
-            flowey_lib_hvlite::_jobs::cfg_versions::MSRUSTUP_TOOLCHAIN_FEED,
-        )
-        .replace(
-            "{{MSRUSTUP_CRATES_IO_FEED_OVERRIDE}}",
-            flowey_lib_hvlite::_jobs::cfg_versions::MSRUSTUP_CRATES_IO_FEED_OVERRIDE,
-        )
-        .replace(
-            "{{MSRUSTUP_NONPROD_TOOLCHAIN_FEED}}",
-            flowey_lib_hvlite::_jobs::cfg_versions::MSRUSTUP_NONPROD_TOOLCHAIN_FEED,
+            "{{RUSTUP_TOOLCHAIN}}",
+            flowey_lib_hvlite::_jobs::cfg_versions::RUSTUP_TOOLCHAIN,
         )
 }
