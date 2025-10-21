@@ -26,14 +26,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -267,14 +276,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -520,14 +538,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -737,14 +764,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -945,14 +981,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -1335,14 +1380,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -1622,14 +1676,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -1932,14 +1995,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -2190,14 +2262,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -2429,7 +2510,7 @@ jobs:
   - publish: $(FLOWEY_TEMP_DIR)/bootstrapped-flowey
     displayName: 🌼🥾 Publish bootstrapped flowey
     artifact: _internal-flowey-bootstrap-x86_64-windows-uid-9
-- job: job18
+- job: job16
   displayName: run vmm-tests [x64-linux]
   pool: HvLite-CI-Linux-Pool-CentralUS
   dependsOn:
@@ -2493,597 +2574,6 @@ jobs:
     displayName: Set flowey path
   - bash: |
       set -e
-      echo '"debug"' | $FLOWEY_BIN v 18 'FLOWEY_LOG' update
-      echo "$(FLOWEY_TEMP_DIR)/work" | $FLOWEY_BIN v 18 '_internal_WORKING_DIR' --is-raw-string update
-
-      cat <<'EOF' | tr '[:upper:]' '[:lower:]' | $FLOWEY_BIN v 18 'verbose' update
-      ${{ parameters.verbose }}
-      EOF
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-guest_test_uefi" | $FLOWEY_BIN v 18 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-pipette" | $FLOWEY_BIN v 18 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-tmk_vmm" | $FLOWEY_BIN v 18 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-openvmm" | $FLOWEY_BIN v 18 'artifact_use_from_x64-linux-openvmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-vmm-tests-archive" | $FLOWEY_BIN v 18 'artifact_use_from_x64-linux-vmm-tests-archive' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-tmks" | $FLOWEY_BIN v 18 'artifact_use_from_x64-tmks' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-pipette" | $FLOWEY_BIN v 18 'artifact_use_from_x64-windows-pipette' --is-raw-string update
-    displayName: 🌼🛫 Initialize job
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
-    displayName: ensure /dev/kvm is accessible
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::download_cargo_nextest 0
-      $(FLOWEY_BIN) e 18 flowey_lib_common::download_cargo_nextest 1
-      $(FLOWEY_BIN) e 18 flowey_lib_common::download_cargo_nextest 2
-      $(FLOWEY_BIN) e 18 flowey_lib_common::download_cargo_nextest 3
-    displayName: create cargo-nextest cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 4
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:8:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar5
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar6
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar6)
-      path: $(floweyvar5)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: cargo-nextest'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:11:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 6
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_cargo_nextest 4
-    displayName: downloading cargo-nextest
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::git_checkout 0
-      $FLOWEY_BIN v 18 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:299:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:300:46 write-to-env ado floweyvar2
-      $FLOWEY_BIN v 18 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:300:46' write-to-env ado FLOWEY_CONDITION
-    displayName: check if openvmm needs to be cloned
-  - checkout: self
-    path: repo0
-    fetchTags: false
-    fetchDepth: 1
-    persistCredentials: $(floweyvar2)
-    submodules: recursive
-    displayName: checkout repo openvmm
-    condition: and(eq(variables['FLOWEY_CONDITION'], true), succeeded(), not(canceled()))
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::git_checkout 2
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::run_cargo_nextest_run 0
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 3
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 6
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 1
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 0
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 2
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 5
-    displayName: report cloned repo directories
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
-    displayName: creating new test content dir
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_azcopy 0
-    displayName: create azcopy cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 0
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar3
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar4
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar4)
-      path: $(floweyvar3)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: azcopy'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:4:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 2
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::install_dist_pkg 0
-    displayName: checking if packages need to be installed
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::install_dist_pkg 1
-    displayName: installing packages
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_azcopy 1
-    displayName: installing azcopy
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 0
-    displayName: calculating required VMM tests disk images
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 1
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 2
-    displayName: downloading VMM test disk images
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_gh_cli 0
-    displayName: create gh cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 8
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:15:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar7
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:16:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar8
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar8)
-      path: $(floweyvar7)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: gh-cli'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 10
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_gh_cli 1
-    displayName: installing gh
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::use_gh_cli 0
-    displayName: setup gh cli
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::gh_latest_completed_workflow_id 0
-    displayName: get latest completed action id
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_gh_artifact 0
-    displayName: download artifacts from github actions run
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::download_release_igvm_files_from_gh::resolve 0
-    displayName: write to directory variables
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_gh_release 0
-    displayName: create gh-release-download cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 12
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:22:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar9
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:23:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar10
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar10)
-      path: $(floweyvar9)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: gh-release-download'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 18 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 18 flowey_lib_common::cache 14
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::download_gh_release 1
-    displayName: download artifacts from github releases
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::download_openvmm_deps 0
-    displayName: unpack openvmm-deps archive
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::download_uefi_mu_msvm 0
-    displayName: unpack mu_msvm package (x64)
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::init_vmm_tests_env 0
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::run_cargo_nextest_run 1
-      $(FLOWEY_BIN) e 18 flowey_core::pipeline::artifact::resolve 4
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::test_nextest_vmm_tests_archive 1
-    displayName: setting up vmm_tests env
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::gen_cargo_nextest_run_cmd 0
-    displayName: generate nextest command
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_hvlite::install_vmm_tests_deps 0
-    displayName: install vmm tests deps (linux)
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_common::run_cargo_nextest_run 0
-      $(FLOWEY_BIN) e 18 flowey_lib_common::run_cargo_nextest_run 1
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
-      $(FLOWEY_BIN) e 18 flowey_lib_common::publish_test_results 1
-      $(FLOWEY_BIN) e 18 flowey_lib_common::ado_task_publish_test_results 0
-      $(FLOWEY_BIN) e 18 flowey_lib_common::publish_test_results 0
-      $FLOWEY_BIN v 18 'flowey_lib_common::ado_task_publish_test_results:0:flowey_lib_common/src/ado_task_publish_test_results.rs:57:45' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env ado floweyvar1
-      $FLOWEY_BIN v 18 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env ado FLOWEY_CONDITION
-    displayName: run 'vmm_tests' nextest tests
-  - task: PublishTestResults@2
-    inputs:
-      testResultsFormat: JUnit
-      testResultsFiles: $(floweyvar1)
-      testRunTitle: x64-linux-vmm-tests
-    displayName: 'publish test results: x64-linux-vmm-tests (JUnit XML)'
-    condition: and(eq(variables['FLOWEY_CONDITION'], true), succeeded(), not(canceled()))
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-      $(FLOWEY_BIN) e 18 flowey_lib_common::publish_test_results 2
-      $(FLOWEY_BIN) e 18 flowey_lib_common::publish_test_results 3
-      $(FLOWEY_BIN) e 18 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
-    displayName: report test results to overall pipeline status
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::cache 3
-    displayName: 'validate cache entry: azcopy'
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::cache 7
-    displayName: 'validate cache entry: cargo-nextest'
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::cache 11
-    displayName: 'validate cache entry: gh-cli'
-  - bash: $(FLOWEY_BIN) e 18 flowey_lib_common::cache 15
-    displayName: 'validate cache entry: gh-release-download'
-- job: job17
-  displayName: run vmm-tests [x64-windows-amd-snp]
-  pool: HvLite-CI-Win-Pool
-  dependsOn:
-  - job5
-  - job7
-  - job9
-  condition: and(succeeded(), not(canceled()))
-  variables:
-  - name: FLOWEY_TEMP_DIR
-    value: $(Build.StagingDirectory)/.flowey-internal
-  steps:
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼🥾 Download bootstrapped flowey
-    inputs:
-      artifact: _internal-flowey-bootstrap-x86_64-windows-uid-9
-      path: $(FLOWEY_TEMP_DIR)/bootstrapped-flowey
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-guest_test_uefi
-    inputs:
-      artifact: x64-guest_test_uefi
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-guest_test_uefi
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-linux-musl-pipette
-    inputs:
-      artifact: x64-linux-musl-pipette
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-pipette
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-linux-musl-tmk_vmm
-    inputs:
-      artifact: x64-linux-musl-tmk_vmm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-tmk_vmm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-openhcl-igvm
-    inputs:
-      artifact: x64-openhcl-igvm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-openhcl-igvm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-tmks
-    inputs:
-      artifact: x64-tmks
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-tmks
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-openvmm
-    inputs:
-      artifact: x64-windows-openvmm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-openvmm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-pipette
-    inputs:
-      artifact: x64-windows-pipette
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-pipette
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-prep_steps
-    inputs:
-      artifact: x64-windows-prep_steps
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-prep_steps
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-tmk_vmm
-    inputs:
-      artifact: x64-windows-tmk_vmm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-tmk_vmm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-vmgstool
-    inputs:
-      artifact: x64-windows-vmgstool
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmgstool
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-vmm-tests-archive
-    inputs:
-      artifact: x64-windows-vmm-tests-archive
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmm-tests-archive
-  - bash: |
-      set -e
-      AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
-      AgentTempDirNormal=$(echo "$AgentTempDirNormal" | sed -e 's|\\|\/|g' -e 's|^\([A-Za-z]\)\:/\(.*\)|/\L\1\E/\2|')
-      echo "##vso[task.setvariable variable=AgentTempDirNormal;]$AgentTempDirNormal"
-
-      chmod +x $AgentTempDirNormal/bootstrapped-flowey/flowey.exe
-      FLOWEY_BIN="$AgentTempDirNormal/bootstrapped-flowey/flowey.exe"
-      echo "##vso[task.setvariable variable=FLOWEY_BIN;]$FLOWEY_BIN"
-    displayName: Set flowey path
-  - bash: |
-      set -e
-      echo '"debug"' | $FLOWEY_BIN v 17 'FLOWEY_LOG' update
-      echo "$(FLOWEY_TEMP_DIR)/work" | $FLOWEY_BIN v 17 '_internal_WORKING_DIR' --is-raw-string update
-
-      cat <<'EOF' | tr '[:upper:]' '[:lower:]' | $FLOWEY_BIN v 17 'verbose' update
-      ${{ parameters.verbose }}
-      EOF
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-guest_test_uefi" | $FLOWEY_BIN v 17 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-pipette" | $FLOWEY_BIN v 17 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-tmk_vmm" | $FLOWEY_BIN v 17 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-openhcl-igvm" | $FLOWEY_BIN v 17 'artifact_use_from_x64-openhcl-igvm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-tmks" | $FLOWEY_BIN v 17 'artifact_use_from_x64-tmks' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-openvmm" | $FLOWEY_BIN v 17 'artifact_use_from_x64-windows-openvmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-pipette" | $FLOWEY_BIN v 17 'artifact_use_from_x64-windows-pipette' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-prep_steps" | $FLOWEY_BIN v 17 'artifact_use_from_x64-windows-prep_steps' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-tmk_vmm" | $FLOWEY_BIN v 17 'artifact_use_from_x64-windows-tmk_vmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmgstool" | $FLOWEY_BIN v 17 'artifact_use_from_x64-windows-vmgstool' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmm-tests-archive" | $FLOWEY_BIN v 17 'artifact_use_from_x64-windows-vmm-tests-archive' --is-raw-string update
-    displayName: 🌼🛫 Initialize job
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::download_cargo_nextest 0
-      $(FLOWEY_BIN) e 17 flowey_lib_common::download_cargo_nextest 1
-      $(FLOWEY_BIN) e 17 flowey_lib_common::download_cargo_nextest 2
-      $(FLOWEY_BIN) e 17 flowey_lib_common::download_cargo_nextest 3
-    displayName: create cargo-nextest cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 4
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:8:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar5
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:9:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar6
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar6)
-      path: $(floweyvar5)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: cargo-nextest'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:11:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 6
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_cargo_nextest 4
-    displayName: downloading cargo-nextest
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::git_checkout 0
-      $FLOWEY_BIN v 17 'flowey_lib_common::git_checkout:0:flowey_lib_common/src/git_checkout.rs:299:80' --is-raw-string --condvar flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:300:46 write-to-env ado floweyvar2
-      $FLOWEY_BIN v 17 'flowey_lib_common::git_checkout:1:flowey_lib_common/src/git_checkout.rs:300:46' write-to-env ado FLOWEY_CONDITION
-    displayName: check if openvmm needs to be cloned
-  - checkout: self
-    path: repo0
-    fetchTags: false
-    fetchDepth: 1
-    persistCredentials: $(floweyvar2)
-    submodules: recursive
-    displayName: checkout repo openvmm
-    condition: and(eq(variables['FLOWEY_CONDITION'], true), succeeded(), not(canceled()))
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::git_checkout 2
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::git_checkout_openvmm_repo 0
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::run_cargo_nextest_run 0
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 4
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 5
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 1
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 0
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 7
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 2
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 3
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 8
-    displayName: report cloned repo directories
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
-    displayName: creating new test content dir
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
-    displayName: resolve OpenHCL igvm artifact
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_azcopy 0
-    displayName: create azcopy cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 0
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:1:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar3
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:2:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar4
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar4)
-      path: $(floweyvar3)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: azcopy'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:4:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 2
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_azcopy 1
-    displayName: installing azcopy
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 0
-    displayName: calculating required VMM tests disk images
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 1
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 2
-    displayName: downloading VMM test disk images
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_gh_cli 0
-    displayName: create gh cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 8
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:15:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar7
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:16:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar8
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar8)
-      path: $(floweyvar7)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: gh-cli'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:18:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 10
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_gh_cli 1
-    displayName: installing gh
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::use_gh_cli 0
-    displayName: setup gh cli
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::gh_latest_completed_workflow_id 0
-    displayName: get latest completed action id
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_gh_artifact 0
-    displayName: download artifacts from github actions run
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::download_release_igvm_files_from_gh::resolve 0
-    displayName: write to directory variables
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_gh_release 0
-    displayName: create gh-release-download cache dir
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 12
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:22:flowey_lib_common/src/cache.rs:236:72' --is-raw-string write-to-env ado floweyvar9
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:23:flowey_lib_common/src/cache.rs:237:72' --is-raw-string write-to-env ado floweyvar10
-    displayName: Pre-processing cache vars
-  - task: Cache@2
-    inputs:
-      key: $(floweyvar10)
-      path: $(floweyvar9)
-      cacheHitVar: FLOWEY_CACHE_HITVAR
-    displayName: 'Restore cache: gh-release-download'
-  - bash: |-
-      set -e
-      $FLOWEY_BIN v 17 'flowey_lib_common::cache:25:flowey_lib_common/src/cache.rs:300:70' --is-raw-string update --env-source FLOWEY_CACHE_HITVAR <<'EOF'
-      $(FLOWEY_CACHE_HITVAR)
-      EOF
-      $(FLOWEY_BIN) e 17 flowey_lib_common::cache 14
-    displayName: map ADO hitvar to flowey
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::download_gh_release 1
-    displayName: download artifacts from github releases
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::download_openvmm_deps 0
-    displayName: unpack openvmm-deps archive
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::download_uefi_mu_msvm 0
-    displayName: unpack mu_msvm package (x64)
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::init_vmm_tests_env 0
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::run_cargo_nextest_run 1
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 9
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
-    displayName: setting up vmm_tests env
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::gen_cargo_nextest_run_cmd 0
-    displayName: generate nextest command
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::install_vmm_tests_deps 0
-      $(FLOWEY_BIN) e 17 flowey_core::pipeline::artifact::resolve 6
-    displayName: install vmm tests deps (windows)
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::run_prep_steps 0
-    displayName: running vmm_test prep_steps
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_common::run_cargo_nextest_run 0
-      $(FLOWEY_BIN) e 17 flowey_lib_common::run_cargo_nextest_run 1
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 2
-      $(FLOWEY_BIN) e 17 flowey_lib_common::publish_test_results 1
-      $(FLOWEY_BIN) e 17 flowey_lib_common::ado_task_publish_test_results 0
-      $(FLOWEY_BIN) e 17 flowey_lib_common::publish_test_results 0
-      $FLOWEY_BIN v 17 'flowey_lib_common::ado_task_publish_test_results:0:flowey_lib_common/src/ado_task_publish_test_results.rs:57:45' --is-raw-string --condvar flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43 write-to-env ado floweyvar1
-      $FLOWEY_BIN v 17 'flowey_lib_common::publish_test_results:0:flowey_lib_common/src/publish_test_results.rs:77:43' write-to-env ado FLOWEY_CONDITION
-    displayName: run 'vmm_tests' nextest tests
-  - task: PublishTestResults@2
-    inputs:
-      testResultsFormat: JUnit
-      testResultsFiles: $(floweyvar1)
-      testRunTitle: x64-windows-amd-snp-vmm-tests
-    displayName: 'publish test results: x64-windows-amd-snp-vmm-tests (JUnit XML)'
-    condition: and(eq(variables['FLOWEY_CONDITION'], true), succeeded(), not(canceled()))
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 1
-      $(FLOWEY_BIN) e 17 flowey_lib_common::publish_test_results 2
-      $(FLOWEY_BIN) e 17 flowey_lib_common::publish_test_results 3
-      $(FLOWEY_BIN) e 17 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 3
-    displayName: report test results to overall pipeline status
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::cache 3
-    displayName: 'validate cache entry: azcopy'
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::cache 7
-    displayName: 'validate cache entry: cargo-nextest'
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::cache 11
-    displayName: 'validate cache entry: gh-cli'
-  - bash: $(FLOWEY_BIN) e 17 flowey_lib_common::cache 15
-    displayName: 'validate cache entry: gh-release-download'
-- job: job16
-  displayName: run vmm-tests [x64-windows-amd]
-  pool: HvLite-CI-Win-Pool
-  dependsOn:
-  - job5
-  - job7
-  - job9
-  condition: and(succeeded(), not(canceled()))
-  variables:
-  - name: FLOWEY_TEMP_DIR
-    value: $(Build.StagingDirectory)/.flowey-internal
-  steps:
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼🥾 Download bootstrapped flowey
-    inputs:
-      artifact: _internal-flowey-bootstrap-x86_64-windows-uid-9
-      path: $(FLOWEY_TEMP_DIR)/bootstrapped-flowey
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-guest_test_uefi
-    inputs:
-      artifact: x64-guest_test_uefi
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-guest_test_uefi
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-linux-musl-pipette
-    inputs:
-      artifact: x64-linux-musl-pipette
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-pipette
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-linux-musl-tmk_vmm
-    inputs:
-      artifact: x64-linux-musl-tmk_vmm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-tmk_vmm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-openhcl-igvm
-    inputs:
-      artifact: x64-openhcl-igvm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-openhcl-igvm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-tmks
-    inputs:
-      artifact: x64-tmks
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-tmks
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-openvmm
-    inputs:
-      artifact: x64-windows-openvmm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-openvmm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-pipette
-    inputs:
-      artifact: x64-windows-pipette
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-pipette
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-prep_steps
-    inputs:
-      artifact: x64-windows-prep_steps
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-prep_steps
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-tmk_vmm
-    inputs:
-      artifact: x64-windows-tmk_vmm
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-tmk_vmm
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-vmgstool
-    inputs:
-      artifact: x64-windows-vmgstool
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmgstool
-  - task: DownloadPipelineArtifact@2
-    displayName: 🌼📦 Download x64-windows-vmm-tests-archive
-    inputs:
-      artifact: x64-windows-vmm-tests-archive
-      path: $(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmm-tests-archive
-  - bash: |
-      set -e
-      AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
-      AgentTempDirNormal=$(echo "$AgentTempDirNormal" | sed -e 's|\\|\/|g' -e 's|^\([A-Za-z]\)\:/\(.*\)|/\L\1\E/\2|')
-      echo "##vso[task.setvariable variable=AgentTempDirNormal;]$AgentTempDirNormal"
-
-      chmod +x $AgentTempDirNormal/bootstrapped-flowey/flowey.exe
-      FLOWEY_BIN="$AgentTempDirNormal/bootstrapped-flowey/flowey.exe"
-      echo "##vso[task.setvariable variable=FLOWEY_BIN;]$FLOWEY_BIN"
-    displayName: Set flowey path
-  - bash: |
-      set -e
       echo '"debug"' | $FLOWEY_BIN v 16 'FLOWEY_LOG' update
       echo "$(FLOWEY_TEMP_DIR)/work" | $FLOWEY_BIN v 16 '_internal_WORKING_DIR' --is-raw-string update
 
@@ -3093,15 +2583,13 @@ jobs:
       echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-guest_test_uefi" | $FLOWEY_BIN v 16 'artifact_use_from_x64-guest_test_uefi' --is-raw-string update
       echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-pipette" | $FLOWEY_BIN v 16 'artifact_use_from_x64-linux-musl-pipette' --is-raw-string update
       echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-musl-tmk_vmm" | $FLOWEY_BIN v 16 'artifact_use_from_x64-linux-musl-tmk_vmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-openhcl-igvm" | $FLOWEY_BIN v 16 'artifact_use_from_x64-openhcl-igvm' --is-raw-string update
+      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-openvmm" | $FLOWEY_BIN v 16 'artifact_use_from_x64-linux-openvmm' --is-raw-string update
+      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-linux-vmm-tests-archive" | $FLOWEY_BIN v 16 'artifact_use_from_x64-linux-vmm-tests-archive' --is-raw-string update
       echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-tmks" | $FLOWEY_BIN v 16 'artifact_use_from_x64-tmks' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-openvmm" | $FLOWEY_BIN v 16 'artifact_use_from_x64-windows-openvmm' --is-raw-string update
       echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-pipette" | $FLOWEY_BIN v 16 'artifact_use_from_x64-windows-pipette' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-prep_steps" | $FLOWEY_BIN v 16 'artifact_use_from_x64-windows-prep_steps' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-tmk_vmm" | $FLOWEY_BIN v 16 'artifact_use_from_x64-windows-tmk_vmm' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmgstool" | $FLOWEY_BIN v 16 'artifact_use_from_x64-windows-vmgstool' --is-raw-string update
-      echo "$(FLOWEY_TEMP_DIR)/used_artifacts/x64-windows-vmm-tests-archive" | $FLOWEY_BIN v 16 'artifact_use_from_x64-windows-vmm-tests-archive' --is-raw-string update
     displayName: 🌼🛫 Initialize job
+  - bash: $(FLOWEY_BIN) e 16 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
+    displayName: ensure /dev/kvm is accessible
   - bash: |-
       set -e
       $(FLOWEY_BIN) e 16 flowey_lib_common::download_cargo_nextest 0
@@ -3149,19 +2637,15 @@ jobs:
       $(FLOWEY_BIN) e 16 flowey_lib_common::git_checkout 2
       $(FLOWEY_BIN) e 16 flowey_lib_hvlite::git_checkout_openvmm_repo 0
       $(FLOWEY_BIN) e 16 flowey_lib_hvlite::run_cargo_nextest_run 0
-      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 4
-      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 5
+      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 3
+      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 6
       $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 1
       $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 0
-      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 7
       $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 2
-      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 3
-      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 8
+      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 5
     displayName: report cloned repo directories
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_hvlite::_jobs::consume_and_test_nextest_vmm_tests_archive 0
     displayName: creating new test content dir
-  - bash: $(FLOWEY_BIN) e 16 flowey_lib_hvlite::artifact_openhcl_igvm_from_recipe::resolve 0
-    displayName: resolve OpenHCL igvm artifact
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::download_azcopy 0
     displayName: create azcopy cache dir
   - bash: |-
@@ -3183,6 +2667,10 @@ jobs:
       EOF
       $(FLOWEY_BIN) e 16 flowey_lib_common::cache 2
     displayName: map ADO hitvar to flowey
+  - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::install_dist_pkg 0
+    displayName: checking if packages need to be installed
+  - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::install_dist_pkg 1
+    displayName: installing packages
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::download_azcopy 1
     displayName: installing azcopy
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_hvlite::download_openvmm_vmm_tests_artifacts 0
@@ -3254,13 +2742,13 @@ jobs:
       set -e
       $(FLOWEY_BIN) e 16 flowey_lib_hvlite::init_vmm_tests_env 0
       $(FLOWEY_BIN) e 16 flowey_lib_hvlite::run_cargo_nextest_run 1
-      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 9
-      $(FLOWEY_BIN) e 16 flowey_lib_hvlite::test_nextest_vmm_tests_archive 0
+      $(FLOWEY_BIN) e 16 flowey_core::pipeline::artifact::resolve 4
+      $(FLOWEY_BIN) e 16 flowey_lib_hvlite::test_nextest_vmm_tests_archive 1
     displayName: setting up vmm_tests env
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::gen_cargo_nextest_run_cmd 0
     displayName: generate nextest command
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_hvlite::install_vmm_tests_deps 0
-    displayName: install vmm tests deps (windows)
+    displayName: install vmm tests deps (linux)
   - bash: |-
       set -e
       $(FLOWEY_BIN) e 16 flowey_lib_common::run_cargo_nextest_run 0
@@ -3276,8 +2764,8 @@ jobs:
     inputs:
       testResultsFormat: JUnit
       testResultsFiles: $(floweyvar1)
-      testRunTitle: x64-windows-amd-vmm-tests
-    displayName: 'publish test results: x64-windows-amd-vmm-tests (JUnit XML)'
+      testRunTitle: x64-linux-vmm-tests
+    displayName: 'publish test results: x64-linux-vmm-tests (JUnit XML)'
     condition: and(eq(variables['FLOWEY_CONDITION'], true), succeeded(), not(canceled()))
   - bash: |-
       set -e
@@ -3295,7 +2783,7 @@ jobs:
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::cache 15
     displayName: 'validate cache entry: gh-release-download'
 - job: job15
-  displayName: run vmm-tests [x64-windows-intel-tdx]
+  displayName: run vmm-tests [x64-windows-amd]
   pool: HvLite-CI-Win-Pool
   dependsOn:
   - job5
@@ -3553,13 +3041,8 @@ jobs:
     displayName: setting up vmm_tests env
   - bash: $(FLOWEY_BIN) e 15 flowey_lib_common::gen_cargo_nextest_run_cmd 0
     displayName: generate nextest command
-  - bash: |-
-      set -e
-      $(FLOWEY_BIN) e 15 flowey_lib_hvlite::install_vmm_tests_deps 0
-      $(FLOWEY_BIN) e 15 flowey_core::pipeline::artifact::resolve 6
+  - bash: $(FLOWEY_BIN) e 15 flowey_lib_hvlite::install_vmm_tests_deps 0
     displayName: install vmm tests deps (windows)
-  - bash: $(FLOWEY_BIN) e 15 flowey_lib_hvlite::run_prep_steps 0
-    displayName: running vmm_test prep_steps
   - bash: |-
       set -e
       $(FLOWEY_BIN) e 15 flowey_lib_common::run_cargo_nextest_run 0
@@ -3575,8 +3058,8 @@ jobs:
     inputs:
       testResultsFormat: JUnit
       testResultsFiles: $(floweyvar1)
-      testRunTitle: x64-windows-intel-tdx-vmm-tests
-    displayName: 'publish test results: x64-windows-intel-tdx-vmm-tests (JUnit XML)'
+      testRunTitle: x64-windows-amd-vmm-tests
+    displayName: 'publish test results: x64-windows-amd-vmm-tests (JUnit XML)'
     condition: and(eq(variables['FLOWEY_CONDITION'], true), succeeded(), not(canceled()))
   - bash: |-
       set -e
@@ -3898,14 +3381,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4085,14 +3577,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4334,14 +3835,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4517,14 +4027,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4666,14 +4185,23 @@ jobs:
   steps:
   - bash: echo "injected!"
     displayName: 🌼🥾 Bootstrap flowey
-  - task: RustInstaller@1
-    inputs:
-      rustVersion: ms-non-prod-1.90.0-ms-20250915.10027
-      toolchainFeed: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json
-      cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
-      cratesIoFeedOverride: sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/
-    env:
-      MSRUSTUP_NON_PROD_FEED_URL: https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json
+  - bash: |
+      set -x
+      i=0; while [ $i -lt 5 ] && ! sudo apt-get update; do let "i=i+1"; sleep 1; done;
+      sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
+      curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
+      . "$HOME/.cargo/env"
+      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      rustup show
+    condition: eq(variables.Agent.OS, 'Linux')
+    displayName: rustup (Linux)
+  - bash: |
+      set -x
+      curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
+      ./rustup-init.exe -y --default-toolchain=1.90.0
+      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+    condition: eq(variables.Agent.OS, 'Windows')
+    displayName: rustup (Windows X64)
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4794,7 +4322,7 @@ jobs:
     displayName: run xtask fmt
   - bash: $(FLOWEY_BIN) e 0 flowey_lib_common::cache 3
     displayName: 'validate cache entry: gh-release-download'
-- job: job19
+- job: job17
   displayName: openvmm checkin gates
   pool: HvLite-CI-Linux-Pool-CentralUS
   dependsOn:
@@ -4805,8 +4333,8 @@ jobs:
   - job12
   - job13
   - job14
+  - job15
   - job16
-  - job18
   - job2
   - job3
   - job4
@@ -4838,12 +4366,12 @@ jobs:
     displayName: Set flowey path
   - bash: |
       set -e
-      echo '"debug"' | $FLOWEY_BIN v 19 'FLOWEY_LOG' update
-      echo "$(FLOWEY_TEMP_DIR)/work" | $FLOWEY_BIN v 19 '_internal_WORKING_DIR' --is-raw-string update
+      echo '"debug"' | $FLOWEY_BIN v 17 'FLOWEY_LOG' update
+      echo "$(FLOWEY_TEMP_DIR)/work" | $FLOWEY_BIN v 17 '_internal_WORKING_DIR' --is-raw-string update
 
-      cat <<'EOF' | tr '[:upper:]' '[:lower:]' | $FLOWEY_BIN v 19 'verbose' update
+      cat <<'EOF' | tr '[:upper:]' '[:lower:]' | $FLOWEY_BIN v 17 'verbose' update
       ${{ parameters.verbose }}
       EOF
     displayName: 🌼🛫 Initialize job
-  - bash: $(FLOWEY_BIN) e 19 flowey_lib_hvlite::_jobs::all_good_job 0
+  - bash: $(FLOWEY_BIN) e 17 flowey_lib_hvlite::_jobs::all_good_job 0
     displayName: Check if any jobs failed
