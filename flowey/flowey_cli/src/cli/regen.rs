@@ -16,6 +16,10 @@ pub struct Regen {
     /// Pass `--quiet` to any subprocess invocations of `cargo run`.
     #[clap(long)]
     quiet: bool,
+
+    /// Generate ADO pipelines in addition to GitHub pipelines.
+    #[clap(long)]
+    ado: bool,
 }
 
 impl Regen {
@@ -77,6 +81,11 @@ impl Regen {
                 };
 
                 for (backend, defns) in pipelines {
+                    // Skip ADO pipelines unless explicitly requested
+                    if backend == "ado" && !self.ado {
+                        continue;
+                    }
+
                     for flowey_toml::PipelineDefn { file, cmd } in defns {
                         let check = if self.check {
                             vec!["--check".into(), file.display().to_string()]

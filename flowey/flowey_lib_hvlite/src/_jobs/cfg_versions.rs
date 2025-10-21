@@ -33,6 +33,10 @@ pub const OPENHCL_KERNEL_DEV_VERSION: &str = "6.12.52.1";
 pub const OPENHCL_KERNEL_STABLE_VERSION: &str = "6.12.52.1";
 pub const OPENVMM_DEPS: &str = "0.1.0-20250403.3";
 pub const PROTOC: &str = "27.1";
+pub const MSRUSTUP_VERSION: &str = "ms-non-prod-1.90.0-ms-20250915.10027";
+pub const MSRUSTUP_TOOLCHAIN_FEED: &str = "https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-deps/nuget/v3/index.json";
+pub const MSRUSTUP_NONPROD_TOOLCHAIN_FEED: &str = "https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/underhill-rust-nonprod/nuget/v3/index.json";
+pub const MSRUSTUP_CRATES_IO_FEED_OVERRIDE: &str = "sparse+https://microsoft.pkgs.visualstudio.com/HyperVCloud/_packaging/HyperVCloud_PublicPackages/Cargo/index/";
 
 flowey_request! {
     pub struct Request {}
@@ -83,6 +87,8 @@ impl FlowNode for Node {
         ctx.req(flowey_lib_common::install_nodejs::Request::Version(NODEJS.into()));
         if !matches!(ctx.backend(), FlowBackend::Ado) {
             ctx.req(flowey_lib_common::install_rust::Request::Version(RUSTUP_TOOLCHAIN.into()));
+        } else {
+            ctx.req(flowey_lib_common::install_rust::Request::Version(MSRUSTUP_VERSION.into()));
         }
         Ok(())
     }

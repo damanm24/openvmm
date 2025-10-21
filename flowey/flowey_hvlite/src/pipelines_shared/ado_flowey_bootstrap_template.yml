@@ -1,0 +1,38 @@
+- task: RustInstaller@1
+  inputs:
+    rustVersion: "{{MSRUSTUP_VERSION}}"
+    toolchainFeed: "{{MSRUSTUP_TOOLCHAIN_FEED}}"
+    cargoHomePathOverride: $(Agent.TempDirectory)/cargo_home
+    cratesIoFeedOverride: "{{MSRUSTUP_CRATES_IO_FEED_OVERRIDE}}"
+  env:
+    MSRUSTUP_NON_PROD_FEED_URL: "{{MSRUSTUP_NONPROD_TOOLCHAIN_FEED}}"
+    
+- checkout: self
+  fetchTags: false
+  fetchDepth: 1
+  path: flowey_bootstrap
+
+# - CARGO_INCREMENTAL=0 - no need to waste time on incremental artifacts in CI
+# - RUSTC_BOOTSTRAP=1 + RUSTFLAGS="-Z threads=8" - use of the unstable parallel
+#   frontend to go f a s t
+- bash: CARGO_INCREMENTAL=0 RUSTC_BOOTSTRAP=1 RUSTFLAGS="-Z threads=8" cargo build -p {{FLOWEY_CRATE}} --target {{FLOWEY_TARGET}} --profile flowey-ci
+  workingDirectory: ../flowey_bootstrap
+  displayName: Build flowey
+
+- bash: |
+    mkdir ./flowey_bootstrap_temp
+    mv ./{{FLOWEY_PIPELINE_PATH}}.yaml ./flowey_bootstrap_temp/pipeline.yaml
+    mv ./{{FLOWEY_PIPELINE_PATH}}.json ./flowey_bootstrap_temp/pipeline.json
+    mv target/{{FLOWEY_TARGET}}/flowey-ci/{{FLOWEY_CRATE}}{{FLOWEY_BIN_EXTENSION}} ./flowey_bootstrap_temp/flowey{{FLOWEY_BIN_EXTENSION}}
+  workingDirectory: ../flowey_bootstrap
+  displayName: Stage flowey artifact
+
+- task: CopyFiles@2
+  displayName: 'Copy flowey artifact'
+  inputs:
+    SourceFolder: '../flowey_bootstrap/flowey_bootstrap_temp'
+    TargetFolder: {{FLOWEY_OUTDIR}}
+
+- bash: rm -rf ./flowey_bootstrap_temp
+  workingDirectory: ../flowey_bootstrap
+  displayName: Cleanup staged flowey artifact

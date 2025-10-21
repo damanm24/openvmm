@@ -97,40 +97,83 @@ impl SimpleFlowNode for Node {
         // FUTURE: Flowey should have a general mechanism for this. We cannot
         // use the existing artifact support because all artifacts are only
         // published at the end of the job, if everything else succeeds.
-        let publish_artifact = if ctx.backend() == FlowBackend::Github {
-            let dir = ctx.emit_rust_stepv("collect openvmm_hcl files for analysis", |ctx| {
-                let built_openvmm_hcl = built_openvmm_hcl.clone().claim(ctx);
-                move |rt| {
-                    let built_openvmm_hcl = rt.read(built_openvmm_hcl);
-                    let path = Path::new("artifact");
-                    fs_err::create_dir_all(path)?;
-                    fs_err::copy(built_openvmm_hcl.bin, path.join("openvmm_hcl"))?;
-                    if let Some(dbg) = built_openvmm_hcl.dbg {
-                        fs_err::copy(dbg, path.join("openvmm_hcl.dbg"))?;
+        let publish_artifact = match ctx.backend() {
+            FlowBackend::Github => {
+                let dir = ctx.emit_rust_stepv("collect openvmm_hcl files for analysis", |ctx| {
+                    let built_openvmm_hcl = built_openvmm_hcl.clone().claim(ctx);
+                    move |rt| {
+                        let built_openvmm_hcl = rt.read(built_openvmm_hcl);
+                        let path = Path::new("artifact");
+                        fs_err::create_dir_all(path)?;
+                        fs_err::copy(built_openvmm_hcl.bin, path.join("openvmm_hcl"))?;
+                        if let Some(dbg) = built_openvmm_hcl.dbg {
+                            fs_err::copy(dbg, path.join("openvmm_hcl.dbg"))?;
+                        }
+                        Ok(path
+                            .absolute()?
+                            .into_os_string()
+                            .into_string()
+                            .ok()
+                            .unwrap())
                     }
-                    Ok(path
-                        .absolute()?
-                        .into_os_string()
-                        .into_string()
-                        .ok()
-                        .unwrap())
-                }
-            });
-            let name = format!(
-                "{}_openvmm_hcl_for_size_analysis",
-                target.common_arch().unwrap().as_arch()
-            );
-            Some(
-                ctx.emit_gh_step(
-                    "publish openvmm_hcl for analysis",
-                    "actions/upload-artifact@v4",
+                });
+                let name = format!(
+                    "{}_openvmm_hcl_for_size_analysis",
+                    target.common_arch().unwrap().as_arch()
+                );
+                Some(
+                    ctx.emit_gh_step(
+                        "publish openvmm_hcl for analysis",
+                        "actions/upload-artifact@v4",
+                    )
+                    .with("name", name)
+                    .with("path", dir)
+                    .finish(ctx),
                 )
-                .with("name", name)
-                .with("path", dir)
-                .finish(ctx),
-            )
-        } else {
-            None
+            }
+            FlowBackend::Ado => {
+                let dir = ctx.emit_rust_stepv("collect openvmm_hcl files for analysis", |ctx| {
+                    let built_openvmm_hcl = built_openvmm_hcl.clone().claim(ctx);
+                    move |rt| {
+                        let built_openvmm_hcl = rt.read(built_openvmm_hcl);
+                        let path = Path::new("artifact");
+                        fs_err::create_dir_all(path)?;
+                        fs_err::copy(built_openvmm_hcl.bin, path.join("openvmm_hcl"))?;
+                        if let Some(dbg) = built_openvmm_hcl.dbg {
+                            fs_err::copy(dbg, path.join("openvmm_hcl.dbg"))?;
+                        }
+                        Ok(path
+                            .absolute()?
+                            .into_os_string()
+                            .into_string()
+                            .ok()
+                            .unwrap())
+                    }
+                });
+                let artifact_name = format!(
+                    "{}_openvmm_hcl_for_size_analysis",
+                    target.common_arch().unwrap().as_arch()
+                );
+
+                let (published_read, published_write) = ctx.new_var();
+
+                ctx.emit_ado_step("publish openvmm_hcl for analysis", |ctx| {
+                    published_write.claim(ctx);
+                    let dir = dir.claim(ctx);
+                    move |rt| {
+                        let path_var = rt.get_var(dir).as_raw_var_name();
+                        format!(
+                            r#"
+                            - publish: $({path_var})
+                              artifact: {artifact_name}
+                            "#
+                        )
+                    }
+                });
+
+                Some(published_read)
+            }
+            FlowBackend::Local => None,
         };
 
         let comparison = ctx.emit_rust_step("binary size comparison", |ctx| {

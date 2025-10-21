@@ -58,9 +58,9 @@ impl FlowNode for Node {
     }
 
     fn emit(requests: Vec<Self::Request>, ctx: &mut NodeCtx<'_>) -> anyhow::Result<()> {
-        if !matches!(ctx.backend(), FlowBackend::Local | FlowBackend::Github) {
-            anyhow::bail!("only supported on the local and github backends at this time");
-        }
+        // if !matches!(ctx.backend(), FlowBackend::Local | FlowBackend::Github) {
+        //     anyhow::bail!("only supported on the local and github backends at this time");
+        // }
 
         let mut ensure_installed = Vec::new();
         let mut rust_toolchain = None;
