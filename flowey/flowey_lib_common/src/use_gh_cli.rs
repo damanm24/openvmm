@@ -135,12 +135,14 @@ impl FlowNode for Node {
                     file.write_all(shim_txt.as_bytes())?;
                     dst.absolute()?
                 };
-                if !xshell::cmd!(sh, "{path} auth status")
+                let auth_status = xshell::cmd!(sh, "{path} auth status")
                     .ignore_status()
-                    .output()?
-                    .status
-                    .success()
-                {
+                    .output()?;
+                log::info!(
+                    "gh auth status output: {}",
+                    String::from_utf8_lossy(&auth_status.stdout)
+                );
+                if !auth_status.status.success() {
                     if matches!(rt.backend(), FlowBackend::Local) {
                         xshell::cmd!(sh, "{path} auth login").run()?;
                     } else {
