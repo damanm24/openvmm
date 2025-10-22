@@ -48,7 +48,7 @@ impl FlowNode for Node {
         let path = ctx.reqv(|v| flowey_lib_common::git_checkout::Request::CheckoutRepo {
             repo_id,
             repo_path: v,
-            persist_credentials: false,
+            persist_credentials: true,
         });
 
         ctx.emit_minor_rust_step("resolve OpenVMM repo requests", move |ctx| {

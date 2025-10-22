@@ -39,7 +39,7 @@ impl SimpleFlowNode for Node {
         ctx.req(flowey_lib_common::git_checkout::Request::RegisterRepo {
             repo_id: "openvmm".into(),
             repo_src: hvlite_repo_source,
-            allow_persist_credentials: false,
+            allow_persist_credentials: true,
             depth: Some(1),           // shallow fetch
             pre_run_deps: Vec::new(), // no special auth required
         });
