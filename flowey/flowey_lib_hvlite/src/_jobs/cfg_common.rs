@@ -65,6 +65,7 @@ impl SimpleFlowNode for Node {
         ctx.import::<flowey_lib_common::nuget_install_package::Node>();
         ctx.import::<flowey_lib_common::run_cargo_nextest_run::Node>();
         ctx.import::<flowey_lib_common::use_gh_cli::Node>();
+        ctx.import::<flowey_lib_common::ado_task_azure_key_vault::Node>();
     }
 
     fn process_request(request: Self::Request, ctx: &mut NodeCtx<'_>) -> anyhow::Result<()> {
@@ -103,10 +104,16 @@ impl SimpleFlowNode for Node {
             ctx.req(flowey_lib_common::install_rust::Request::IgnoreVersion(
                 false,
             ));
+
+            let secret = ctx.reqv(|v| flowey_lib_common::ado_task_azure_key_vault::Request {
+                subscription: "HvLite Azure".to_string(),
+                key_vault_name: "HvLite-PATs".to_string(),
+                secret: "GitHub-CLI-PAT".to_string(),
+                resolved_secret: v,
+            });
+
             ctx.req(flowey_lib_common::use_gh_cli::Request::WithAuth(
-                flowey_lib_common::use_gh_cli::GhCliAuth::AuthToken(ReadVar::from_static(
-                    "test".to_string(),
-                )),
+                flowey_lib_common::use_gh_cli::GhCliAuth::AuthToken(secret),
             ));
         } else if matches!(ctx.backend(), FlowBackend::Local) {
             let local_only =

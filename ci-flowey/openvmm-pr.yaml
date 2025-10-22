@@ -957,7 +957,18 @@ jobs:
     displayName: map ADO hitvar to flowey
   - bash: $(FLOWEY_BIN) e 10 flowey_lib_common::download_gh_cli 1
     displayName: installing gh
-  - bash: $(FLOWEY_BIN) e 10 flowey_lib_common::use_gh_cli 0
+  - task: AzureKeyVault@2
+    inputs:
+      azureSubscription: HvLite Azure
+      KeyVaultName: HvLite-PATs
+      SecretsFilter: GitHub-CLI-PAT
+    displayName: Downloading secrets from key vault HvLite Azure/HvLite-PATs
+  - bash: |-
+      set -e
+      $FLOWEY_BIN v 10 'flowey_lib_hvlite::_jobs::cfg_common:0:flowey_lib_hvlite/src/_jobs/cfg_common.rs:108:30' --is-raw-string update --is-secret --env-source GitHub-CLI-PAT <<'EOF'
+      $(GitHub-CLI-PAT)
+      EOF
+      $(FLOWEY_BIN) e 10 flowey_lib_common::use_gh_cli 0
     displayName: setup gh cli
   - bash: $(FLOWEY_BIN) e 10 flowey_lib_common::git_merge_commit 0
     displayName: get merge commit
@@ -2730,7 +2741,18 @@ jobs:
     displayName: map ADO hitvar to flowey
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::download_gh_cli 1
     displayName: installing gh
-  - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::use_gh_cli 0
+  - task: AzureKeyVault@2
+    inputs:
+      azureSubscription: HvLite Azure
+      KeyVaultName: HvLite-PATs
+      SecretsFilter: GitHub-CLI-PAT
+    displayName: Downloading secrets from key vault HvLite Azure/HvLite-PATs
+  - bash: |-
+      set -e
+      $FLOWEY_BIN v 16 'flowey_lib_hvlite::_jobs::cfg_common:0:flowey_lib_hvlite/src/_jobs/cfg_common.rs:108:30' --is-raw-string update --is-secret --env-source GitHub-CLI-PAT <<'EOF'
+      $(GitHub-CLI-PAT)
+      EOF
+      $(FLOWEY_BIN) e 16 flowey_lib_common::use_gh_cli 0
     displayName: setup gh cli
   - bash: $(FLOWEY_BIN) e 16 flowey_lib_common::gh_latest_completed_workflow_id 0
     displayName: get latest completed action id
@@ -3024,7 +3046,18 @@ jobs:
     displayName: map ADO hitvar to flowey
   - bash: $(FLOWEY_BIN) e 15 flowey_lib_common::download_gh_cli 1
     displayName: installing gh
-  - bash: $(FLOWEY_BIN) e 15 flowey_lib_common::use_gh_cli 0
+  - task: AzureKeyVault@2
+    inputs:
+      azureSubscription: HvLite Azure
+      KeyVaultName: HvLite-PATs
+      SecretsFilter: GitHub-CLI-PAT
+    displayName: Downloading secrets from key vault HvLite Azure/HvLite-PATs
+  - bash: |-
+      set -e
+      $FLOWEY_BIN v 15 'flowey_lib_hvlite::_jobs::cfg_common:0:flowey_lib_hvlite/src/_jobs/cfg_common.rs:108:30' --is-raw-string update --is-secret --env-source GitHub-CLI-PAT <<'EOF'
+      $(GitHub-CLI-PAT)
+      EOF
+      $(FLOWEY_BIN) e 15 flowey_lib_common::use_gh_cli 0
     displayName: setup gh cli
   - bash: $(FLOWEY_BIN) e 15 flowey_lib_common::gh_latest_completed_workflow_id 0
     displayName: get latest completed action id
@@ -3318,7 +3351,18 @@ jobs:
     displayName: map ADO hitvar to flowey
   - bash: $(FLOWEY_BIN) e 14 flowey_lib_common::download_gh_cli 1
     displayName: installing gh
-  - bash: $(FLOWEY_BIN) e 14 flowey_lib_common::use_gh_cli 0
+  - task: AzureKeyVault@2
+    inputs:
+      azureSubscription: HvLite Azure
+      KeyVaultName: HvLite-PATs
+      SecretsFilter: GitHub-CLI-PAT
+    displayName: Downloading secrets from key vault HvLite Azure/HvLite-PATs
+  - bash: |-
+      set -e
+      $FLOWEY_BIN v 14 'flowey_lib_hvlite::_jobs::cfg_common:0:flowey_lib_hvlite/src/_jobs/cfg_common.rs:108:30' --is-raw-string update --is-secret --env-source GitHub-CLI-PAT <<'EOF'
+      $(GitHub-CLI-PAT)
+      EOF
+      $(FLOWEY_BIN) e 14 flowey_lib_common::use_gh_cli 0
     displayName: setup gh cli
   - bash: $(FLOWEY_BIN) e 14 flowey_lib_common::gh_latest_completed_workflow_id 0
     displayName: get latest completed action id
