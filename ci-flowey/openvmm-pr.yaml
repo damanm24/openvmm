@@ -32,17 +32,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -282,17 +285,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -544,17 +550,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -770,17 +779,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -987,17 +999,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -1386,17 +1401,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -1682,17 +1700,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -2001,17 +2022,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -2268,17 +2292,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -3387,17 +3414,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -3583,17 +3613,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -3841,17 +3874,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4033,17 +4069,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
@@ -4191,17 +4230,20 @@ jobs:
       sudo apt-get -o DPkg::Lock::Timeout=60 install gcc -y
       curl --fail --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain=1.90.0 -y
       . "$HOME/.cargo/env"
-      echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      rustup show
+      echo '##vso[task.prependpath]$(HOME)/.cargo/bin'
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: rustup (Linux)
   - bash: |
       set -x
       curl --fail -sSfLo rustup-init.exe https://win.rustup.rs/x86_64 --output rustup-init
       ./rustup-init.exe -y --default-toolchain=1.90.0
-      echo "$USERPROFILE\\.cargo\\bin" >> $GITHUB_PATH
+      echo '##vso[task.prependpath]$(USERPROFILE)\\.cargo\\bin'
     condition: eq(variables['Agent.OS'], 'Windows_NT')
     displayName: rustup (Windows X64)
+  - bash: |
+      set -x
+      rustup show
+    displayName: Verify rustup installation
   - checkout: self
     fetchTags: false
     fetchDepth: 1
