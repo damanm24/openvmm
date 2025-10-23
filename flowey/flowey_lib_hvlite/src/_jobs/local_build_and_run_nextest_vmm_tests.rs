@@ -122,17 +122,17 @@ pub struct BuildSelections {
 impl Default for BuildSelections {
     fn default() -> Self {
         Self {
-            prep_steps: false,
-            openhcl: false,
-            openvmm: false,
-            pipette_windows: false,
-            pipette_linux: false,
-            guest_test_uefi: false,
-            release_openhcl_igvm_files: false,
-            tmks: false,
-            tmk_vmm_windows: false,
-            tmk_vmm_linux: false,
-            vmgstool: false,
+            prep_steps: true,
+            openhcl: true,
+            openvmm: true,
+            pipette_windows: true,
+            pipette_linux: true,
+            guest_test_uefi: true,
+            release_openhcl_igvm_files: true,
+            tmks: true,
+            tmk_vmm_windows: true,
+            tmk_vmm_linux: true,
+            vmgstool: true,
         }
     }
 }
@@ -455,7 +455,46 @@ impl SimpleFlowNode for Node {
             build_selections: v,
         });
 
+        // let should_build_openvmm: ReadVar<bool> =
+        //     ctx.reqv(
+        //         |v| crate::gen_build_selections_for_vmm_tests::Request::ShouldBuildOpenvmm {
+        //             should_build_openvmm: v,
+        //         },
+        //     );
+
+        // let register_openvmm = ctx.reqv(|v| crate::build_openvmm::Request {
+        //     params: crate::build_openvmm::OpenvmmBuildParams {
+        //         target: target.clone(),
+        //         profile: CommonProfile::from_release(release),
+        //         // FIXME: this relies on openvmm default features
+        //         features: if unstable_whp {
+        //             [crate::build_openvmm::OpenvmmFeature::UnstableWhp].into()
+        //         } else {
+        //             [].into()
+        //         },
+        //     },
+        //     openvmm: v,
+        // });
+
+        // ctx.emit_minor_rust_step("building vmm_test dependencies", |ctx| {
+        //     let should_build_openvmm: ReadVar<bool, VarClaimed> = should_build_openvmm.claim(ctx);
+        //     // Ideally I'd like to be able to get at the value of should_build_openvmm here to check if I can claim
+        //     // register_openvmm, but that's not possible.
+        //     // let register_openvmm = register_openvmm.claim(ctx);
+
+        //     move |rt| {
+        //         let should_build_openvmm = rt.read(should_build_openvmm);
+        //         // if should_build_openvmm {
+        //         //     register.openvmm_claim(ctx); // This doesn't actually work
+        //         // }
+
+        //         // Ok(())
+        //     }
+        // });
+
         let mut side_effects = Vec::new();
+        /* This code doesn't actually do what I thought it would. It can't modify build in the outer scope.
+
         side_effects.push(ctx.emit_rust_step("merge build selections", |ctx| {
             let build_selections = build_selections.claim(ctx);
 
@@ -481,6 +520,7 @@ impl SimpleFlowNode for Node {
                 Ok(())
             }
         }));
+        */
 
         let register_openhcl_igvm_files = build.openhcl.then(|| {
             let openvmm_hcl_profile = if release {
