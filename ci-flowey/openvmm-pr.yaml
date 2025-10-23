@@ -68,6 +68,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -321,6 +329,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -586,6 +602,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -815,6 +839,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -1046,6 +1078,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -1448,6 +1488,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -1747,6 +1795,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -2069,6 +2125,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -2339,6 +2403,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -3494,6 +3566,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -3693,6 +3773,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -3954,6 +4042,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -4149,6 +4245,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
@@ -4310,6 +4414,14 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
+  - task: InvokRESTAPI@1
+    displayName: Test GitHub Service Connection
+    inputs:
+      connectionType: connectedServiceName
+      serviceConnection: microsoft
+      method: GET
+      urlSuffix: /repos/microsoft/actions/artifacts
+      body: '{\n"per_page":10,\n"page":1\n}'
   - bash: |
       set -e
       AgentTempDirNormal="$(FLOWEY_TEMP_DIR)"
