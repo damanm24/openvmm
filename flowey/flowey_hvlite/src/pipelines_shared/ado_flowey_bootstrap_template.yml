@@ -69,7 +69,7 @@
   workingDirectory: ../flowey_bootstrap
   displayName: Cleanup staged flowey artifact
 
-- task: InvokeRESTAPI@1
+- task: InvokeRESTAPI@0
   displayName: 'Test GitHub Service Connection'
   inputs:
     connectionType: 'connectedServiceName'
