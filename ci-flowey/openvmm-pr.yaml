@@ -68,7 +68,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -329,7 +329,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -602,7 +602,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -839,7 +839,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -1078,7 +1078,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -1488,7 +1488,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -1795,7 +1795,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -2125,7 +2125,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -2403,7 +2403,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -3566,7 +3566,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -3773,7 +3773,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -4042,7 +4042,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -4245,7 +4245,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
@@ -4414,7 +4414,7 @@ jobs:
   - bash: rm -rf ./flowey_bootstrap_temp
     workingDirectory: ../flowey_bootstrap
     displayName: Cleanup staged flowey artifact
-  - task: InvokRESTAPI@1
+  - task: InvokeRESTAPI@1
     displayName: Test GitHub Service Connection
     inputs:
       connectionType: connectedServiceName
