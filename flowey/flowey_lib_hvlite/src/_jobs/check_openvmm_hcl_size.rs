@@ -132,7 +132,25 @@ impl SimpleFlowNode for Node {
                 )
             }
             FlowBackend::Ado => {
+                let (ensure_called, ensure_called_write): (ReadVar<()>, WriteVar<()>) =
+                    ctx.new_var();
+                ctx.emit_ado_step("Test GitHub Service Connection", |ctx| {
+                    ensure_called_write.claim(ctx);
+                    move |_| {
+                        r#"
+                            - task: InvokeRESTAPI@0
+                              inputs:
+                                connectionType: 'connectedServiceName'
+                                serviceConnection: 'microsoft'
+                                method: 'GET'
+                                urlSuffix: '/repos/microsoft/actions/artifacts'
+                                body: '{\n"per_page":10,\n"page":1\n}'
+                        "#
+                        .to_string()
+                    }
+                });
                 let dir = ctx.emit_rust_stepv("collect openvmm_hcl files for analysis", |ctx| {
+                    let _ensure_called = ensure_called.claim(ctx);
                     let built_openvmm_hcl = built_openvmm_hcl.clone().claim(ctx);
                     move |rt| {
                         let built_openvmm_hcl = rt.read(built_openvmm_hcl);

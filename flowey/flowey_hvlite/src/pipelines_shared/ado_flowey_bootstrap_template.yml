@@ -69,12 +69,3 @@
   workingDirectory: ../flowey_bootstrap
   displayName: Cleanup staged flowey artifact
 
-- task: InvokeRESTAPI@0
-  displayName: 'Test GitHub Service Connection'
-  inputs:
-    connectionType: 'connectedServiceName'
-    serviceConnection: 'microsoft'
-    method: 'GET'
-    urlSuffix: '/repos/microsoft/actions/artifacts'
-    body: '{\n"per_page":10,\n"page":1\n}'
-
