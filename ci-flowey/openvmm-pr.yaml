@@ -24,7 +24,7 @@ jobs:
   - name: FLOWEY_TEMP_DIR
     value: $(Build.StagingDirectory)/.flowey-internal
   steps:
-  - task: InvokeRESTAPI@0
+  - task: InvokeRESTAPI@1
     inputs:
       connectionType: 'connectedServiceName'
       serviceConnection: 'microsoft'
