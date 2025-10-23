@@ -14,20 +14,37 @@ parameters:
   displayName: Run with verbose output
   type: boolean
   default: false
+resources:
+  repositories:
+  - repository: openvmm
+    type: GitHub
+    endpoint: microsoft
+    name: microsoft/openvmm
 jobs:
 - job: job13
-  displayName: Test Agentless Job
-  pool: server
+  displayName: Test GH Service Connection
+  pool: HvLite-CI-Linux-Pool-CentralUS
   dependsOn: []
   condition: and(succeeded(), not(canceled()))
   variables:
   - name: FLOWEY_TEMP_DIR
     value: $(Build.StagingDirectory)/.flowey-internal
   steps:
-  - task: InvokeRESTAPI@1
-    inputs:
-      connectionType: 'connectedServiceName'
-      serviceConnection: 'microsoft'
-      method: 'GET'
-      urlSuffix: '/repos/microsoft/actions/artifacts'
-      body: '{\n"per_page":10,\n"page":1\n}'
+  - checkout: openvmm
+    fetchDepth: 0
+    path: openvmm-github
+    persistCredentials: true
+  - bash: |
+      (type -p wget >/dev/null || (sudo apt update && sudo apt install wget -y)) \
+      && sudo mkdir -p -m 755 /etc/apt/keyrings \
+      && out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      && cat $out | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+      && sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+      && sudo mkdir -p -m 755 /etc/apt/sources.list.d \
+      && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+      && sudo apt update \
+      && sudo apt install gh -y
+      cd openvmm-github
+      gh auth status
+    condition: succeeded()
+    displayName: Install GitHub CLI and verify authentication
