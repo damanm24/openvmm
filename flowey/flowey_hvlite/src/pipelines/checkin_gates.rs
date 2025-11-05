@@ -1059,12 +1059,12 @@ impl IntoPipeline for CheckinGatesCli {
             let test_label = format!("{label}-vmm-tests");
 
             let (pub_vmm_tests_results_full, _) =
-                pipeline.new_artifact(format!("{label}-vmm-tests-results"));
+                pipeline.new_artifact(format!("{test_label}-logs"));
 
             let (pub_vmm_tests_junit_xml, use_vmm_tests_junit_xml) =
-                pipeline.new_artifact(format!("{label}-vmm-tests-results-junit-xml"));
+                pipeline.new_artifact(format!("{test_label}-junit-xml"));
             let (pub_vmm_tests_nextest_list_json, use_vmm_tests_nextest_list_json) =
-                pipeline.new_artifact(format!("{label}-vmm-tests-results-nextest-list-json"));
+                pipeline.new_artifact(format!("{test_label}-nextest-list-json"));
 
             pipeline.force_publish_artifact(&pub_vmm_tests_results_full);
             pipeline.force_publish_artifact(&pub_vmm_tests_junit_xml);
