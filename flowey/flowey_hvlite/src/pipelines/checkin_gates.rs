@@ -971,6 +971,13 @@ impl IntoPipeline for CheckinGatesCli {
             KnownTestArtifacts::Ubuntu2504ServerX64Vhd,
         ];
 
+        struct VmmTestResultsArtifacts {
+            junit_xml_label: String,
+            junit_xml_artifact: UseArtifact,
+            nextest_list_json_label: String,
+            nextest_list_json_artifact: UseArtifact,
+        }
+
         let mut vmm_tests_results_artifacts = vec![];
 
         for VmmTestJobParams {
@@ -1057,23 +1064,27 @@ impl IntoPipeline for CheckinGatesCli {
             },
         ] {
             let test_label = format!("{label}-vmm-tests");
+            let logs_artifact_label = format!("{test_label}-logs");
+            let junit_xml_artifact_label = format!("{test_label}-junit-xml");
+            let nextest_list_json_artifact_label = format!("{test_label}-nextest-list-json");
 
-            let (pub_vmm_tests_results_full, _) =
-                pipeline.new_artifact(format!("{test_label}-logs"));
+            let (pub_vmm_tests_results_full, _) = pipeline.new_artifact(logs_artifact_label);
 
             let (pub_vmm_tests_junit_xml, use_vmm_tests_junit_xml) =
-                pipeline.new_artifact(format!("{test_label}-junit-xml"));
+                pipeline.new_artifact(&junit_xml_artifact_label);
             let (pub_vmm_tests_nextest_list_json, use_vmm_tests_nextest_list_json) =
-                pipeline.new_artifact(format!("{test_label}-nextest-list-json"));
+                pipeline.new_artifact(&nextest_list_json_artifact_label);
 
             pipeline.force_publish_artifact(&pub_vmm_tests_results_full);
             pipeline.force_publish_artifact(&pub_vmm_tests_junit_xml);
             pipeline.force_publish_artifact(&pub_vmm_tests_nextest_list_json);
 
-            vmm_tests_results_artifacts.push((
-                label.to_string(),
-                (use_vmm_tests_junit_xml, use_vmm_tests_nextest_list_json),
-            ));
+            vmm_tests_results_artifacts.push(VmmTestResultsArtifacts {
+                junit_xml_label: junit_xml_artifact_label,
+                junit_xml_artifact: use_vmm_tests_junit_xml,
+                nextest_list_json_label: nextest_list_json_artifact_label,
+                nextest_list_json_artifact: use_vmm_tests_nextest_list_json,
+            });
 
             let use_vmm_tests_archive = match target {
                 CommonTriple::X86_64_WINDOWS_MSVC => &use_vmm_tests_archive_windows_x86,
@@ -1132,13 +1143,10 @@ impl IntoPipeline for CheckinGatesCli {
                         test_artifacts: vmm_tests_results_artifacts
                             .iter()
                             .map(|elem| {
-                                (
-                                    elem.0.clone(),
-                                    flowey_lib_hvlite::_jobs::verify_all_tests_run::VmmTestResultsArtifacts {
-                                        junit_xml: ctx.use_artifact(&elem.1.0),
-                                        nextest_list_json: ctx.use_artifact(&elem.1.1),
-                                    },
-                                )
+                                flowey_lib_hvlite::_jobs::verify_all_tests_run::VmmTestResultsArtifacts {
+                                    junit_xml: (ctx.use_artifact(&elem.junit_xml_artifact), elem.junit_xml_label.clone()),
+                                    nextest_list_json: (ctx.use_artifact(&elem.nextest_list_json_artifact), elem.nextest_list_json_label.clone()),
+                                }
                             })
                             .collect(),
                         done: ctx.new_done_handle(),

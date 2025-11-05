@@ -22,13 +22,13 @@ struct Suite {
 
 #[derive(Serialize, Deserialize)]
 pub struct VmmTestResultsArtifacts {
-    pub junit_xml: ReadVar<PathBuf>,
-    pub nextest_list_json: ReadVar<PathBuf>,
+    pub junit_xml: (ReadVar<PathBuf>, String),
+    pub nextest_list_json: (ReadVar<PathBuf>, String),
 }
 
 flowey_request! {
     pub struct Request {
-        pub test_artifacts: Vec<(String, VmmTestResultsArtifacts)>,
+        pub test_artifacts: Vec<VmmTestResultsArtifacts>,
         pub done: WriteVar<SideEffect>,
     }
 }
@@ -52,6 +52,22 @@ impl SimpleFlowNode for Node {
             return Ok(());
         }
 
+        let test_artifacts: Vec<_> = test_artifacts
+            .into_iter()
+            .map(|artifacts| {
+                (
+                    artifacts
+                        .junit_xml
+                        .0
+                        .map(ctx, |x| x.join(artifacts.junit_xml.1).join(".xml")),
+                    artifacts
+                        .nextest_list_json
+                        .0
+                        .map(ctx, |x| x.join(artifacts.nextest_list_json.1).join(".json")),
+                )
+            })
+            .collect();
+
         let parse = ctx.emit_rust_step(
             "parse and analyze junit logs and nextest list output",
             |ctx| {
@@ -62,40 +78,31 @@ impl SimpleFlowNode for Node {
                 // not meet the test case requirements. For example, TDX/SNP tests are skipped on non-compatible hardware.
                 let artifacts: Vec<_> = test_artifacts
                     .into_iter()
-                    .map(|(prefix, artifacts)| {
-                        (
-                            prefix,
-                            artifacts.junit_xml.claim(ctx),
-                            artifacts.nextest_list_json.claim(ctx),
-                        )
-                    })
+                    .map(|artifacts| (artifacts.0.claim(ctx), artifacts.1.claim(ctx)))
                     .collect();
 
                 move |rt| {
                     let mut combined_junit_testcases: HashSet<String> = HashSet::new();
                     let mut combined_nextest_testcases: HashSet<String> = HashSet::new();
 
-                    for (prefix, junit_xml_dir, nextest_list_json_dir) in artifacts {
-                        let junit_xml_dir = rt.read(junit_xml_dir);
-                        let nextest_list_dir = rt.read(nextest_list_json_dir);
-                        println!("Artifact dir: {}", junit_xml_dir.display());
-                        println!("Artifact dir: {}", nextest_list_dir.display());
-                        assert!(junit_xml_dir.exists(), "expected artifact dir to exist");
-                        assert!(nextest_list_dir.exists(), "expected artifact dir to exist");
-
-                        let junit_xml = prefix.clone() + "-vmm-tests-junit-xml.xml";
-                        let nextest_list = prefix.clone() + "-vmm-tests-nextest-list.json";
-
-                        let junit_xml = junit_xml_dir.clone().join(&junit_xml);
-                        let nextest_list = nextest_list_dir.clone().join(&nextest_list);
+                    for (junit_xml, nextest_list_json) in artifacts {
+                        let junit_xml_path = rt.read(junit_xml);
+                        let nextest_list_path = rt.read(nextest_list_json);
+                        println!("Artifact file: {}", junit_xml_path.display());
+                        println!("Artifact file: {}", nextest_list_path.display());
+                        assert!(junit_xml_path.exists(), "expected artifact file to exist");
+                        assert!(
+                            nextest_list_path.exists(),
+                            "expected artifact file to exist"
+                        );
 
                         get_testcase_names_from_junit_xml(
-                            &junit_xml,
+                            &junit_xml_path,
                             &mut combined_junit_testcases,
                         )?;
 
                         get_testcase_names_from_nextest_list_json(
-                            &nextest_list,
+                            &nextest_list_path,
                             &mut combined_nextest_testcases,
                         )?;
                     }
