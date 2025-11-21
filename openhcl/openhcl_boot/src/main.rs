@@ -718,6 +718,11 @@ fn shim_main(shim_params_raw_offset: isize) -> ! {
 
     // Validate that no imported regions that are pending are not part of vtl2
     // ram.
+    log!("validating imported regions");
+    for (range, _) in p.imported_regions() {
+        log!("imported region: {range}");
+    }
+
     for (range, result) in walk_ranges(
         partition_info.vtl2_ram.iter().map(|r| (r.range, ())),
         p.imported_regions(),

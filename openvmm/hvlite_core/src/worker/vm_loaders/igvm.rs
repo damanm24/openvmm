@@ -666,13 +666,23 @@ fn load_igvm_x86(
                     });
                 }
 
-                tracing::trace!(vtl2_base_address);
+                tracing::info!(
+                    vtl2_base_address = format_args!("{:#x}", vtl2_base_address),
+                    region_base_gpa = format_args!("{:#x}", region.base_gpa),
+                    region_size = format_args!("{:#x}", region.size),
+                    "load_igvm_x86: calculated vtl2_base_address for relocation"
+                );
 
                 // Calculate the relocation offset. Only positive offsets are
                 // currently supported, which underhill should already
                 // constrain.
                 assert!(vtl2_base_address >= region.base_gpa);
                 let relocation_offset = Some(vtl2_base_address - region.base_gpa);
+
+                tracing::info!(
+                    relocation_offset = format_args!("{:#x}", relocation_offset.unwrap()),
+                    "load_igvm_x86: calculated relocation offset"
+                );
 
                 if region.vp_index != 0 || page_table_fixup.vp_index != 0 {
                     return Err(Error::RelocationVpIndex);
@@ -753,15 +763,23 @@ fn load_igvm_x86(
     };
 
     // Ensure required memory is present.
+    tracing::info!("load_igvm_x86: collecting required memory from IGVM directives");
     let required_ram = igvm_file.directives().iter().filter_map(|header| {
         if let IgvmDirectiveHeader::RequiredMemory {
             gpa,
             compatibility_mask: _,
             number_of_bytes,
-            vtl2_protectable: _,
+            vtl2_protectable,
         } = *header
         {
             let base = relocate_gpa(gpa);
+            tracing::info!(
+                original_gpa = format_args!("{:#x}", gpa),
+                relocated_gpa = format_args!("{:#x}", base),
+                number_of_bytes = format_args!("{:#x}", number_of_bytes),
+                vtl2_protectable,
+                "load_igvm_x86: RequiredMemory directive"
+            );
             Some(MemoryRange::new(base..base + number_of_bytes as u64))
         } else {
             None
@@ -779,13 +797,44 @@ fn load_igvm_x86(
         )
         .collect::<Vec<_>>();
 
+    tracing::info!(
+        all_ram_count = all_ram.len(),
+        "load_igvm_x86: all_ram before sorting"
+    );
+    for (idx, ram) in all_ram.iter().enumerate() {
+        tracing::info!(
+            idx,
+            start = format_args!("{:#x}", ram.range.start()),
+            end = format_args!("{:#x}", ram.range.end()),
+            len = format_args!("{:#x}", ram.range.len()),
+            vnode = ram.vnode,
+            "load_igvm_x86: all_ram entry before sort"
+        );
+    }
+
     all_ram.sort_by_key(|r| r.range.start());
+
+    tracing::info!("load_igvm_x86: all_ram after sorting");
+    for (idx, ram) in all_ram.iter().enumerate() {
+        tracing::info!(
+            idx,
+            start = format_args!("{:#x}", ram.range.start()),
+            end = format_args!("{:#x}", ram.range.end()),
+            len = format_args!("{:#x}", ram.range.len()),
+            vnode = ram.vnode,
+            "load_igvm_x86: all_ram entry after sort"
+        );
+    }
 
     if let Some(range) = subtract_ranges(required_ram, all_ram.iter().map(|r| r.range)).next() {
         return Err(Error::MissingRequiredMemory(range));
     }
 
     // Anything requested is VTL2 protectable.
+    tracing::info!(
+        ?vtl2_base_address,
+        "load_igvm_x86: collecting VTL2 protectable RAM"
+    );
     let mut vtl2_protectable_ram = match vtl2_base_address {
         Vtl2BaseAddressType::File
         | Vtl2BaseAddressType::Absolute(_)
@@ -801,6 +850,12 @@ fn load_igvm_x86(
                 } = *header
                 {
                     let base = relocate_gpa(gpa);
+                    tracing::info!(
+                        original_gpa = format_args!("{:#x}", gpa),
+                        relocated_gpa = format_args!("{:#x}", base),
+                        number_of_bytes = format_args!("{:#x}", number_of_bytes),
+                        "load_igvm_x86: adding VTL2 protectable RAM from IGVM"
+                    );
                     Some(MemoryRange::new(base..base + number_of_bytes as u64))
                 } else {
                     None
@@ -812,10 +867,41 @@ fn load_igvm_x86(
 
     // If an extra VTL2 range is provided, add it to the protectable list.
     if let Some(range) = mem_layout.vtl2_range() {
+        tracing::info!(
+            vtl2_range_start = format_args!("{:#x}", range.start()),
+            vtl2_range_end = format_args!("{:#x}", range.end()),
+            vtl2_range_len = format_args!("{:#x}", range.len()),
+            "load_igvm_x86: adding VTL2 range from mem_layout"
+        );
         vtl2_protectable_ram.push(range);
     }
 
+    tracing::info!(
+        vtl2_protectable_count = vtl2_protectable_ram.len(),
+        "load_igvm_x86: vtl2_protectable_ram before sorting"
+    );
+    for (idx, range) in vtl2_protectable_ram.iter().enumerate() {
+        tracing::info!(
+            idx,
+            start = format_args!("{:#x}", range.start()),
+            end = format_args!("{:#x}", range.end()),
+            len = format_args!("{:#x}", range.len()),
+            "load_igvm_x86: vtl2_protectable_ram entry before sort"
+        );
+    }
+
     vtl2_protectable_ram.sort_by_key(|r| r.start());
+
+    tracing::info!("load_igvm_x86: vtl2_protectable_ram after sorting");
+    for (idx, range) in vtl2_protectable_ram.iter().enumerate() {
+        tracing::info!(
+            idx,
+            start = format_args!("{:#x}", range.start()),
+            end = format_args!("{:#x}", range.end()),
+            len = format_args!("{:#x}", range.len()),
+            "load_igvm_x86: vtl2_protectable_ram entry after sort"
+        );
+    }
 
     let mut page_table_cpu_state: Option<CpuPagingState> = None;
 
@@ -1010,7 +1096,18 @@ fn load_igvm_x86(
                     StartupMemoryType::Ram
                 };
 
+                let original_gpa = gpa;
                 let gpa = relocate_gpa(gpa);
+
+                tracing::info!(
+                    original_gpa = format_args!("{:#x}", original_gpa),
+                    relocated_gpa = format_args!("{:#x}", gpa),
+                    number_of_bytes = format_args!("{:#x}", number_of_bytes),
+                    page_base = format_args!("{:#x}", gpa / HV_PAGE_SIZE),
+                    page_count = format_args!("{:#x}", number_of_bytes as u64 / HV_PAGE_SIZE),
+                    vtl2_protectable,
+                    "load_igvm_x86: processing RequiredMemory directive, calling verify_startup_memory_available"
+                );
 
                 loader
                     .verify_startup_memory_available(

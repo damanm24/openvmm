@@ -598,6 +598,27 @@ fn topology_from_persisted_state(
         partition_mmio,
     } = parsed_protobuf;
 
+    log!("Dumping persisted partition_memory map 2:");
+    let mut last_end = 0;
+    for (i, entry) in partition_memory.iter().enumerate() {
+        log!(
+            "memory entry {}: range={} vtl_type={:?}",
+            i,
+            entry.range,
+            entry.vtl_type
+        );
+
+        if entry.range.start() < last_end {
+            log!(
+                "MEMORY ENTRY NOT SORTED OR OVERLAPPING: {}: range={} last_end={:#x}",
+                i,
+                entry.range,
+                last_end
+            );
+        }
+        last_end = entry.range.end();
+    }
+
     // FUTURE: should memory allocation mode should persist in saved state and
     // verify the host did not change it?
     let memory_allocation_mode = parsed.memory_allocation_mode;

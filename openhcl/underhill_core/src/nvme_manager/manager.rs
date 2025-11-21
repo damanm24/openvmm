@@ -305,6 +305,8 @@ impl NvmeManagerWorker {
         }
         .instrument(join_span)
         .await;
+
+        tracing::info!("nvme manager worker shutdown complete");
     }
 
     async fn load_driver(pci_id: String, context: NvmeWorkerContext) -> anyhow::Result<()> {

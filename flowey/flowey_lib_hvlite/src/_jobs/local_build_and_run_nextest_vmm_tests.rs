@@ -994,12 +994,15 @@ impl SimpleFlowNode for Node {
             }
         } else {
             side_effects.push(ctx.reqv(crate::install_vmm_tests_deps::Request::Install));
+            // if let Some((prep_steps, _)) = register_prep_steps {
+            //     side_effects.push(ctx.reqv(|done| crate::run_prep_steps::Request {
+            //         prep_steps,
+            //         env: extra_env.clone(),
+            //         done,
+            //     }));
+            // }
             if let Some((prep_steps, _)) = register_prep_steps {
-                side_effects.push(ctx.reqv(|done| crate::run_prep_steps::Request {
-                    prep_steps,
-                    env: extra_env.clone(),
-                    done,
-                }));
+                prep_steps.claim_unused(ctx);
             }
 
             let results = ctx.reqv(|v| crate::test_nextest_vmm_tests_archive::Request {

@@ -247,6 +247,27 @@ fn write_persisted_info(parsed: &ParsedBootDtInfo) -> anyhow::Result<()> {
             .collect(),
     };
 
+    tracing::info!("Dumping persisted partition_memory map 1:");
+    let mut last_end = 0;
+    for (i, entry) in state.partition_memory.iter().enumerate() {
+        tracing::info!(
+            i,
+            range = %entry.range,
+            vtl_type = ?entry.vtl_type,
+            "memory entry"
+        );
+
+        if entry.range.start() < last_end {
+            tracing::error!(
+                i,
+                range = %entry.range,
+                last_end,
+                "MEMORY ENTRY NOT SORTED OR OVERLAPPING"
+            );
+        }
+        last_end = entry.range.end();
+    }
+
     let protobuf = mesh_protobuf::encode(state);
     tracing::trace!(len = protobuf.len(), "persisted protobuf len");
 

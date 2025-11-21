@@ -1784,7 +1784,7 @@ async fn request_send_servicing_state(
             MAX_PAYLOAD_SIZE,
         );
 
-        tracing::debug!(
+        tracing::info!(
             "More data? {:?} saved_state_bytes_written {} saved_state_size {}, payload_len {}",
             status_code,
             saved_state_bytes_written,
@@ -1803,7 +1803,7 @@ async fn request_send_servicing_state(
         saved_state_bytes_written += payload_len;
     }
 
-    tracing::debug!("Done writing saved state, awaiting host response");
+    tracing::info!("Done writing saved state, awaiting host response");
 
     let response: get_protocol::SaveGuestVtl2StateResponse = access
         .recv_response_fixed_size(HostRequests::SAVE_GUEST_VTL2_STATE)

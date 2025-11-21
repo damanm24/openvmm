@@ -197,6 +197,18 @@ impl<R: Debug + GuestArch> ImageLoad<R> for Loader<'_, R> {
         page_count: u64,
         memory_type: StartupMemoryType,
     ) -> anyhow::Result<()> {
+        let base_address = page_base * HV_PAGE_SIZE;
+        let end_address = base_address + (page_count * HV_PAGE_SIZE) - 1;
+
+        tracing::info!(
+            page_base = format_args!("{:#x}", page_base),
+            page_count = format_args!("{:#x}", page_count),
+            base_address = format_args!("{:#x}", base_address),
+            end_address = format_args!("{:#x}", end_address),
+            ?memory_type,
+            "verify_startup_memory_available: entry"
+        );
+
         // Allow Vtl2ProtectableRam only if VTL2 is enabled.
         if self.max_vtl == Vtl::Vtl2 {
             match memory_type {
@@ -213,10 +225,20 @@ impl<R: Debug + GuestArch> ImageLoad<R> for Loader<'_, R> {
 
         let mut memory_found = false;
 
-        let base_address = page_base * HV_PAGE_SIZE;
-        let end_address = base_address + (page_count * HV_PAGE_SIZE) - 1;
+        tracing::info!(
+            ram_range_count = self.mem_layout.ram().len(),
+            "verify_startup_memory_available: checking RAM ranges"
+        );
 
-        for range in self.mem_layout.ram() {
+        for (idx, range) in self.mem_layout.ram().iter().enumerate() {
+            tracing::info!(
+                idx,
+                range_start = format_args!("{:#x}", range.range.start()),
+                range_end = format_args!("{:#x}", range.range.end()),
+                vnode = range.vnode,
+                "verify_startup_memory_available: checking RAM range"
+            );
+
             if base_address >= range.range.start() && base_address < range.range.end() {
                 // Today, the memory layout only describes normal ram and mmio.
                 // Thus the memory request must live completely within a single
@@ -230,6 +252,10 @@ impl<R: Debug + GuestArch> ImageLoad<R> for Loader<'_, R> {
                     );
                 }
 
+                tracing::info!(
+                    idx,
+                    "verify_startup_memory_available: memory found in RAM range"
+                );
                 memory_found = true;
             }
         }
@@ -242,7 +268,15 @@ impl<R: Debug + GuestArch> ImageLoad<R> for Loader<'_, R> {
         // if we haven't found the range, and this is for VTL2.
         if !memory_found && memory_type == StartupMemoryType::Vtl2ProtectableRam {
             if let Some(range) = self.mem_layout.vtl2_range() {
+                tracing::info!(
+                    vtl2_range_start = format_args!("{:#x}", range.start()),
+                    vtl2_range_end = format_args!("{:#x}", range.end()),
+                    vtl2_range_len = format_args!("{:#x}", range.len()),
+                    "verify_startup_memory_available: checking VTL2 specific range"
+                );
+
                 if base_address >= range.start() && (page_count * HV_PAGE_SIZE) <= range.len() {
+                    tracing::info!("verify_startup_memory_available: memory found in VTL2 range");
                     memory_found = true;
                 } else {
                     anyhow::bail!(
@@ -252,12 +286,20 @@ impl<R: Debug + GuestArch> ImageLoad<R> for Loader<'_, R> {
                         range
                     );
                 }
+            } else {
+                tracing::info!("verify_startup_memory_available: no VTL2 specific range available");
             }
         }
 
         if memory_found {
+            tracing::info!("verify_startup_memory_available: memory validation successful");
             Ok(())
         } else {
+            tracing::error!(
+                base_address = format_args!("{:#x}", base_address),
+                end_address = format_args!("{:#x}", end_address),
+                "verify_startup_memory_available: no valid memory range found"
+            );
             Err(anyhow::anyhow!(
                 "no valid memory range available for memory at base {:#x} end {:#x}",
                 base_address,

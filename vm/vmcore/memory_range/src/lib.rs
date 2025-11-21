@@ -452,7 +452,12 @@ impl<I: Iterator<Item = (MemoryRange, T)>, T> PeekableSorted<I> {
                 .item
                 .get_or_insert_with(|| {
                     let r = self.iter.next()?;
-                    assert!(r.0.start() >= pos, "{msg} not sorted");
+                    assert!(
+                        r.0.start() >= pos,
+                        "{msg} not sorted: range={:?} pos={:#x}",
+                        r.0,
+                        pos
+                    );
                     Some(r)
                 })
                 .as_ref()?;
