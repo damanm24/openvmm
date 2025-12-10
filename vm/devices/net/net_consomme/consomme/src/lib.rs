@@ -20,9 +20,9 @@ mod dhcp;
 #[cfg_attr(windows, path = "dns_windows.rs")]
 mod dns;
 #[cfg_attr(windows, path = "dns_resolver_windows/mod.rs")]
-#[cfg_attr(unix, path = "dns_resolver_unix.rs")]
+#[cfg_attr(unix, path = "dns_resolver_unix/mod.rs")]
 pub mod dns_resolver;
-mod dns_resolver_common;
+pub mod dns_resolver_common;
 mod icmp;
 mod tcp;
 mod udp;

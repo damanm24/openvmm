@@ -41,6 +41,7 @@ use crate::dns_resolver_common::DropReason;
 use crate::dns_resolver_common::EthernetAddress;
 use crate::dns_resolver_common::IpProtocol;
 use crate::dns_resolver_common::Ipv4Address;
+use pal_async::driver::Driver;
 /// DNS resolver that manages active DNS queries using Windows DNS APIs.
 ///
 /// This resolver automatically selects the best available Windows DNS API:
@@ -103,9 +104,14 @@ impl DnsResolver {
         })
     }
 
-    /// Submits a DNS query for resolution.
+    /// Submits a DNS query for resolution using the provided driver.
+    ///
+    /// Note: The Windows implementation currently does not use the driver parameter
+    /// as it uses Windows-specific async APIs, but the parameter is kept for
+    /// API compatibility with the Unix version.
     pub fn handle_dns(
         &mut self,
+        _driver: &dyn Driver,
         dns_query: &[u8],
         protocol: IpProtocol,
         src_addr: Ipv4Address,

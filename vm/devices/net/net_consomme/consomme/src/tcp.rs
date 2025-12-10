@@ -640,6 +640,7 @@ impl TcpConnection {
                 .collect();
 
             if let Err(e) = resolver.handle_dns(
+                sender.client.driver(),
                 &dns_query,
                 IpProtocol::Tcp,
                 sender.ft.src.ip,
