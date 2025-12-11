@@ -12,8 +12,6 @@
 
 use super::SharedState;
 use crate::DnsResponse;
-use pal_async::driver::Driver;
-use pal_async::task::Spawn;
 use smoltcp::wire::EthernetAddress;
 use smoltcp::wire::IpProtocol;
 use smoltcp::wire::Ipv4Address;
@@ -207,76 +205,65 @@ fn build_error_response(query: &[u8]) -> Vec<u8> {
     response
 }
 
-/// Backend for executing DNS queries using the VmTaskDriver.
-pub(super) struct ResolverBackend<'a> {
-    /// The driver used for spawning async tasks.
-    driver: &'a dyn Driver,
-}
+/// Backend for executing DNS queries using threads.
+pub(super) struct ResolverBackend;
 
-impl<'a> ResolverBackend<'a> {
-    /// Create a new resolver backend with the given driver.
-    pub fn new(driver: &'a dyn Driver) -> Self {
-        Self { driver }
+impl ResolverBackend {
+    /// Create a new resolver backend.
+    pub fn new() -> Self {
+        Self
     }
 
-    /// Execute a DNS query asynchronously.
+    /// Execute a DNS query asynchronously using a background thread.
     ///
-    /// Uses the VmTaskDriver to spawn an async task to execute the query using `res_send()`.
+    /// Spawns a thread to execute the blocking query using `res_send()`.
     /// The result is queued to the shared state's response queue.
     pub fn query(&self, dns_query: &[u8], context: QueryContext, shared_state: Arc<SharedState>) {
-        // Clone the query data for the async task
+        // Clone the query data for the thread
         let query_data = dns_query.to_vec();
         let request_id = context.id;
 
-        // Use the driver's spawner to create an async task
-        let spawner = self.driver as &dyn Spawn;
-        spawner
-            .spawn(format!("dns-query-{}", request_id), async move {
-                // Initialize resolver for this task (thread-local state)
-                // This is safe to call multiple times.
-                if ffi::res_init() == -1 {
-                    tracing::warn!(request_id, "Failed to initialize resolver for task");
+        // Spawn a thread to execute the blocking DNS query
+        std::thread::spawn(move || {
+            // Initialize resolver for this thread (thread-local state)
+            // This is safe to call multiple times.
+            if ffi::res_init() == -1 {
+                tracing::warn!(request_id, "Failed to initialize resolver for thread");
+            }
+
+            // Execute the query
+            let response_data = match execute_query(&query_data) {
+                Ok(data) => {
+                    tracing::debug!(
+                        request_id,
+                        response_len = data.len(),
+                        "DNS query completed successfully"
+                    );
+                    data
                 }
-
-                // Execute the query
-                let response_data = match execute_query(&query_data) {
-                    Ok(data) => {
-                        tracing::debug!(
-                            request_id,
-                            response_len = data.len(),
-                            "DNS query completed successfully"
-                        );
-                        data
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            request_id,
-                            error = %e,
-                            "DNS query failed, returning SERVFAIL"
-                        );
-                        build_error_response(&query_data)
-                    }
-                };
-
-                // Check if this request is still pending (not cancelled)
-                let is_pending = shared_state
-                    .pending_requests
-                    .lock()
-                    .expect("pending_requests mutex poisoned")
-                    .remove(&request_id);
-
-                if is_pending && !response_data.is_empty() {
-                    // Queue the response
-                    let response = context.to_response(response_data);
-                    shared_state
-                        .response_queue
-                        .lock()
-                        .expect("response_queue mutex poisoned")
-                        .push_back(response);
-                } else if !is_pending {
-                    tracing::debug!(request_id, "DNS query completed but request was cancelled");
+                Err(e) => {
+                    tracing::warn!(
+                        request_id,
+                        error = %e,
+                        "DNS query failed, returning SERVFAIL"
+                    );
+                    build_error_response(&query_data)
                 }
-            })
-            .detach();
+            };
+
+            // Check if this request is still pending (not cancelled)
+            let mut pending = shared_state.pending_requests.lock();
+            let is_pending = pending.remove(&request_id);
+            drop(pending);
+
+            if is_pending && !response_data.is_empty() {
+                // Queue the response
+                let response = context.to_response(response_data);
+                let mut queue = shared_state.response_queue.lock();
+                queue.push_back(response);
+            } else if !is_pending {
+                tracing::debug!(request_id, "DNS query completed but request was cancelled");
+            }
+        });
     }
 }

@@ -23,7 +23,7 @@ mod resolver;
 
 use crate::DnsResponse;
 use crate::DropReason;
-use pal_async::driver::Driver;
+use parking_lot::Mutex;
 use resolver::QueryContext;
 use resolver::ResolverBackend;
 use smoltcp::wire::EthernetAddress;
@@ -32,7 +32,6 @@ use smoltcp::wire::Ipv4Address;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -65,7 +64,6 @@ impl SharedState {
 ///
 /// // Submit a DNS query
 /// resolver.handle_dns(
-///     driver,
 ///     dns_query_bytes,
 ///     IpProtocol::Udp,
 ///     src_addr, dst_addr,
@@ -99,13 +97,12 @@ impl DnsResolver {
         })
     }
 
-    /// Submits a DNS query for resolution using the provided driver.
+    /// Submits a DNS query for resolution.
     ///
-    /// The query is executed asynchronously using the driver's task spawning capability.
+    /// The query is executed asynchronously on a background thread.
     /// Results can be retrieved via `poll_responses()`.
     pub fn handle_dns(
         &mut self,
-        driver: &dyn Driver,
         dns_query: &[u8],
         protocol: IpProtocol,
         src_addr: Ipv4Address,
@@ -124,11 +121,7 @@ impl DnsResolver {
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         // Track this request as pending
-        self.shared_state
-            .pending_requests
-            .lock()
-            .expect("pending_requests mutex poisoned")
-            .insert(request_id);
+        self.shared_state.pending_requests.lock().insert(request_id);
 
         let context = QueryContext {
             id: request_id,
@@ -141,8 +134,8 @@ impl DnsResolver {
             client_mac,
         };
 
-        // Create a backend with the provided driver and execute the query
-        let backend = ResolverBackend::new(driver);
+        // Create a backend and execute the query
+        let backend = ResolverBackend::new();
         backend.query(dns_query, context, self.shared_state.clone());
 
         Ok(())
@@ -157,11 +150,7 @@ impl DnsResolver {
             return None;
         }
 
-        let mut queue = self
-            .shared_state
-            .response_queue
-            .lock()
-            .expect("response_queue mutex poisoned");
+        let mut queue = self.shared_state.response_queue.lock();
         match queue.front() {
             Some(resp) if resp.protocol == protocol => queue.pop_front(),
             _ => None,
@@ -176,18 +165,10 @@ impl DnsResolver {
     pub fn cancel_all(&mut self) {
         // Clear pending requests - background threads will check this
         // before queuing their results
-        self.shared_state
-            .pending_requests
-            .lock()
-            .expect("pending_requests mutex poisoned")
-            .clear();
+        self.shared_state.pending_requests.lock().clear();
 
         // Clear any already-queued responses
-        self.shared_state
-            .response_queue
-            .lock()
-            .expect("response_queue mutex poisoned")
-            .clear();
+        self.shared_state.response_queue.lock().clear();
     }
 }
 
