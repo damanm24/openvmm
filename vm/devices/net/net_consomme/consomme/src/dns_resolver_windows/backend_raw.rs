@@ -18,6 +18,7 @@ use super::backend::SharedState;
 use super::delay_load::get_dns_cancel_query_raw_fn;
 use super::delay_load::get_dns_query_raw_fn;
 use super::delay_load::get_dns_query_raw_result_free_fn;
+use crate::dns_resolver_common::validate_dns_header;
 use crate::DropReason;
 use crate::PacketError;
 use smoltcp::wire::EthernetAddress;
@@ -81,7 +82,7 @@ impl DnsBackend for RawDnsBackend {
         let request_id = self.id_generator.next();
 
         // Validate DNS header (minimum 12 bytes)
-        if dns_query.len() < 12 {
+        if !validate_dns_header(dns_query) {
             tracing::error!(request_id, len = dns_query.len(), "DNS query too short");
             return Err(DropReason::Packet(PacketError::Dropped));
         }

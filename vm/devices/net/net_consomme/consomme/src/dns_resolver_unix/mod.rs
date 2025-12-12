@@ -21,19 +21,20 @@
 
 mod resolver;
 
-use crate::DnsResponse;
-use crate::DropReason;
+use crate::dns_resolver_common::poll_response_queue;
+use crate::dns_resolver_common::validate_dns_header;
+use crate::dns_resolver_common::DnsResponse;
+use crate::dns_resolver_common::DropReason;
+use crate::dns_resolver_common::EthernetAddress;
+use crate::dns_resolver_common::IpProtocol;
+use crate::dns_resolver_common::Ipv4Address;
+use crate::dns_resolver_common::QueryContext;
+use crate::dns_resolver_common::RequestIdGenerator;
 use parking_lot::Mutex;
-use resolver::QueryContext;
 use resolver::ResolverBackend;
-use smoltcp::wire::EthernetAddress;
-use smoltcp::wire::IpProtocol;
-use smoltcp::wire::Ipv4Address;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 
 /// Shared state between the DnsResolver and background threads.
 struct SharedState {
@@ -79,8 +80,8 @@ impl SharedState {
 pub struct DnsResolver {
     /// Shared state for responses and pending request tracking.
     shared_state: Arc<SharedState>,
-    /// Next request ID to assign.
-    next_id: AtomicU64,
+    /// Request ID generator.
+    id_generator: RequestIdGenerator,
 }
 
 impl DnsResolver {
@@ -93,7 +94,7 @@ impl DnsResolver {
 
         Ok(Self {
             shared_state: Arc::new(SharedState::new()),
-            next_id: AtomicU64::new(0),
+            id_generator: RequestIdGenerator::new(),
         })
     }
 
@@ -113,12 +114,12 @@ impl DnsResolver {
         client_mac: EthernetAddress,
     ) -> Result<(), DropReason> {
         // Validate DNS header (minimum 12 bytes)
-        if dns_query.len() < 12 {
+        if !validate_dns_header(dns_query) {
             tracing::error!(len = dns_query.len(), "DNS query too short");
             return Err(DropReason::DnsError);
         }
 
-        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.id_generator.next();
 
         // Track this request as pending
         self.shared_state.pending_requests.lock().insert(request_id);
@@ -146,15 +147,8 @@ impl DnsResolver {
     /// Returns `None` if the protocol is not UDP or TCP, or if no responses
     /// are available for the specified protocol.
     pub fn poll_responses(&mut self, protocol: IpProtocol) -> Option<DnsResponse> {
-        if protocol != IpProtocol::Udp && protocol != IpProtocol::Tcp {
-            return None;
-        }
-
         let mut queue = self.shared_state.response_queue.lock();
-        match queue.front() {
-            Some(resp) if resp.protocol == protocol => queue.pop_front(),
-            _ => None,
-        }
+        poll_response_queue(&mut queue, protocol)
     }
 
     /// Cancels all pending DNS queries.

@@ -36,6 +36,7 @@ use delay_load::is_dns_query_ex_supported;
 use delay_load::is_dns_raw_apis_supported;
 use std::sync::Arc;
 
+use crate::dns_resolver_common::poll_response_queue;
 use crate::dns_resolver_common::DnsResponse;
 use crate::dns_resolver_common::DropReason;
 use crate::dns_resolver_common::EthernetAddress;
@@ -138,15 +139,8 @@ impl DnsResolver {
     /// Returns `None` if the protocol is not UDP or TCP, or if no responses
     /// are available for the specified protocol.
     pub fn poll_responses(&mut self, protocol: IpProtocol) -> Option<DnsResponse> {
-        if protocol != IpProtocol::Udp && protocol != IpProtocol::Tcp {
-            return None;
-        }
-
         let mut queue = self.shared_state.response_queue.lock();
-        match queue.front() {
-            Some(resp) if resp.protocol == protocol => queue.pop_front(),
-            _ => None,
-        }
+        poll_response_queue(&mut queue, protocol)
     }
 
     /// Cancels all pending DNS queries.

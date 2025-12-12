@@ -11,52 +11,10 @@
 #![expect(unsafe_code)]
 
 use super::SharedState;
-use crate::DnsResponse;
-use smoltcp::wire::EthernetAddress;
-use smoltcp::wire::IpProtocol;
-use smoltcp::wire::Ipv4Address;
+use crate::dns_resolver_common::build_servfail_response;
+use crate::dns_resolver_common::MAX_DNS_RESPONSE_SIZE;
+use crate::dns_resolver_common::QueryContext;
 use std::sync::Arc;
-
-/// Maximum size for a DNS response buffer.
-/// This is the maximum size for a DNS message over UDP (65535 bytes).
-const MAX_DNS_RESPONSE_SIZE: usize = 65535;
-
-/// Context for a DNS query, containing routing information.
-#[derive(Clone, Debug)]
-pub(super) struct QueryContext {
-    /// Unique request ID for tracking.
-    pub id: u64,
-    /// Transport protocol (UDP or TCP).
-    pub protocol: IpProtocol,
-    /// Source IP address (the client).
-    pub src_addr: Ipv4Address,
-    /// Destination IP address (the gateway/DNS server).
-    pub dst_addr: Ipv4Address,
-    /// Source port (the client's port).
-    pub src_port: u16,
-    /// Destination port (DNS port, usually 53).
-    pub dst_port: u16,
-    /// Gateway MAC address.
-    pub gateway_mac: EthernetAddress,
-    /// Client MAC address.
-    pub client_mac: EthernetAddress,
-}
-
-impl QueryContext {
-    /// Create a DnsResponse from this context and response data.
-    fn to_response(&self, response_data: Vec<u8>) -> DnsResponse {
-        DnsResponse {
-            src_addr: self.src_addr,
-            dst_addr: self.dst_addr,
-            src_port: self.src_port,
-            dst_port: self.dst_port,
-            gateway_mac: self.gateway_mac,
-            client_mac: self.client_mac,
-            response_data,
-            protocol: self.protocol,
-        }
-    }
-}
 
 // FFI declarations for libc resolver functions.
 //
@@ -169,41 +127,7 @@ fn execute_query(query: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     Ok(response_buffer)
 }
 
-/// Build a SERVFAIL error response for a failed query.
-///
-/// This creates a minimal DNS response with RCODE=SERVFAIL (2).
-fn build_error_response(query: &[u8]) -> Vec<u8> {
-    // We need at least the DNS header (12 bytes) to build a response
-    if query.len() < 12 {
-        // Return an empty response if the query is malformed
-        return Vec::new();
-    }
 
-    let mut response = Vec::with_capacity(query.len());
-
-    // Copy transaction ID from query (bytes 0-1)
-    response.extend_from_slice(&query[0..2]);
-
-    // Build flags: QR=1 (response), OPCODE=0, AA=0, TC=0, RD=query.RD, RA=1, RCODE=2 (SERVFAIL)
-    let rd = query[2] & 0x01; // Preserve RD bit from query
-    let flags_byte1 = 0x80 | rd; // QR=1, RD preserved
-    let flags_byte2 = 0x82; // RA=1, RCODE=2 (SERVFAIL)
-    response.push(flags_byte1);
-    response.push(flags_byte2);
-
-    // Copy QDCOUNT from query (bytes 4-5)
-    response.extend_from_slice(&query[4..6]);
-
-    // ANCOUNT = 0, NSCOUNT = 0, ARCOUNT = 0
-    response.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
-
-    // Copy the question section if present
-    if query.len() > 12 {
-        response.extend_from_slice(&query[12..]);
-    }
-
-    response
-}
 
 /// Backend for executing DNS queries using threads.
 pub(super) struct ResolverBackend;
@@ -247,7 +171,7 @@ impl ResolverBackend {
                         error = %e,
                         "DNS query failed, returning SERVFAIL"
                     );
-                    build_error_response(&query_data)
+                    build_servfail_response(&query_data)
                 }
             };
 
