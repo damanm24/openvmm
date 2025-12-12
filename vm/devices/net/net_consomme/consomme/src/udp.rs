@@ -396,14 +396,13 @@ impl<T: Client> Access<'_, T> {
         let gateway_mac = self.inner.state.params.gateway_mac;
         let client_mac = frame.src_addr;
 
-        // Submit the DNS query with addressing information, passing the driver
+        // Submit the DNS query with addressing information
         // The response will be queued and sent later in poll_udp
         self.inner
             .dns_resolver
             .as_mut()
             .unwrap()
             .handle_dns(
-                self.client.driver(),
                 dns_query,
                 IpProtocol::Udp,
                 src_addr,
