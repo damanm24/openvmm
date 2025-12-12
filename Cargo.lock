@@ -8,7 +8,7 @@ version = "0.0.0"
 dependencies = [
  "bitfield-struct 0.11.0",
  "open_enum",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -32,7 +32,7 @@ dependencies = [
  "acpi_spec",
  "memory_range",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -43,7 +43,7 @@ dependencies = [
  "open_enum",
  "static_assertions",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -566,7 +566,7 @@ dependencies = [
  "parking_lot",
  "range_map_vec",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1241,7 +1241,7 @@ dependencies = [
  "tokio",
  "vhd1_defs",
  "vm_resource",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1276,7 +1276,7 @@ dependencies = [
  "tracing",
  "uevent",
  "vm_resource",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1436,7 +1436,7 @@ dependencies = [
  "thiserror 2.0.16",
  "vhd1_defs",
  "vm_resource",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1478,7 +1478,7 @@ dependencies = [
  "thiserror 2.0.16",
  "tracing",
  "vm_resource",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1765,7 +1765,7 @@ name = "fdt"
 version = "0.0.0"
 dependencies = [
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1797,7 +1797,7 @@ dependencies = [
  "tracing",
  "vm_topology",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -1831,7 +1831,7 @@ dependencies = [
  "vmcore",
  "watchdog_core",
  "wchar",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2088,7 +2088,7 @@ dependencies = [
  "test_with_tracing",
  "thiserror 2.0.16",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2250,7 +2250,7 @@ dependencies = [
  "ucs2 0.0.0",
  "uefi_nvram_specvars",
  "xtask_fuzz",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2378,7 +2378,7 @@ dependencies = [
  "vmbus_channel",
  "vmbus_ring",
  "xtask_fuzz",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2452,7 +2452,7 @@ dependencies = [
  "tracing",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2463,7 +2463,7 @@ dependencies = [
  "guestmem",
  "inspect",
  "open_enum",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2517,7 +2517,7 @@ version = "0.0.0"
 dependencies = [
  "get_protocol",
  "guid",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2531,7 +2531,7 @@ dependencies = [
  "serde_helpers",
  "serde_json",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2661,7 +2661,7 @@ dependencies = [
  "vmbus_async",
  "vmbus_channel",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2699,7 +2699,7 @@ dependencies = [
  "vmbus_ring",
  "vmcore",
  "vmgs_resources",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2721,7 +2721,7 @@ dependencies = [
  "vmbus_channel",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2757,8 +2757,9 @@ dependencies = [
  "vmbus_async",
  "vmbus_ring",
  "vmbus_user_channel",
+ "vmcore",
  "vpci",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2792,7 +2793,7 @@ dependencies = [
  "sparse_mmap",
  "thiserror 2.0.16",
  "trycopy",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2806,7 +2807,7 @@ dependencies = [
  "win_etw_provider",
  "windows 0.62.0",
  "windows-sys 0.61.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2897,7 +2898,7 @@ dependencies = [
  "tracing",
  "user_driver",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -2918,7 +2919,7 @@ dependencies = [
  "uefi_nvram_storage",
  "vmcore",
  "wchar",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3046,7 +3047,7 @@ dependencies = [
  "vm_topology",
  "vmcore",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3062,7 +3063,7 @@ dependencies = [
  "thiserror 2.0.16",
  "tracelimit",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3081,7 +3082,7 @@ dependencies = [
  "bitfield-struct 0.11.0",
  "open_enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3169,7 +3170,7 @@ dependencies = [
  "vmswitch",
  "vpci",
  "watchdog_core",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3319,7 +3320,7 @@ dependencies = [
  "vmbus_async",
  "vmbus_channel",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3341,7 +3342,7 @@ dependencies = [
  "vmbus_relay_intercept_device",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3352,7 +3353,7 @@ dependencies = [
  "guid",
  "jiff",
  "open_enum",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3383,7 +3384,7 @@ dependencies = [
  "serde_helpers",
  "serde_json",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3445,7 +3446,7 @@ dependencies = [
  "tracing",
  "tracing_helpers",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3489,7 +3490,7 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.16",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3501,7 +3502,7 @@ dependencies = [
  "bitfield-struct 0.10.1",
  "open-enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3528,7 +3529,7 @@ dependencies = [
  "tracing-subscriber",
  "vbs_defs",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3926,7 +3927,7 @@ dependencies = [
  "tracing",
  "vm_topology",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -3941,7 +3942,7 @@ dependencies = [
  "mesh_protobuf",
  "open_enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4022,7 +4023,7 @@ dependencies = [
  "tracing",
  "widestring",
  "windows 0.62.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4062,7 +4063,7 @@ dependencies = [
  "user_driver",
  "user_driver_emulated_mock",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4218,7 +4219,7 @@ dependencies = [
  "test_with_tracing",
  "thiserror 2.0.16",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4255,7 +4256,7 @@ dependencies = [
  "prost-types",
  "socket2",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4282,7 +4283,7 @@ dependencies = [
  "tracing_helpers",
  "unicycle",
  "unix_socket",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4310,7 +4311,7 @@ dependencies = [
  "unicycle",
  "unix_socket",
  "urlencoding",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4360,7 +4361,7 @@ dependencies = [
  "cfg-if",
  "hvdef",
  "minimal_rt_build",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4448,7 +4449,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "vmm-sys-util",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4582,7 +4583,7 @@ dependencies = [
  "user_driver",
  "user_driver_emulated_mock",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4658,7 +4659,7 @@ dependencies = [
  "vmbus_core",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4843,7 +4844,7 @@ dependencies = [
  "user_driver",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4890,7 +4891,7 @@ dependencies = [
  "user_driver",
  "user_driver_emulated_mock",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4901,7 +4902,7 @@ dependencies = [
  "mesh",
  "nvme_spec",
  "vm_resource",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4914,7 +4915,7 @@ dependencies = [
  "open_enum",
  "static_assertions",
  "storage_string",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -4947,7 +4948,7 @@ dependencies = [
  "user_driver",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5049,7 +5050,7 @@ dependencies = [
  "serde",
  "serde_json",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5069,9 +5070,11 @@ dependencies = [
  "mesh_protobuf",
  "minimal_rt",
  "minimal_rt_build",
+ "page_table",
  "safe_intrinsics",
  "sha2",
  "sidecar_defs",
+ "static_assertions",
  "string_page_buf",
  "tdcall",
  "test_with_tracing",
@@ -5079,7 +5082,7 @@ dependencies = [
  "tracing",
  "underhill_confidentiality",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5188,7 +5191,7 @@ dependencies = [
  "thiserror 2.0.16",
  "uefi",
  "x86_64",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5322,6 +5325,7 @@ dependencies = [
  "vm_resource",
  "vmbus_serial_guest",
  "vmcore",
+ "vmgs_broker",
  "vmsocket",
  "vnc_worker",
 ]
@@ -5377,6 +5381,7 @@ dependencies = [
  "vmbfs",
  "vmbus_serial_host",
  "vmcore",
+ "vmgs_broker",
  "vnc_worker",
 ]
 
@@ -5415,7 +5420,7 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.16",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5464,7 +5469,7 @@ dependencies = [
  "unix_socket",
  "winapi",
  "windows-sys 0.61.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5600,7 +5605,7 @@ dependencies = [
  "tracelimit",
  "tracing",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5618,7 +5623,7 @@ dependencies = [
  "tracelimit",
  "tracing",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -5646,7 +5651,7 @@ dependencies = [
  "tracelimit",
  "tracing",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6004,7 +6009,7 @@ version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6443,7 +6448,7 @@ dependencies = [
 name = "safeatomic"
 version = "0.0.0"
 dependencies = [
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6501,7 +6506,7 @@ dependencies = [
  "safeatomic",
  "smallvec",
  "sparse_mmap",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6524,7 +6529,7 @@ dependencies = [
  "arbitrary",
  "bitfield-struct 0.11.0",
  "open_enum",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6556,7 +6561,7 @@ dependencies = [
  "tracing_helpers",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6794,7 +6799,7 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.16",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6840,7 +6845,7 @@ dependencies = [
  "minimal_rt_build",
  "sidecar_defs",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6856,7 +6861,7 @@ dependencies = [
  "sidecar_defs",
  "thiserror 2.0.16",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6866,7 +6871,7 @@ dependencies = [
  "hvdef",
  "open_enum",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -6967,7 +6972,7 @@ dependencies = [
  "thiserror 2.0.16",
  "trycopy",
  "windows-sys 0.61.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7047,7 +7052,7 @@ dependencies = [
  "inspect",
  "mesh_protobuf",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7078,7 +7083,7 @@ dependencies = [
  "user_driver_emulated_mock",
  "vmbus_channel",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7104,7 +7109,7 @@ dependencies = [
  "vmbus_channel",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7146,7 +7151,7 @@ dependencies = [
  "vmbus_core",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7157,7 +7162,7 @@ dependencies = [
  "guid",
  "open_enum",
  "scsi_defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7175,7 +7180,7 @@ name = "string_page_buf"
 version = "0.0.0"
 dependencies = [
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7256,7 +7261,7 @@ dependencies = [
  "nix 0.30.1",
  "thiserror 2.0.16",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7270,7 +7275,7 @@ dependencies = [
  "tdx_guest_device",
  "thiserror 2.0.16",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7440,7 +7445,7 @@ dependencies = [
 name = "tmk_protocol"
 version = "0.0.0"
 dependencies = [
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7487,7 +7492,7 @@ dependencies = [
  "vm_topology",
  "vmcore",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7617,7 +7622,7 @@ dependencies = [
  "tracing",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7629,7 +7634,7 @@ dependencies = [
  "serde_json",
  "tpm_lib",
  "tpm_protocol",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7644,7 +7649,7 @@ dependencies = [
  "tpm_protocol",
  "tracelimit",
  "tracing",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7653,7 +7658,7 @@ version = "0.0.0"
 dependencies = [
  "bitfield-struct 0.11.0",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7771,7 +7776,7 @@ dependencies = [
  "libc",
  "thiserror 2.0.16",
  "windows-sys 0.61.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7847,7 +7852,7 @@ dependencies = [
  "thiserror 2.0.16",
  "ucs2 0.0.0",
  "uefi_specs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7864,7 +7869,7 @@ dependencies = [
  "uefi_specs",
  "vmcore",
  "wchar",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7878,7 +7883,7 @@ dependencies = [
  "static_assertions",
  "ucs2 0.0.0",
  "wchar",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7930,7 +7935,7 @@ dependencies = [
  "vmbus_channel",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -7971,7 +7976,7 @@ dependencies = [
  "user_driver_emulated_mock",
  "vmgs",
  "vmgs_format",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8069,6 +8074,7 @@ dependencies = [
  "netvsp",
  "nvme_driver",
  "nvme_resources",
+ "nvme_spec",
  "openhcl_attestation_protocol",
  "openhcl_dma_manager",
  "pal",
@@ -8143,7 +8149,7 @@ dependencies = [
  "watchdog_core",
  "watchdog_vmgs_format",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8164,7 +8170,7 @@ dependencies = [
  "vergen",
  "vmbus_async",
  "vmbus_user_channel",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8340,7 +8346,7 @@ dependencies = [
  "vfio-bindings",
  "vfio_sys",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8379,7 +8385,7 @@ dependencies = [
  "igvm_defs",
  "open_enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8420,6 +8426,7 @@ dependencies = [
  "bitfield-struct 0.11.0",
  "libc",
  "nix 0.30.1",
+ "pal_async",
  "tracing",
  "vfio-bindings",
 ]
@@ -8442,7 +8449,7 @@ dependencies = [
  "tracing",
  "video_core",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8462,7 +8469,7 @@ name = "vhd1_defs"
 version = "0.0.0"
 dependencies = [
  "guid",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8497,7 +8504,7 @@ dependencies = [
  "vm_topology",
  "vmcore",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8553,7 +8560,7 @@ dependencies = [
  "vm_topology",
  "vmcore",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8584,7 +8591,7 @@ dependencies = [
  "vmcore",
  "x86defs",
  "x86emu",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8633,7 +8640,7 @@ dependencies = [
  "vmcore",
  "x86defs",
  "x86emu",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8649,7 +8656,7 @@ dependencies = [
  "tracing",
  "virt",
  "vm_topology",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8698,7 +8705,7 @@ dependencies = [
  "vm_topology",
  "x86defs",
  "x86emu",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8738,7 +8745,7 @@ dependencies = [
  "winapi",
  "x86defs",
  "x86emu",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8768,7 +8775,7 @@ dependencies = [
  "virtio_resources",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8796,7 +8803,7 @@ dependencies = [
  "virtio_resources",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8875,7 +8882,7 @@ dependencies = [
  "virtio_resources",
  "vm_resource",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8962,7 +8969,7 @@ dependencies = [
  "vmbus_async",
  "vmbus_channel",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -8985,7 +8992,7 @@ dependencies = [
  "thiserror 2.0.16",
  "vmbus_channel",
  "vmbus_ring",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9035,7 +9042,7 @@ dependencies = [
  "vmbus_core",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9051,7 +9058,7 @@ dependencies = [
  "tracing",
  "vmbus_async",
  "vmbus_client",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9067,7 +9074,7 @@ dependencies = [
  "open_enum",
  "static_assertions",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9078,6 +9085,7 @@ dependencies = [
  "futures",
  "guestmem",
  "guid",
+ "headervec",
  "mesh",
  "pal",
  "pal_async",
@@ -9086,7 +9094,7 @@ dependencies = [
  "vmbus_core",
  "widestring",
  "windows 0.62.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9133,7 +9141,7 @@ dependencies = [
  "vmbus_relay",
  "vmbus_ring",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9145,7 +9153,7 @@ dependencies = [
  "inspect",
  "safeatomic",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9170,7 +9178,7 @@ dependencies = [
  "vmbus_serial_host",
  "vmbus_serial_protocol",
  "vmbus_user_channel",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9193,7 +9201,7 @@ dependencies = [
  "vmbus_serial_protocol",
  "vmbus_serial_resources",
  "vmcore",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9203,7 +9211,7 @@ dependencies = [
  "guid",
  "open_enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9247,7 +9255,7 @@ dependencies = [
  "vmbus_ring",
  "vmcore",
  "windows 0.62.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9267,7 +9275,7 @@ dependencies = [
  "vmbus_async",
  "vmbus_channel",
  "vmbus_ring",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9293,7 +9301,7 @@ dependencies = [
  "tracelimit",
  "tracing",
  "vm_resource",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9327,7 +9335,7 @@ dependencies = [
  "tracing",
  "vmgs_format",
  "windows 0.62.0",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9336,7 +9344,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "inspect",
- "mesh_channel",
+ "mesh",
  "pal_async",
  "thiserror 2.0.16",
  "tracing",
@@ -9355,7 +9363,7 @@ dependencies = [
  "inspect",
  "open_enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9461,7 +9469,7 @@ dependencies = [
  "vmotherboard",
  "vpci",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9534,7 +9542,7 @@ dependencies = [
  "vm_resource",
  "vmgs_resources",
  "vmm_test_macros",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9612,7 +9620,7 @@ dependencies = [
  "tracing",
  "widestring",
  "winapi",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9623,7 +9631,7 @@ dependencies = [
  "pal_async",
  "socket2",
  "thiserror 2.0.16",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9690,7 +9698,7 @@ dependencies = [
  "vmbus_ring",
  "vmcore",
  "vpci_protocol",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9721,7 +9729,7 @@ dependencies = [
  "vmcore",
  "vpci",
  "vpci_protocol",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9731,7 +9739,7 @@ dependencies = [
  "bitfield-struct 0.11.0",
  "guid",
  "open_enum",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -9930,7 +9938,7 @@ dependencies = [
  "widestring",
  "win_etw_metadata",
  "winapi",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -10407,7 +10415,7 @@ dependencies = [
  "bitfield-struct 0.11.0",
  "open_enum",
  "static_assertions",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -10419,7 +10427,7 @@ dependencies = [
  "thiserror 2.0.16",
  "tracing",
  "x86defs",
- "zerocopy 0.8.25",
+ "zerocopy 0.8.27",
 ]
 
 [[package]]
@@ -10487,11 +10495,11 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.25"
+version = "0.8.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1702d9583232ddb9174e01bb7c15a2ab8fb1bc6f227aa1233858c351a3ba0cb"
+checksum = "0894878a5fa3edfd6da3f88c4805f4c8558e2b996227a3d864f47fe11e38282c"
 dependencies = [
- "zerocopy-derive 0.8.25",
+ "zerocopy-derive 0.8.27",
 ]
 
 [[package]]
@@ -10507,9 +10515,9 @@ dependencies = [
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.25"
+version = "0.8.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28a6e20d751156648aa063f3800b706ee209a32c0b4d9f24be3d980b01be55ef"
+checksum = "88d2b8d9c68ad2b9e4340d7832716a4d21a22a1154777ad56ea55c51a9cf3831"
 dependencies = [
  "proc-macro2",
  "quote",

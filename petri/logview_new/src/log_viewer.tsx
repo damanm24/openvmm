@@ -90,7 +90,7 @@ export function LogViewer(): React.JSX.Element {
     const fullTestName = `${architecture}/${testName}`;
 
     // Fetch the relevant data
-    const { data: logEntries, isSuccess } = useQuery({
+    const { data: logEntries } = useQuery({
         queryKey: ["petriLog", runId, architecture, testName],
         queryFn: () => fetchProcessedLog(runId, architecture, testName),
         staleTime: Infinity, // never goes stale
@@ -213,39 +213,34 @@ export function LogViewer(): React.JSX.Element {
             </div>
 
             <div ref={logContainerRef} style={{ fontFamily: 'monospace', fontSize: '14px', position: 'relative' }}>
-                {filteredLogs.length === 0 && isSuccess ? (
-                    <div className="common-no-data">
-                        No log entries found
-                    </div>
-                ) : (
-                    <VirtualizedTable<LogEntry>
-                        data={filteredLogs}
-                        columns={columns}
-                        sorting={sorting}
-                        onSortingChange={setSorting}
-                        columnWidthMap={columnWidthMap}
-                        estimatedRowHeight={50}
-                        getRowClassName={(row) => {
-                            const logId = `log-${row.original.index}`;
-                            const isSelected = selectedRow === logId;
-                            const severityClass = `severity-${row.original.severity}`;
-                            return `${severityClass} ${isSelected ? 'selected' : ''}`;
-                        }}
-                        onRowClick={(row, event) => {
-                            const logId = `log-${row.original.index}`;
-                            handleRowClick(
-                                row.original.index,
-                                logId,
-                                event,
-                                selectedRow,
-                                setSelectedRow,
-                                location,
-                                navigate
-                            );
-                        }}
-                        scrollToIndex={pendingScrollIndex}
-                    />
-                )}
+                <VirtualizedTable<LogEntry>
+                    data={filteredLogs}
+                    columns={columns}
+                    sorting={sorting}
+                    onSortingChange={setSorting}
+                    columnWidthMap={columnWidthMap}
+                    estimatedRowHeight={50}
+                    getRowClassName={(row) => {
+                        const logId = `log-${row.original.index}`;
+                        const isSelected = selectedRow === logId;
+                        const severityClass = `severity-${row.original.severity}`;
+                        return `${severityClass} ${isSelected ? 'selected' : ''}`;
+                    }}
+                    overscan={100}
+                    onRowClick={(row, event) => {
+                        const logId = `log-${row.original.index}`;
+                        handleRowClick(
+                            row.original.index,
+                            logId,
+                            event,
+                            selectedRow,
+                            setSelectedRow,
+                            location,
+                            navigate
+                        );
+                    }}
+                    scrollToIndex={pendingScrollIndex}
+                />
             </div>
 
             {/* Image Content */}
@@ -406,7 +401,7 @@ function createKeyboardHandler(selectedRow: string | null, logEntries: LogEntry[
         textBlock += `relative: ${entry.relative}\n`;
         textBlock += `severity: ${entry.severity}\n`;
         textBlock += `source: ${decodeHtml(entry.source)}\n`;
-        textBlock += `message: ${decodeHtml(entry.message.trim())}`;
+        textBlock += `message: ${decodeHtml(entry.logMessage.message.trim())}`;
         if (entry.screenshot) {
             textBlock += `\nscreenshot: ${entry.screenshot}`;
         }
@@ -465,18 +460,21 @@ function filterLog(logs: LogEntry[] | undefined, query: string): LogEntry[] {
         return tokens.every(token => {
             const [prefix, ...rest] = token.split(':');
             const term = rest.join(':').toLowerCase();
+            const columnSearching = token.includes(':');
 
-            if (prefix === 'source') {
+            if (columnSearching && prefix === 'source') {
                 return log.source.toLowerCase().includes(term);
-            } else if (prefix === 'severity') {
+            } else if (columnSearching && prefix === 'severity') {
                 return log.severity.toLowerCase().includes(term);
-            } else if (prefix === 'message') {
-                return log.message.toLowerCase().includes(term);
+            } else if (columnSearching && prefix === 'message') {
+                return log.logMessage.message.toLowerCase().includes(term)
+                    || log.logMessage.link_string.toLowerCase().includes(term);
             } else {
                 return (
                     log.source.toLowerCase().includes(token.toLowerCase()) ||
                     log.severity.toLowerCase().includes(token.toLowerCase()) ||
-                    log.message.toLowerCase().includes(token.toLowerCase())
+                    log.logMessage.message.toLowerCase().includes(token.toLowerCase()) ||
+                    log.logMessage.link_string.toLowerCase().includes(token.toLowerCase())
                 );
             }
         });
