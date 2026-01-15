@@ -116,20 +116,18 @@ impl DirEntryCursor {
 
         let start_host_count = self.host_consumed;
         let mut next_offset = offset + 1;
-        let skip_until = if sequential { 0 } else { offset };
-        let mut skipping = !sequential && offset != 0;
+        let entries_to_skip = if sequential { 0 } else { offset };
+        let mut entries_skipped = 0u64;
         let mut batch_consumed = 0u64;
 
         file.read_dir(start_host_count as lx::off_t, |entry| {
             batch_consumed += 1;
 
-            // Skip entries until we reach the target offset (for random seeks).
-            if skipping {
-                if next_offset <= skip_until {
-                    next_offset += 1;
-                    return Ok(true);
-                }
-                skipping = false;
+            // Skip entries until we've skipped enough (for random seeks).
+            // When seeking to offset N, we need to skip N entries to get to the (N+1)th entry.
+            if entries_skipped < entries_to_skip {
+                entries_skipped += 1;
+                return Ok(true);
             }
 
             // Cache this entry.
