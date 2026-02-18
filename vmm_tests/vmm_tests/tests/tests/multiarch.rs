@@ -24,6 +24,8 @@ use vmm_test_macros::vmm_test_no_agent;
 mod ic;
 // Memory Validation tests.
 mod memstat;
+/// Networking tests for virtio-net and netvsp NICs.
+mod networking;
 /// Servicing tests.
 mod openhcl_servicing;
 /// PCIe emulation tests.

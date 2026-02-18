@@ -18,6 +18,7 @@ use get_resources::ged::IgvmAttestTestConfig;
 use openvmm_defs::config::Config;
 use openvmm_defs::config::DeviceVtl;
 use openvmm_defs::config::LoadMode;
+use openvmm_defs::config::VirtioBus;
 use openvmm_defs::config::VpciDeviceConfig;
 use openvmm_defs::config::Vtl2BaseAddressType;
 use vm_resource::IntoResource;
@@ -124,6 +125,26 @@ impl PetriVmConfigOpenVmm {
             panic!("vtl2 relocation mode is only supported for OpenHCL firmware")
         };
         *vtl2_base_address = mode;
+        self
+    }
+
+    /// Enable a virtio-net NIC for the VM.
+    ///
+    /// Uses consomme as the network backend. This adds a virtio-net device
+    /// on the PCI bus, as opposed to [`Self::with_nic`] which adds a
+    /// netvsp/MANA device.
+    pub fn with_virtio_net(mut self) -> Self {
+        let endpoint =
+            net_backend_resources::consomme::ConsommeHandle { cidr: None }.into_resource();
+        self.config.virtio_devices.push((
+            VirtioBus::Pci,
+            virtio_resources::net::VirtioNetHandle {
+                max_queues: None,
+                mac_address: NIC_MAC_ADDRESS,
+                endpoint,
+            }
+            .into_resource(),
+        ));
         self
     }
 
