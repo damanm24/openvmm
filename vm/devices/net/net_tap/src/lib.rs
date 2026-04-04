@@ -19,8 +19,12 @@ use net_backend::Queue;
 use net_backend::QueueConfig;
 use net_backend::RssConfig;
 use net_backend::RxChecksumState;
+use net_backend::RxCsumOffload;
+use net_backend::RxGso;
+use net_backend::RxGsoType;
 use net_backend::RxId;
 use net_backend::RxMetadata;
+use net_backend::RxOffloadConfig;
 use net_backend::TxError;
 use net_backend::TxId;
 use net_backend::TxMetadata;
@@ -115,24 +119,11 @@ pub struct TapEndpoint {
 
 impl TapEndpoint {
     pub fn new(tap: tap::Tap) -> Result<Self, tap::Error> {
-        // Do not enable any RX offloads (TUN_F_CSUM, TUN_F_TSO*, etc.).
-        //
-        // The TUN_F_* flags are the TAP equivalent of VIRTIO_NET_F_GUEST_*:
-        // they tell the kernel that our reader can handle partial checksums
-        // (NEEDS_CSUM) and unsegmented GSO packets. Since net_backend's
-        // RxMetadata has no way to represent "checksum needs to be completed"
-        // (only Good/Bad/Unknown), and no concept of receive-side GRO/RSC,
-        // accepting such packets would force us to either lie about checksum
-        // state or complete checksums in software.
-        //
-        // With offloads set to 0, the kernel completes all checksums and
-        // segments all GSO packets before delivering them to us. This is
-        // correct and simple. The TX path is unaffected — writes with
-        // NEEDS_CSUM and GSO types in the vnet header are processed by the
-        // kernel regardless of these flags.
-        //
-        // We explicitly set 0 rather than skipping the call, in case a
-        // previous user of this TAP fd set offloads to a non-zero value.
+        // RX offload configuration (TUN_F_* flags) is deferred to
+        // get_queues(), where the frontend can pass an RxOffloadConfig
+        // describing its capabilities. We set offloads to 0 here as a
+        // safe default in case the fd had non-zero offloads from a
+        // previous user.
         tap.set_offloads(0)?;
 
         Ok(Self {
@@ -161,6 +152,21 @@ impl Endpoint for TapEndpoint {
     ) -> anyhow::Result<()> {
         assert_eq!(config.len(), 1);
         let config = config.drain(..).next().unwrap();
+
+        // Configure RX offloads on the TAP fd based on what the frontend
+        // can handle. The TUN_F_* flags are the TAP equivalent of
+        // VIRTIO_NET_F_GUEST_*: they tell the kernel that our reader can
+        // handle partial checksums (NEEDS_CSUM) and unsegmented GSO
+        // packets.
+        //
+        // When no offloads are requested, the kernel completes all
+        // checksums and segments all GSO packets before delivering them.
+        let rx_offload_flags = rx_offload_config_to_tun_flags(config.rx_offloads.as_ref());
+        {
+            let tap_guard = self.tap.lock();
+            let tap = tap_guard.as_ref().expect("tap device available");
+            tap.set_offloads(rx_offload_flags)?;
+        }
 
         queues.push(Box::new(TapQueue::new(
             config.driver.as_ref(),
@@ -478,27 +484,89 @@ fn build_vnet_hdr(meta: &TxMetadata) -> VirtioNetHdr {
     }
 }
 
+/// Map [`RxOffloadConfig`] to Linux `TUN_F_*` flags.
+///
+/// The `TUN_F_*` flags are the TAP equivalent of `VIRTIO_NET_F_GUEST_*`:
+/// they tell the kernel that our reader can handle partial checksums
+/// (`NEEDS_CSUM`) and unsegmented GSO packets. When the frontend has
+/// negotiated the corresponding features with the guest, we enable
+/// them on the TAP fd so the kernel can deliver GRO-merged packets
+/// instead of segmenting them in software.
+///
+/// `TUN_F_CSUM` is a prerequisite for all GSO flags — the kernel
+/// requires it because GSO packets always arrive with partial checksums.
+fn rx_offload_config_to_tun_flags(config: Option<&RxOffloadConfig>) -> u32 {
+    let Some(config) = config else {
+        return 0;
+    };
+    let mut flags = 0u32;
+    if config.checksum {
+        flags |= linux_net_bindings::gen_if_tun::TUN_F_CSUM;
+    }
+    // TSO/UFO require TUN_F_CSUM as a prerequisite.
+    if config.checksum && config.tcp4 {
+        flags |= linux_net_bindings::gen_if_tun::TUN_F_TSO4;
+    }
+    if config.checksum && config.tcp6 {
+        flags |= linux_net_bindings::gen_if_tun::TUN_F_TSO6;
+    }
+    if config.checksum && config.udp {
+        flags |= linux_net_bindings::gen_if_tun::TUN_F_UFO;
+    }
+    flags
+}
+
 /// Parse a `VirtioNetHdr` from the TAP device into receive metadata.
 ///
-/// Because we do not set any `TUN_F_*` RX offload flags (see
-/// [`TapEndpoint::new`]), the kernel will never send us `NEEDS_CSUM` or GSO
-/// packets. We only need to handle `DATA_VALID` (checksum verified by the
-/// kernel) and the default case (no information).
-///
-/// The `gso_type` field should always be `GSO_NONE` since we didn't enable
-/// receive-side GSO, but we still parse it defensively to extract L4 protocol
-/// information if present.
+/// Handles all vnet header states:
+/// - `DATA_VALID` flag → checksums validated by the kernel
+/// - `NEEDS_CSUM` flag → partial checksum requiring guest completion
+///   (only delivered when `TUN_F_CSUM` offload is enabled)
+/// - GSO types → GRO-merged packet metadata
+///   (only delivered when `TUN_F_TSO*`/`TUN_F_UFO` offloads are enabled)
+/// - Default → no checksum information
 fn parse_vnet_hdr(hdr: &VirtioNetHdr) -> RxMetadata {
-    let (ip_checksum, l4_checksum) = if hdr.flags.data_valid() {
-        (RxChecksumState::Good, RxChecksumState::Good)
-    } else {
-        (RxChecksumState::Unknown, RxChecksumState::Unknown)
-    };
-
     let l4_protocol = match hdr.gso_type.protocol() {
         VirtioNetHdrGsoProtocol::TCPV4 | VirtioNetHdrGsoProtocol::TCPV6 => L4Protocol::Tcp,
         VirtioNetHdrGsoProtocol::UDP => L4Protocol::Udp,
         _ => L4Protocol::Unknown,
+    };
+
+    let (ip_checksum, l4_checksum, csum_offload) = if hdr.flags.needs_csum() {
+        // Kernel is telling us the checksum field contains a partial
+        // pseudo-header sum. Propagate csum_start/csum_offset so the
+        // frontend can relay them to the guest.
+        (
+            RxChecksumState::Unknown,
+            RxChecksumState::NeedsCsum,
+            Some(RxCsumOffload {
+                csum_start: hdr.csum_start,
+                csum_offset: hdr.csum_offset,
+            }),
+        )
+    } else if hdr.flags.data_valid() {
+        (RxChecksumState::Good, RxChecksumState::Good, None)
+    } else {
+        (RxChecksumState::Unknown, RxChecksumState::Unknown, None)
+    };
+
+    let gso = match hdr.gso_type.protocol() {
+        VirtioNetHdrGsoProtocol::TCPV4 if hdr.gso_size > 0 => Some(RxGso {
+            gso_type: RxGsoType::TcpV4,
+            gso_size: hdr.gso_size,
+            hdr_len: hdr.hdr_len,
+        }),
+        VirtioNetHdrGsoProtocol::TCPV6 if hdr.gso_size > 0 => Some(RxGso {
+            gso_type: RxGsoType::TcpV6,
+            gso_size: hdr.gso_size,
+            hdr_len: hdr.hdr_len,
+        }),
+        VirtioNetHdrGsoProtocol::UDP if hdr.gso_size > 0 => Some(RxGso {
+            gso_type: RxGsoType::Udp,
+            gso_size: hdr.gso_size,
+            hdr_len: hdr.hdr_len,
+        }),
+        _ => None,
     };
 
     RxMetadata {
@@ -507,6 +575,8 @@ fn parse_vnet_hdr(hdr: &VirtioNetHdr) -> RxMetadata {
         ip_checksum,
         l4_checksum,
         l4_protocol,
+        gso,
+        csum_offload,
     }
 }
 
@@ -601,18 +671,23 @@ mod tests {
     }
 
     #[test]
-    fn rx_metadata_from_vnet_hdr_needs_csum_treated_as_unknown() {
-        // We don't set TUN_F_CSUM so the kernel should never send NEEDS_CSUM,
-        // but if it did, we conservatively treat it as Unknown (not Good).
+    fn rx_metadata_from_vnet_hdr_needs_csum() {
+        // When TUN_F_CSUM is enabled, the kernel sends NEEDS_CSUM with
+        // csum_start/csum_offset.
         let hdr = VirtioNetHdr {
             flags: VirtioNetHdrFlags::new().with_needs_csum(true),
             gso_type: VirtioNetHdrGso::new().with_protocol(VirtioNetHdrGsoProtocol::TCPV6),
+            csum_start: 54,
+            csum_offset: 16,
             ..Default::default()
         };
         let meta = parse_vnet_hdr(&hdr);
         assert_eq!(meta.ip_checksum, RxChecksumState::Unknown);
-        assert_eq!(meta.l4_checksum, RxChecksumState::Unknown);
+        assert_eq!(meta.l4_checksum, RxChecksumState::NeedsCsum);
         assert_eq!(meta.l4_protocol, L4Protocol::Tcp);
+        let csum = meta.csum_offload.unwrap();
+        assert_eq!(csum.csum_start, 54);
+        assert_eq!(csum.csum_offset, 16);
     }
 
     #[test]
@@ -633,6 +708,73 @@ mod tests {
         };
         let meta = parse_vnet_hdr(&hdr);
         assert_eq!(meta.l4_protocol, L4Protocol::Udp);
+    }
+
+    #[test]
+    fn rx_metadata_from_vnet_hdr_gro_tcpv4() {
+        let hdr = VirtioNetHdr {
+            flags: VirtioNetHdrFlags::new().with_needs_csum(true),
+            gso_type: VirtioNetHdrGso::new().with_protocol(VirtioNetHdrGsoProtocol::TCPV4),
+            gso_size: 1460,
+            hdr_len: 54,
+            csum_start: 34,
+            csum_offset: 16,
+            ..Default::default()
+        };
+        let meta = parse_vnet_hdr(&hdr);
+        let gso = meta.gso.unwrap();
+        assert_eq!(gso.gso_type, RxGsoType::TcpV4);
+        assert_eq!(gso.gso_size, 1460);
+        assert_eq!(gso.hdr_len, 54);
+        assert_eq!(meta.l4_checksum, RxChecksumState::NeedsCsum);
+    }
+
+    #[test]
+    fn rx_offload_flags_none() {
+        assert_eq!(rx_offload_config_to_tun_flags(None), 0);
+        assert_eq!(
+            rx_offload_config_to_tun_flags(Some(&RxOffloadConfig::default())),
+            0
+        );
+    }
+
+    #[test]
+    fn rx_offload_flags_checksum_only() {
+        let config = RxOffloadConfig {
+            checksum: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            rx_offload_config_to_tun_flags(Some(&config)),
+            linux_net_bindings::gen_if_tun::TUN_F_CSUM
+        );
+    }
+
+    #[test]
+    fn rx_offload_flags_full() {
+        let config = RxOffloadConfig {
+            checksum: true,
+            tcp4: true,
+            tcp6: true,
+            udp: true,
+        };
+        let flags = rx_offload_config_to_tun_flags(Some(&config));
+        assert_ne!(flags & linux_net_bindings::gen_if_tun::TUN_F_CSUM, 0);
+        assert_ne!(flags & linux_net_bindings::gen_if_tun::TUN_F_TSO4, 0);
+        assert_ne!(flags & linux_net_bindings::gen_if_tun::TUN_F_TSO6, 0);
+        assert_ne!(flags & linux_net_bindings::gen_if_tun::TUN_F_UFO, 0);
+    }
+
+    #[test]
+    fn rx_offload_flags_tso_without_csum_ignored() {
+        // TSO flags require checksum. Without checksum, they should not be set.
+        let config = RxOffloadConfig {
+            checksum: false,
+            tcp4: true,
+            tcp6: true,
+            udp: true,
+        };
+        assert_eq!(rx_offload_config_to_tun_flags(Some(&config)), 0);
     }
 
     #[test]

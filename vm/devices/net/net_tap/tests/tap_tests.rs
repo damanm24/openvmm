@@ -206,6 +206,7 @@ mod tap_tests {
     async fn test_tap_get_queues(driver: DefaultDriver) {
         let mut endpoint = new_endpoint("tap0").unwrap();
         let config = vec![QueueConfig {
+            rx_offloads: None,
             driver: Box::new(driver.clone()),
         }];
         let mut queues = Vec::new();
@@ -227,6 +228,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            rx_offloads: None,
             driver: Box::new(driver.clone()),
         }];
         let mut queues = Vec::new();
@@ -273,6 +275,7 @@ mod tap_tests {
         let (mut pool, mem) = make_pool();
         let initial_rx: Vec<_> = (1..128).map(RxId).collect();
         let config = vec![QueueConfig {
+            rx_offloads: None,
             driver: Box::new(driver.clone()),
         }];
         let mut queues = Vec::new();
@@ -326,6 +329,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            rx_offloads: None,
             driver: Box::new(driver.clone()),
         }];
         let mut queues = Vec::new();
@@ -372,6 +376,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            rx_offloads: None,
             driver: Box::new(driver.clone()),
         }];
         let mut queues = Vec::new();
@@ -448,6 +453,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            rx_offloads: None,
             driver: Box::new(driver.clone()),
         }];
         let mut queues = Vec::new();

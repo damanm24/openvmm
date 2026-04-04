@@ -113,7 +113,7 @@ impl BufferAccess for GuestBuffers {
 
         let mut flags = ManaRxcompOobFlags::new();
         match metadata.ip_checksum {
-            RxChecksumState::Unknown => {}
+            RxChecksumState::Unknown | RxChecksumState::NeedsCsum => {}
             RxChecksumState::Good => flags.set_rx_iphdr_csum_succeed(true),
             RxChecksumState::Bad => flags.set_rx_iphdr_csum_fail(true),
             RxChecksumState::ValidatedButWrong => {}
@@ -121,13 +121,13 @@ impl BufferAccess for GuestBuffers {
         match metadata.l4_protocol {
             net_backend::L4Protocol::Unknown => {}
             net_backend::L4Protocol::Tcp => match metadata.l4_checksum {
-                RxChecksumState::Unknown => {}
+                RxChecksumState::Unknown | RxChecksumState::NeedsCsum => {}
                 RxChecksumState::Good => flags.set_rx_tcp_csum_succeed(true),
                 RxChecksumState::Bad => flags.set_rx_tcp_csum_fail(true),
                 RxChecksumState::ValidatedButWrong => {}
             },
             net_backend::L4Protocol::Udp => match metadata.l4_checksum {
-                RxChecksumState::Unknown => {}
+                RxChecksumState::Unknown | RxChecksumState::NeedsCsum => {}
                 RxChecksumState::Good => flags.set_rx_udp_csum_succeed(true),
                 RxChecksumState::Bad => flags.set_rx_udp_csum_fail(true),
                 RxChecksumState::ValidatedButWrong => {}
@@ -355,6 +355,7 @@ impl BasicNic {
                                 .get_queues(
                                     vec![QueueConfig {
                                         driver: Box::new(state.queues.driver.clone()),
+                                        rx_offloads: None,
                                     }],
                                     None,
                                     &mut queues,

@@ -24,6 +24,7 @@ use pal_event::Event;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::future::pending;
+use std::mem::size_of;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -1672,4 +1673,154 @@ impl Endpoint for MockEndpointWithOffloads {
     async fn wait_for_endpoint_action(&mut self) -> EndpointAction {
         pending().await
     }
+}
+
+// --- MRG_RXBUF Tests ---
+
+/// Helper to create features with VIRTIO_NET_F_MRG_RXBUF enabled.
+fn features_mrg_rxbuf() -> NetworkFeaturesBank0 {
+    NetworkFeaturesBank0::new().with_mrg_rxbuf(true)
+}
+
+/// With MRG_RXBUF, a single small packet that fits in one buffer should
+/// produce one used ring entry with num_buffers=1 in the header.
+#[async_test]
+async fn mrg_rxbuf_single_buffer_packet(driver: DefaultDriver) {
+    let mut harness = TestHarness::new(&driver);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features_mrg_rxbuf().into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    // Post a buffer large enough for header + payload.
+    let buffer_size: u32 = 1500;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+
+    handle.wait_for_rx_pending().await;
+
+    let payload = b"small packet";
+    handle.inject_rx_packet(payload);
+
+    let (used_id, used_len) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+    assert_eq!(used_len, NET_HEADER_SIZE + payload.len() as u32);
+
+    // Read the virtio-net header and verify num_buffers == 1
+    let mut header_bytes = [0u8; size_of::<VirtioNetHeader>()];
+    harness.mem.read_at(gpa, &mut header_bytes).unwrap();
+    let (header, _) = VirtioNetHeader::read_from_prefix(&header_bytes).unwrap();
+    assert_eq!(
+        header.num_buffers, 1,
+        "single-buffer packet should have num_buffers=1"
+    );
+
+    // Verify payload
+    let mut readback = vec![0u8; payload.len()];
+    harness
+        .mem
+        .read_at(gpa + NET_HEADER_SIZE as u64, &mut readback)
+        .unwrap();
+    assert_eq!(&readback, payload);
+}
+
+/// With MRG_RXBUF, a packet larger than one buffer should span multiple
+/// buffers. The first buffer's header should have num_buffers > 1, and
+/// multiple used ring entries should appear.
+#[async_test]
+async fn mrg_rxbuf_multi_buffer_packet(driver: DefaultDriver) {
+    let mut harness = TestHarness::new(&driver);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features_mrg_rxbuf().into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    // Post 3 small buffers (header_size=12, so each has 88 bytes of payload capacity).
+    let buffer_size: u32 = 100; // 12 bytes header + 88 bytes payload in first; 100 bytes in others
+    let mut gpas = Vec::new();
+    for i in 0u16..3 {
+        let gpa = harness.post_rx_buffer_and_signal(i, buffer_size);
+        gpas.push(gpa);
+    }
+
+    // Wait for all 3 buffers to be posted.
+    for _ in 0..3 {
+        handle.wait_for_rx_pending().await;
+    }
+
+    // Inject a payload that needs 2 buffers: 88 bytes in first + some in second.
+    // First buffer: 88 bytes payload capacity (100 - 12 header).
+    // Second buffer: 100 bytes capacity (no header).
+    // So 150 bytes total should span 2 buffers.
+    let payload = vec![0xBBu8; 150];
+    handle.inject_rx_packet(&payload);
+
+    // First used entry: the head buffer (descriptor 0).
+    let (used_id_0, used_len_0) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id_0, 0);
+    // First buffer is completely filled: 100 bytes (header + payload)
+    assert_eq!(used_len_0, buffer_size);
+
+    // Second used entry: the second buffer (descriptor 1, stolen for overflow).
+    let (_used_id_1, used_len_1) = harness.wait_for_rx_used().await;
+    // The second buffer gets the remaining payload: 150 - 88 = 62 bytes
+    assert_eq!(used_len_1, 62);
+
+    // Verify num_buffers in the first buffer's header.
+    let mut header_bytes = [0u8; size_of::<VirtioNetHeader>()];
+    harness.mem.read_at(gpas[0], &mut header_bytes).unwrap();
+    let (header, _) = VirtioNetHeader::read_from_prefix(&header_bytes).unwrap();
+    assert_eq!(header.num_buffers, 2, "should span 2 buffers");
+
+    // Verify the payload data: first 88 bytes in buffer 0 after header.
+    let mut buf0_payload = vec![0u8; 88];
+    harness
+        .mem
+        .read_at(gpas[0] + NET_HEADER_SIZE as u64, &mut buf0_payload)
+        .unwrap();
+    assert_eq!(&buf0_payload, &payload[..88]);
+
+    // Remaining 62 bytes in the second buffer (at offset 0, no header).
+    // The second buffer's GPA is gpas[1] (descriptor index 1).
+    let mut buf1_payload = vec![0u8; 62];
+    harness.mem.read_at(gpas[1], &mut buf1_payload).unwrap();
+    assert_eq!(&buf1_payload, &payload[88..]);
+}
+
+/// With MRG_RXBUF enabled, verify that the RX offload data_valid flag is
+/// correctly set in the merged header.
+#[async_test]
+async fn mrg_rxbuf_with_checksum_offload(driver: DefaultDriver) {
+    let mut harness = TestHarness::new(&driver);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features_mrg_rxbuf().into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 1500;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+
+    handle.wait_for_rx_pending().await;
+
+    let payload = b"checksum-validated packet";
+    handle.inject_rx_packet_with_metadata(
+        payload,
+        &RxMetadata {
+            offset: 0,
+            len: payload.len(),
+            ip_checksum: RxChecksumState::Good,
+            l4_checksum: RxChecksumState::Good,
+            ..Default::default()
+        },
+    );
+
+    let (used_id, used_len) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+    assert_eq!(used_len, NET_HEADER_SIZE + payload.len() as u32);
+
+    // Read the header and verify data_valid flag.
+    let mut header_bytes = [0u8; size_of::<VirtioNetHeader>()];
+    harness.mem.read_at(gpa, &mut header_bytes).unwrap();
+    let (header, _) = VirtioNetHeader::read_from_prefix(&header_bytes).unwrap();
+    let flags = VirtioNetHeaderFlags::from(header.flags);
+    assert!(
+        flags.data_valid(),
+        "data_valid should be set for Good checksums"
+    );
+    assert_eq!(header.num_buffers, 1);
 }

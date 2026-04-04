@@ -4514,6 +4514,7 @@ impl Coordinator {
                     // buffers.
                     queue_config.push(QueueConfig {
                         driver: Box::new(drivers[0].clone()),
+                        rx_offloads: None,
                     });
                     per_queue_rx.push(Vec::new());
                     rx_buffers.push(RxBufferRange::new(
@@ -4549,6 +4550,7 @@ impl Coordinator {
                     let (this, rest) = initial_rx.split_at(end);
                     queue_config.push(QueueConfig {
                         driver: Box::new(drivers[queue_index as usize].clone()),
+                        rx_offloads: None,
                     });
                     per_queue_rx.push(this.to_vec());
                     initial_rx = rest;

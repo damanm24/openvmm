@@ -263,6 +263,9 @@ impl VirtioDevice for Device {
             .with_mac(true)
             .with_csum(csum)
             .with_guest_csum(true)
+            .with_guest_tso4(true)
+            .with_guest_tso6(true)
+            .with_mrg_rxbuf(true)
             .with_host_tso4(host_tso)
             .with_host_tso6(host_tso);
 
@@ -492,10 +495,10 @@ struct ActiveState {
 }
 
 impl ActiveState {
-    fn new(mem: GuestMemory, rx_queue_size: u16, tx_queue_size: u16) -> Self {
+    fn new(mem: GuestMemory, rx_queue_size: u16, tx_queue_size: u16, mrg_rxbuf: bool) -> Self {
         Self {
             pending_tx_packets: (0..tx_queue_size).map(|_| None).collect(),
-            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size),
+            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size, mrg_rxbuf),
             data: ProcessingData::new(rx_queue_size, tx_queue_size),
             stats: Default::default(),
         }
@@ -593,6 +596,7 @@ impl Device {
                     .collect(),
                 num_queues,
                 restart: true,
+                rx_offloads: None,
             },
         );
     }
@@ -617,17 +621,41 @@ impl Device {
         builder.run_on_target(!self.adapter.tx_fast_completions);
         let driver = builder.build("virtio-net");
 
+        let mrg_rxbuf = negotiated_features.mrg_rxbuf();
+
         let active_state = ActiveState::new(
             guest_memory.clone(),
             virtio_state.rx_queue_size,
             virtio_state.tx_queue_size,
+            mrg_rxbuf,
         );
+
+        // Build RX offload config from negotiated GUEST_* features.
+        // This tells the backend which RX offloads the frontend can handle.
+        let rx_offloads = {
+            let checksum = negotiated_features.guest_csum();
+            let tcp4 = negotiated_features.guest_tso4();
+            let tcp6 = negotiated_features.guest_tso6();
+            let udp = negotiated_features.guest_ufo();
+            if checksum || tcp4 || tcp6 || udp {
+                Some(net_backend::RxOffloadConfig {
+                    checksum,
+                    tcp4,
+                    tcp6,
+                    udp,
+                })
+            } else {
+                None
+            }
+        };
+
         let worker = Worker {
             virtio_state,
             active_state,
             negotiated_features,
         };
         let coordinator = self.coordinator.state_mut().unwrap();
+        coordinator.rx_offloads = rx_offloads;
         let worker_task = &mut coordinator.workers[idx];
         worker_task.insert(&driver, "virtio-net".to_string(), worker);
         worker_task.start();
@@ -638,6 +666,9 @@ struct Coordinator {
     workers: Vec<TaskControl<NetQueue, Worker>>,
     num_queues: u16,
     restart: bool,
+    /// RX offload config derived from negotiated features, passed to
+    /// the backend via [`QueueConfig`] so it can enable host-side GRO.
+    rx_offloads: Option<net_backend::RxOffloadConfig>,
 }
 
 struct CoordinatorState {
@@ -725,9 +756,11 @@ impl Coordinator {
             worker.task_mut().state = None;
         }
 
+        let rx_offloads = self.rx_offloads;
         let queue_config = (0..self.workers.len())
             .map(|_| QueueConfig {
                 driver: Box::new(c_state.adapter.driver.clone()),
+                rx_offloads,
             })
             .collect::<Vec<_>>();
 
@@ -1232,8 +1265,10 @@ impl Worker {
 
         for ready_id in state.data.rx_ready[..n].iter() {
             state.stats.rx_packets.increment();
-            let (work, bytes) = state.pending_rx_packets.take_rx_work(*ready_id);
-            self.virtio_state.rx_queue.complete(work, bytes);
+            let works = state.pending_rx_packets.take_rx_work(*ready_id);
+            for (work, bytes) in works {
+                self.virtio_state.rx_queue.complete(work, bytes);
+            }
         }
 
         state.stats.rx_packets_per_wake.add_sample(n as u64);

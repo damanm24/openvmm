@@ -63,10 +63,39 @@ use thiserror::Error;
 
 /// Per-queue configuration passed to [`Endpoint::get_queues`].
 ///
-/// Contains only an async driver handle. Receive buffers are posted
-/// separately via [`Queue::rx_avail`] after queue creation.
+/// Contains an async driver handle and optional RX offload
+/// configuration. Receive buffers are posted separately via
+/// [`Queue::rx_avail`] after queue creation.
 pub struct QueueConfig {
     pub driver: Box<dyn Driver>,
+    /// RX offload capabilities the frontend supports.
+    ///
+    /// When set, the backend may enable host-side offloads (e.g.
+    /// GRO on a TAP device) and deliver partially-checksummed or
+    /// unsegmented packets. When `None`, the backend must deliver
+    /// fully checksummed, segmented packets (the default).
+    pub rx_offloads: Option<RxOffloadConfig>,
+}
+
+/// RX offload capabilities that a frontend declares to a backend.
+///
+/// This is the receive-side counterpart of [`TxOffloadSupport`]:
+/// it flows **frontend → backend** so the backend knows it can
+/// enable host-side offloads (GRO, partial checksum, etc.) and
+/// the frontend is prepared to handle the resulting metadata.
+///
+/// All fields default to `false` (no offloads).
+#[derive(Debug, Copy, Clone, Default)]
+pub struct RxOffloadConfig {
+    /// The frontend can handle partial checksums
+    /// ([`RxChecksumState::NeedsCsum`]).
+    pub checksum: bool,
+    /// The frontend can handle GRO/LRO for TCPv4.
+    pub tcp4: bool,
+    /// The frontend can handle GRO/LRO for TCPv6.
+    pub tcp6: bool,
+    /// The frontend can handle UDP fragmentation offload.
+    pub udp: bool,
 }
 
 /// A network endpoint — the backend side of a NIC.
@@ -306,6 +335,11 @@ pub struct RxMetadata {
     pub l4_checksum: RxChecksumState,
     /// The L4 protocol.
     pub l4_protocol: L4Protocol,
+    /// GRO/LRO metadata. `None` when the packet is not coalesced.
+    pub gso: Option<RxGso>,
+    /// Partial checksum offload parameters. Set when
+    /// [`RxChecksumState::NeedsCsum`] is used in `l4_checksum`.
+    pub csum_offload: Option<RxCsumOffload>,
 }
 
 impl Default for RxMetadata {
@@ -316,8 +350,48 @@ impl Default for RxMetadata {
             ip_checksum: RxChecksumState::Unknown,
             l4_checksum: RxChecksumState::Unknown,
             l4_protocol: L4Protocol::Unknown,
+            gso: None,
+            csum_offload: None,
         }
     }
+}
+
+/// GRO/LRO receive metadata.
+///
+/// Present when the backend delivers a coalesced (unsegmented) packet
+/// that the frontend must present to the guest with segmentation hints.
+#[derive(Debug, Copy, Clone)]
+pub struct RxGso {
+    /// The GSO protocol type.
+    pub gso_type: RxGsoType,
+    /// The MSS (maximum segment size) used for coalescing.
+    pub gso_size: u16,
+    /// Total header length (L2 + L3 + L4) in bytes.
+    pub hdr_len: u16,
+}
+
+/// The GSO protocol type for a received coalesced packet.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RxGsoType {
+    /// TCPv4.
+    TcpV4,
+    /// TCPv6.
+    TcpV6,
+    /// UDP.
+    Udp,
+}
+
+/// Partial checksum offload parameters for received packets.
+///
+/// When a backend delivers a packet with [`RxChecksumState::NeedsCsum`],
+/// this struct carries the byte offsets needed for the frontend to
+/// communicate the checksum position to the guest.
+#[derive(Debug, Copy, Clone)]
+pub struct RxCsumOffload {
+    /// Offset from the start of the packet to begin checksumming.
+    pub csum_start: u16,
+    /// Offset from `csum_start` to the 16-bit checksum field.
+    pub csum_offset: u16,
 }
 
 /// The "L3" protocol: the IP layer.
@@ -351,6 +425,12 @@ pub enum RxChecksumState {
     /// payloads are glommed together without updating the checksum in the first
     /// packet's header.
     ValidatedButWrong,
+    /// The checksum field contains a partial pseudo-header sum that needs
+    /// completion by the guest.
+    ///
+    /// When this state is used, [`RxMetadata::csum_offload`] must be set with
+    /// the byte offsets for checksum computation.
+    NeedsCsum,
 }
 
 impl RxChecksumState {

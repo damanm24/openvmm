@@ -956,6 +956,7 @@ impl<T: DeviceBacking + Send> Queue for ManaQueue<T> {
                                 ip_checksum,
                                 l4_checksum,
                                 l4_protocol,
+                                ..Default::default()
                             },
                         );
                         if rx.bounced_len_with_padding > 0 {
