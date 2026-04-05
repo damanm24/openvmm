@@ -45,7 +45,7 @@ enum TestName {
     ScaleBoot,
     /// Measures VMM memory overhead.
     Memory,
-    /// Network throughput via iperf3 (Alpine VM + Consomme).
+    /// Network throughput via iperf3 (Alpine VM + (Consomme or TAP device)).
     Network,
     /// Block I/O throughput via fio (Alpine VM + data disk).
     DiskIo,
@@ -123,6 +123,11 @@ struct RunArgs {
     /// NIC backend for the network test.
     #[arg(long, default_value = "vmbus")]
     nic: NicBackend,
+
+    /// TAP device name for --nic virtio-net-tap.
+    /// Burette creates and removes this device automatically (requires CAP_NET_ADMIN).
+    #[arg(long, default_value = "ovmm-perf0")]
+    tap_name: String,
 
     /// Record `perf record -p <pid> -g` traces scoped to each test,
     /// saving per-test .data files in this directory. Linux only.
@@ -297,6 +302,7 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                     diag: args.diag,
                     nic: args.nic,
                     perf_dir: args.perf_dir.clone(),
+                    tap_name: args.tap_name.clone(),
                 };
 
                 let artifacts = resolve_artifacts(tests::network::register_artifacts)?;

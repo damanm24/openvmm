@@ -169,6 +169,32 @@ impl PetriVmConfigOpenVmm {
         self
     }
 
+    /// Enable a virtio-net NIC for the VM backed by a Linux TAP device.
+    ///
+    /// The TAP device named `tap_name` must already be created and brought up
+    /// on the host before starting the VM. The device is exposed on the PCIe
+    /// root port identified by `port_name`.
+    #[cfg(target_os = "linux")]
+    pub fn with_virtio_nic_tap(mut self, port_name: &str, tap_name: &str) -> Self {
+        let endpoint = net_backend_resources::tap::TapHandle {
+            name: tap_name.to_string(),
+        }
+        .into_resource();
+        self.config.pcie_devices.push(PcieDeviceConfig {
+            port_name: port_name.to_string(),
+            resource: virtio_resources::VirtioPciDeviceHandle(
+                virtio_resources::net::VirtioNetHandle {
+                    max_queues: None,
+                    mac_address: NIC_MAC_ADDRESS,
+                    endpoint,
+                }
+                .into_resource(),
+            )
+            .into_resource(),
+        });
+        self
+    }
+
     /// Enable a virtio-net NIC for the VM backed by Consomme.
     ///
     /// This exposes a virtio-net device on a PCIe root port, suitable for
