@@ -516,6 +516,7 @@ impl consomme::Client for Client<'_> {
                     } else {
                         L4Protocol::Unknown
                     },
+                    ..Default::default()
                 },
                 data,
             );

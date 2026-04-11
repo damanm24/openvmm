@@ -21,6 +21,7 @@ use net_backend::RssConfig;
 use net_backend::RxChecksumState;
 use net_backend::RxId;
 use net_backend::RxMetadata;
+use net_backend::RxOffloadSupport;
 use net_backend::TxError;
 use net_backend::TxId;
 use net_backend::TxMetadata;
@@ -186,6 +187,15 @@ impl Endpoint for TapEndpoint {
             tcp: true,
             udp: true,
             tso: true,
+        }
+    }
+
+    fn rx_offload_support(&self) -> RxOffloadSupport {
+        RxOffloadSupport {
+            guest_tso4: true,
+            guest_tso6: true,
+            guest_uso4: true,
+            guest_uso6: true,
         }
     }
 }
@@ -507,6 +517,7 @@ fn parse_vnet_hdr(hdr: &VirtioNetHdr) -> RxMetadata {
         ip_checksum,
         l4_checksum,
         l4_protocol,
+        ..Default::default()
     }
 }
 

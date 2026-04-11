@@ -107,6 +107,14 @@ pub trait Endpoint: Send + Sync + InspectMut {
         TxOffloadSupport::default()
     }
 
+    /// Specifies the supported set of receive offloads.
+    ///
+    /// Backends that can produce large (GSO) packets should override
+    /// this to indicate which offload types are supported.
+    fn rx_offload_support(&self) -> RxOffloadSupport {
+        RxOffloadSupport::default()
+    }
+
     /// Specifies parameters related to supporting multiple queues.
     fn multiqueue_support(&self) -> MultiQueueSupport {
         MultiQueueSupport {
@@ -165,6 +173,23 @@ pub struct TxOffloadSupport {
     pub udp: bool,
     /// TCP segmentation offload.
     pub tso: bool,
+}
+
+/// The set of supported receive offloads.
+///
+/// These flags indicate whether the backend can produce large
+/// (GSO/TSO/USO) packets on the receive path, allowing the frontend
+/// to advertise the corresponding VIRTIO_NET_F_GUEST_* features.
+#[derive(Debug, Copy, Clone, Default)]
+pub struct RxOffloadSupport {
+    /// Backend can produce TCP/IPv4 GSO packets (maps to VIRTIO_NET_F_GUEST_TSO4).
+    pub guest_tso4: bool,
+    /// Backend can produce TCP/IPv6 GSO packets (maps to VIRTIO_NET_F_GUEST_TSO6).
+    pub guest_tso6: bool,
+    /// Backend can produce UDP/IPv4 segmented packets (maps to VIRTIO_NET_F_GUEST_USO4).
+    pub guest_uso4: bool,
+    /// Backend can produce UDP/IPv6 segmented packets (maps to VIRTIO_NET_F_GUEST_USO6).
+    pub guest_uso6: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +331,26 @@ pub struct RxMetadata {
     pub l4_checksum: RxChecksumState,
     /// The L4 protocol.
     pub l4_protocol: L4Protocol,
+    /// The L3 (IP) protocol.
+    pub l3_protocol: L3Protocol,
+    /// GSO (Generic Segmentation Offload) information for this packet.
+    ///
+    /// When set to a value other than [`RxGso::None`], the packet is a
+    /// large coalesced packet that should be delivered to the guest with
+    /// GSO headers so the guest driver can segment it.
+    pub gso: RxGso,
+    /// Byte offset from the start of the packet to the L4 (transport) header.
+    ///
+    /// Used to populate the virtio-net header `csum_start` field when
+    /// delivering GSO packets to the guest. Only meaningful when
+    /// `gso != RxGso::None`.
+    pub csum_start: u16,
+    /// Byte offset within the L4 header to the checksum field.
+    ///
+    /// TCP checksum offset is 16, UDP checksum offset is 6. Used to
+    /// populate the virtio-net header `csum_offset` field. Only meaningful
+    /// when `gso != RxGso::None`.
+    pub csum_offset: u16,
 }
 
 impl Default for RxMetadata {
@@ -316,8 +361,35 @@ impl Default for RxMetadata {
             ip_checksum: RxChecksumState::Unknown,
             l4_checksum: RxChecksumState::Unknown,
             l4_protocol: L4Protocol::Unknown,
+            l3_protocol: L3Protocol::Unknown,
+            gso: RxGso::None,
+            csum_start: 0,
+            csum_offset: 0,
         }
     }
+}
+
+/// GSO (Generic Segmentation Offload) metadata for a received packet.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RxGso {
+    /// Normal packet, no GSO.
+    None,
+    /// TCP segmentation offload. The packet contains a large TCP segment
+    /// that the guest driver should split into MSS-sized segments.
+    TcpSegmentation {
+        /// The maximum segment size (MSS) for TCP segmentation.
+        max_segment_size: u16,
+        /// Total header length (L2 + L3 + L4) in bytes.
+        hdr_len: u16,
+    },
+    /// UDP segmentation offload. The packet contains a large UDP payload
+    /// that the guest driver should split into segments.
+    UdpSegmentation {
+        /// The maximum segment size for UDP segmentation.
+        max_segment_size: u16,
+        /// Total header length (L2 + L3 + L4) in bytes.
+        hdr_len: u16,
+    },
 }
 
 /// The "L3" protocol: the IP layer.

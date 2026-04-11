@@ -1,13 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::GuestGsoFeatures;
 use crate::VirtioNetHeader;
 use crate::VirtioNetHeaderFlags;
+use crate::VirtioNetHeaderGso;
+use crate::VirtioNetHeaderGsoProtocol;
 use crate::header_size;
 use guestmem::GuestMemory;
 use inspect::Inspect;
 use net_backend::BufferAccess;
+use net_backend::L3Protocol;
 use net_backend::RxBufferSegment;
+use net_backend::RxGso;
 use net_backend::RxId;
 use net_backend::RxMetadata;
 use virtio::VirtioQueueCallbackWork;
@@ -27,6 +32,8 @@ pub struct VirtioWorkPool {
     mem: GuestMemory,
     #[inspect(skip)]
     rx_packets: Vec<Option<RxPacket>>,
+    #[inspect(skip)]
+    guest_gso: GuestGsoFeatures,
 }
 
 impl VirtioWorkPool {
@@ -38,10 +45,11 @@ impl VirtioWorkPool {
     }
 
     /// Create a new instance.
-    pub fn new(mem: GuestMemory, queue_size: u16) -> Self {
+    pub fn new(mem: GuestMemory, queue_size: u16, guest_gso: GuestGsoFeatures) -> Self {
         Self {
             mem,
             rx_packets: (0..queue_size).map(|_| None).collect(),
+            guest_gso,
         }
     }
 
@@ -168,10 +176,74 @@ impl BufferAccess for VirtioWorkPool {
         // been validated (Good or ValidatedButWrong, e.g. after RSC/LRO),
         // telling the guest it can skip re-verification.
         let data_valid = metadata.ip_checksum.is_valid() && metadata.l4_checksum.is_valid();
-        let flags = VirtioNetHeaderFlags::new().with_data_valid(data_valid);
+        let mut flags = VirtioNetHeaderFlags::new().with_data_valid(data_valid);
+
+        let mut gso_type: u8 = VirtioNetHeaderGso::new()
+            .with_protocol(VirtioNetHeaderGsoProtocol::NONE)
+            .into();
+        let mut gso_size: u16 = 0;
+        let mut hdr_len: u16 = 0;
+        let mut csum_start: u16 = 0;
+        let mut csum_offset: u16 = 0;
+
+        // Map RxGso metadata to virtio-net header GSO fields, gated on
+        // the corresponding negotiated GUEST_* feature.
+        //
+        // Per virtio spec 5.1.9.4.1: when gso_type != NONE the device
+        // MUST also set NEEDS_CSUM and gso_size.
+        match metadata.gso {
+            RxGso::TcpSegmentation {
+                max_segment_size,
+                hdr_len: total_hdr_len,
+            } => {
+                let protocol = match metadata.l3_protocol {
+                    L3Protocol::Ipv4 if self.guest_gso.guest_tso4 => {
+                        Some(VirtioNetHeaderGsoProtocol::TCPV4)
+                    }
+                    L3Protocol::Ipv6 if self.guest_gso.guest_tso6 => {
+                        Some(VirtioNetHeaderGsoProtocol::TCPV6)
+                    }
+                    _ => None,
+                };
+                if let Some(protocol) = protocol {
+                    gso_type = VirtioNetHeaderGso::new().with_protocol(protocol).into();
+                    gso_size = max_segment_size;
+                    hdr_len = total_hdr_len;
+                    csum_start = metadata.csum_start;
+                    csum_offset = metadata.csum_offset;
+                    flags.set_needs_csum(true);
+                }
+            }
+            RxGso::UdpSegmentation {
+                max_segment_size,
+                hdr_len: total_hdr_len,
+            } => {
+                let supported = match metadata.l3_protocol {
+                    L3Protocol::Ipv4 => self.guest_gso.guest_uso4,
+                    L3Protocol::Ipv6 => self.guest_gso.guest_uso6,
+                    L3Protocol::Unknown => false,
+                };
+                if supported {
+                    gso_type = VirtioNetHeaderGso::new()
+                        .with_protocol(VirtioNetHeaderGsoProtocol::UDP_L4)
+                        .into();
+                    gso_size = max_segment_size;
+                    hdr_len = total_hdr_len;
+                    csum_start = metadata.csum_start;
+                    csum_offset = metadata.csum_offset;
+                    flags.set_needs_csum(true);
+                }
+            }
+            RxGso::None => {}
+        }
 
         let virtio_net_header = VirtioNetHeader {
             flags: flags.into(),
+            gso_type,
+            gso_size,
+            hdr_len,
+            csum_start,
+            csum_offset,
             num_buffers: 1,
             ..FromZeros::new_zeroed()
         };

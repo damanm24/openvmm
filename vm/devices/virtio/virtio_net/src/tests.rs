@@ -6,12 +6,16 @@ use guestmem::GuestMemory;
 use inspect::InspectMut;
 use net_backend::Endpoint;
 use net_backend::EndpointAction;
+use net_backend::L3Protocol;
+use net_backend::L4Protocol;
 use net_backend::MultiQueueSupport;
 use net_backend::QueueConfig;
 use net_backend::RssConfig;
 use net_backend::RxChecksumState;
+use net_backend::RxGso;
 use net_backend::RxId;
 use net_backend::RxMetadata;
+use net_backend::RxOffloadSupport;
 use net_backend::TxError;
 use net_backend::TxId;
 use net_backend::TxOffloadSupport;
@@ -48,6 +52,7 @@ use vmcore::vm_task::VmTaskDriverSource;
 use crate::Device;
 
 use crate::NetworkFeaturesBank0;
+use crate::NetworkFeaturesBank1;
 use crate::VirtioNetHeader;
 use crate::VirtioNetHeaderFlags;
 use crate::VirtioNetHeaderGso;
@@ -444,6 +449,16 @@ struct TestHarness {
 
 impl TestHarness {
     fn new(driver: &DefaultDriver) -> Self {
+        let (queue_tx, queue_handle_rx) = mesh::channel();
+        let endpoint = MockEndpoint { queue_tx };
+        Self::new_with_endpoint(driver, Box::new(endpoint), queue_handle_rx)
+    }
+
+    fn new_with_endpoint(
+        driver: &DefaultDriver,
+        endpoint: Box<dyn Endpoint>,
+        queue_handle_rx: mesh::Receiver<MockQueueHandle>,
+    ) -> Self {
         let mem = GuestMemory::allocate(TOTAL_MEM_SIZE);
 
         // Initialize RX queue rings
@@ -454,13 +469,9 @@ impl TestHarness {
         init_avail_ring(&mem, TX_AVAIL_ADDR);
         init_used_ring(&mem, TX_USED_ADDR);
 
-        // Create mock endpoint with channel
-        let (queue_tx, queue_handle_rx) = mesh::channel();
-        let endpoint = MockEndpoint { queue_tx };
-
         let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver.clone()));
         let mac = MacAddress::new([0x00, 0x15, 0x5d, 0xaa, 0xbb, 0xcc]);
-        let device = Device::builder().build(&driver_source, Box::new(endpoint), mac);
+        let device = Device::builder().build(&driver_source, endpoint, mac);
 
         let rx_event = Event::new();
         let rx_interrupt_event = Event::new();
@@ -1587,6 +1598,7 @@ async fn feature_negotiation_with_offloads(driver: DefaultDriver) {
             udp: true,
             tso: true,
         },
+        rx_offloads: RxOffloadSupport::default(),
     };
 
     let device = Device::builder().build(&driver_source, Box::new(endpoint), mac);
@@ -1618,6 +1630,7 @@ async fn feature_negotiation_no_offloads(driver: DefaultDriver) {
 
     let endpoint = MockEndpointWithOffloads {
         offloads: TxOffloadSupport::default(),
+        rx_offloads: RxOffloadSupport::default(),
     };
 
     let device = Device::builder().build(&driver_source, Box::new(endpoint), mac);
@@ -1640,6 +1653,7 @@ async fn feature_negotiation_no_offloads(driver: DefaultDriver) {
 // Mock endpoint that reports specific offload support.
 struct MockEndpointWithOffloads {
     offloads: TxOffloadSupport,
+    rx_offloads: RxOffloadSupport,
 }
 
 impl InspectMut for MockEndpointWithOffloads {
@@ -1669,7 +1683,419 @@ impl Endpoint for MockEndpointWithOffloads {
         self.offloads
     }
 
+    fn rx_offload_support(&self) -> RxOffloadSupport {
+        self.rx_offloads
+    }
+
     async fn wait_for_endpoint_action(&mut self) -> EndpointAction {
         pending().await
     }
+}
+
+// Mock endpoint that supports full data path queues AND configurable RX offloads.
+struct MockEndpointWithGso {
+    queue_tx: mesh::Sender<MockQueueHandle>,
+    rx_offloads: RxOffloadSupport,
+}
+
+impl InspectMut for MockEndpointWithGso {
+    fn inspect_mut(&mut self, req: inspect::Request<'_>) {
+        req.ignore();
+    }
+}
+
+#[async_trait]
+impl Endpoint for MockEndpointWithGso {
+    fn endpoint_type(&self) -> &'static str {
+        "mock-gso"
+    }
+
+    async fn get_queues(
+        &mut self,
+        _config: Vec<QueueConfig>,
+        _rss: Option<&RssConfig<'_>>,
+        queues: &mut Vec<Box<dyn net_backend::Queue>>,
+    ) -> anyhow::Result<()> {
+        let (queue, handle) = new_mock_queue();
+        self.queue_tx.send(handle);
+        queues.push(Box::new(queue));
+        Ok(())
+    }
+
+    async fn stop(&mut self) {}
+
+    fn tx_fast_completions(&self) -> bool {
+        true
+    }
+
+    fn rx_offload_support(&self) -> RxOffloadSupport {
+        self.rx_offloads
+    }
+
+    async fn wait_for_endpoint_action(&mut self) -> EndpointAction {
+        pending().await
+    }
+}
+
+impl TestHarness {
+    fn new_with_gso_endpoint(
+        driver: &DefaultDriver,
+        rx_offloads: RxOffloadSupport,
+    ) -> Self {
+        let (queue_tx, queue_handle_rx) = mesh::channel();
+        let endpoint = MockEndpointWithGso {
+            queue_tx,
+            rx_offloads,
+        };
+        Self::new_with_endpoint(driver, Box::new(endpoint), queue_handle_rx)
+    }
+}
+
+// --- GUEST_TSO/USO Feature Negotiation Tests ---
+
+/// Verify GUEST_TSO4/TSO6/USO4/USO6 are offered when endpoint reports RX offload support.
+#[async_test]
+async fn feature_guest_tso_offered_with_rx_offloads(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
+
+    let endpoint = MockEndpointWithOffloads {
+        offloads: TxOffloadSupport::default(),
+        rx_offloads: RxOffloadSupport {
+            guest_tso4: true,
+            guest_tso6: true,
+            guest_uso4: true,
+            guest_uso6: true,
+        },
+    };
+
+    let device = Device::builder().build(&driver_source, Box::new(endpoint), mac);
+    let traits = device.traits();
+
+    let bank0 = NetworkFeaturesBank0::from(traits.device_features.bank(0));
+    assert!(bank0.guest_csum(), "GUEST_CSUM should always be set");
+    assert!(
+        bank0.guest_tso4(),
+        "GUEST_TSO4 should be set when rx_offload_support.guest_tso4 is true"
+    );
+    assert!(
+        bank0.guest_tso6(),
+        "GUEST_TSO6 should be set when rx_offload_support.guest_tso6 is true"
+    );
+
+    let bank1 = NetworkFeaturesBank1::from(traits.device_features.bank(1));
+    assert!(
+        bank1.guest_uso4(),
+        "GUEST_USO4 should be set when rx_offload_support.guest_uso4 is true"
+    );
+    assert!(
+        bank1.guest_uso6(),
+        "GUEST_USO6 should be set when rx_offload_support.guest_uso6 is true"
+    );
+}
+
+/// Verify GUEST_TSO4/TSO6/USO4/USO6 are NOT offered when endpoint doesn't
+/// report RX offload support.
+#[async_test]
+async fn feature_guest_tso_not_offered_without_rx_offloads(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
+
+    let endpoint = MockEndpointWithOffloads {
+        offloads: TxOffloadSupport::default(),
+        rx_offloads: RxOffloadSupport::default(),
+    };
+
+    let device = Device::builder().build(&driver_source, Box::new(endpoint), mac);
+    let traits = device.traits();
+
+    let bank0 = NetworkFeaturesBank0::from(traits.device_features.bank(0));
+    assert!(
+        !bank0.guest_tso4(),
+        "GUEST_TSO4 should not be set without RX offload support"
+    );
+    assert!(
+        !bank0.guest_tso6(),
+        "GUEST_TSO6 should not be set without RX offload support"
+    );
+
+    let bank1 = NetworkFeaturesBank1::from(traits.device_features.bank(1));
+    assert!(
+        !bank1.guest_uso4(),
+        "GUEST_USO4 should not be set without RX offload support"
+    );
+    assert!(
+        !bank1.guest_uso6(),
+        "GUEST_USO6 should not be set without RX offload support"
+    );
+}
+
+// --- GSO RX Header Tests ---
+
+/// RX packet with TcpSegmentation GSO metadata and GUEST_TSO4 negotiated
+/// should produce a virtio-net header with gso_type=TCPV4, NEEDS_CSUM, and
+/// correct gso_size/hdr_len/csum_start/csum_offset.
+#[async_test]
+async fn rx_gso_tso4_header(driver: DefaultDriver) {
+    let rx_offloads = RxOffloadSupport {
+        guest_tso4: true,
+        guest_tso6: true,
+        guest_uso4: true,
+        guest_uso6: true,
+    };
+    let mut harness = TestHarness::new_with_gso_endpoint(&driver, rx_offloads);
+
+    // Negotiate GUEST_TSO4 + GUEST_CSUM features.
+    let features_bank0 = NetworkFeaturesBank0::new()
+        .with_guest_csum(true)
+        .with_guest_tso4(true);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features_bank0.into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 65535;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+    handle.wait_for_rx_pending().await;
+
+    // Simulate a large TCP/IPv4 GSO packet from the backend.
+    let payload = vec![0xABu8; 4000];
+    let metadata = RxMetadata {
+        offset: 0,
+        len: payload.len(),
+        ip_checksum: RxChecksumState::Good,
+        l4_checksum: RxChecksumState::Good,
+        l4_protocol: L4Protocol::Tcp,
+        l3_protocol: L3Protocol::Ipv4,
+        gso: RxGso::TcpSegmentation {
+            max_segment_size: 1460,
+            hdr_len: 54, // 14 (eth) + 20 (ip) + 20 (tcp)
+        },
+        csum_start: 34,  // 14 + 20 = offset of TCP header
+        csum_offset: 16, // TCP checksum field offset within TCP header
+    };
+    handle.inject_rx_packet_with_metadata(&payload, &metadata);
+
+    let (used_id, used_len) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+    assert_eq!(used_len, NET_HEADER_SIZE + payload.len() as u32);
+
+    let hdr = read_virtio_header(&harness.mem, gpa);
+    let flags = VirtioNetHeaderFlags::from(hdr.flags);
+    let gso = VirtioNetHeaderGso::from(hdr.gso_type);
+
+    assert!(
+        flags.needs_csum(),
+        "NEEDS_CSUM must be set for GSO packets (spec 5.1.9.4.1)"
+    );
+    assert_eq!(gso.protocol(), VirtioNetHeaderGsoProtocol::TCPV4);
+    assert_eq!(hdr.gso_size, 1460, "gso_size should be the MSS");
+    assert_eq!(hdr.hdr_len, 54, "hdr_len should be total header length");
+    assert_eq!(hdr.csum_start, 34, "csum_start should point to TCP header");
+    assert_eq!(
+        hdr.csum_offset, 16,
+        "csum_offset should be TCP checksum offset"
+    );
+}
+
+/// RX packet with TcpSegmentation GSO metadata and GUEST_TSO6 negotiated.
+#[async_test]
+async fn rx_gso_tso6_header(driver: DefaultDriver) {
+    let rx_offloads = RxOffloadSupport {
+        guest_tso4: true,
+        guest_tso6: true,
+        guest_uso4: true,
+        guest_uso6: true,
+    };
+    let mut harness = TestHarness::new_with_gso_endpoint(&driver, rx_offloads);
+
+    let features_bank0 = NetworkFeaturesBank0::new()
+        .with_guest_csum(true)
+        .with_guest_tso6(true);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features_bank0.into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 65535;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+    handle.wait_for_rx_pending().await;
+
+    let payload = vec![0xCDu8; 5000];
+    let metadata = RxMetadata {
+        offset: 0,
+        len: payload.len(),
+        ip_checksum: RxChecksumState::Good,
+        l4_checksum: RxChecksumState::Good,
+        l4_protocol: L4Protocol::Tcp,
+        l3_protocol: L3Protocol::Ipv6,
+        gso: RxGso::TcpSegmentation {
+            max_segment_size: 1440,
+            hdr_len: 74, // 14 (eth) + 40 (ipv6) + 20 (tcp)
+        },
+        csum_start: 54, // 14 + 40
+        csum_offset: 16,
+    };
+    handle.inject_rx_packet_with_metadata(&payload, &metadata);
+
+    let (used_id, _) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+
+    let hdr = read_virtio_header(&harness.mem, gpa);
+    let flags = VirtioNetHeaderFlags::from(hdr.flags);
+    let gso = VirtioNetHeaderGso::from(hdr.gso_type);
+
+    assert!(flags.needs_csum());
+    assert_eq!(gso.protocol(), VirtioNetHeaderGsoProtocol::TCPV6);
+    assert_eq!(hdr.gso_size, 1440);
+    assert_eq!(hdr.hdr_len, 74);
+    assert_eq!(hdr.csum_start, 54);
+    assert_eq!(hdr.csum_offset, 16);
+}
+
+/// RX packet with UdpSegmentation GSO and GUEST_USO4 negotiated.
+#[async_test]
+async fn rx_gso_uso4_header(driver: DefaultDriver) {
+    let rx_offloads = RxOffloadSupport {
+        guest_tso4: true,
+        guest_tso6: true,
+        guest_uso4: true,
+        guest_uso6: true,
+    };
+    let mut harness = TestHarness::new_with_gso_endpoint(&driver, rx_offloads);
+
+    let features_bank0 = NetworkFeaturesBank0::new().with_guest_csum(true);
+    let features_bank1 = NetworkFeaturesBank1::new().with_guest_uso4(true);
+    let features = VirtioDeviceFeatures::new()
+        .with_bank(0, features_bank0.into_bits())
+        .with_bank(1, features_bank1.into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 65535;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+    handle.wait_for_rx_pending().await;
+
+    let payload = vec![0xEFu8; 3000];
+    let metadata = RxMetadata {
+        offset: 0,
+        len: payload.len(),
+        ip_checksum: RxChecksumState::Good,
+        l4_checksum: RxChecksumState::Good,
+        l4_protocol: L4Protocol::Udp,
+        l3_protocol: L3Protocol::Ipv4,
+        gso: RxGso::UdpSegmentation {
+            max_segment_size: 1472,
+            hdr_len: 42, // 14 (eth) + 20 (ip) + 8 (udp)
+        },
+        csum_start: 34, // 14 + 20
+        csum_offset: 6, // UDP checksum offset
+    };
+    handle.inject_rx_packet_with_metadata(&payload, &metadata);
+
+    let (used_id, _) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+
+    let hdr = read_virtio_header(&harness.mem, gpa);
+    let flags = VirtioNetHeaderFlags::from(hdr.flags);
+    let gso = VirtioNetHeaderGso::from(hdr.gso_type);
+
+    assert!(flags.needs_csum());
+    assert_eq!(gso.protocol(), VirtioNetHeaderGsoProtocol::UDP_L4);
+    assert_eq!(hdr.gso_size, 1472);
+    assert_eq!(hdr.hdr_len, 42);
+    assert_eq!(hdr.csum_start, 34);
+    assert_eq!(hdr.csum_offset, 6);
+}
+
+/// When GUEST_TSO4 is NOT negotiated, GSO metadata should be ignored and
+/// gso_type should remain NONE.
+#[async_test]
+async fn rx_gso_ignored_without_feature(driver: DefaultDriver) {
+    let rx_offloads = RxOffloadSupport {
+        guest_tso4: true,
+        guest_tso6: true,
+        guest_uso4: true,
+        guest_uso6: true,
+    };
+    let mut harness = TestHarness::new_with_gso_endpoint(&driver, rx_offloads);
+
+    // Do NOT negotiate GUEST_TSO4.
+    let features = VirtioDeviceFeatures::new();
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 65535;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+    handle.wait_for_rx_pending().await;
+
+    let payload = vec![0xABu8; 4000];
+    let metadata = RxMetadata {
+        offset: 0,
+        len: payload.len(),
+        ip_checksum: RxChecksumState::Good,
+        l4_checksum: RxChecksumState::Good,
+        l4_protocol: L4Protocol::Tcp,
+        l3_protocol: L3Protocol::Ipv4,
+        gso: RxGso::TcpSegmentation {
+            max_segment_size: 1460,
+            hdr_len: 54,
+        },
+        csum_start: 34,
+        csum_offset: 16,
+    };
+    handle.inject_rx_packet_with_metadata(&payload, &metadata);
+
+    let (used_id, _) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+
+    let hdr = read_virtio_header(&harness.mem, gpa);
+    let flags = VirtioNetHeaderFlags::from(hdr.flags);
+    let gso = VirtioNetHeaderGso::from(hdr.gso_type);
+
+    // GSO should be NONE since the feature was not negotiated.
+    assert_eq!(gso.protocol(), VirtioNetHeaderGsoProtocol::NONE);
+    assert!(
+        !flags.needs_csum(),
+        "NEEDS_CSUM should not be set without GSO"
+    );
+    assert_eq!(hdr.gso_size, 0);
+}
+
+/// Non-GSO RX packets should still work normally when GUEST_TSO features
+/// are negotiated.
+#[async_test]
+async fn rx_non_gso_with_guest_tso_negotiated(driver: DefaultDriver) {
+    let rx_offloads = RxOffloadSupport {
+        guest_tso4: true,
+        guest_tso6: true,
+        guest_uso4: true,
+        guest_uso6: true,
+    };
+    let mut harness = TestHarness::new_with_gso_endpoint(&driver, rx_offloads);
+
+    let features_bank0 = NetworkFeaturesBank0::new()
+        .with_guest_csum(true)
+        .with_guest_tso4(true)
+        .with_guest_tso6(true);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features_bank0.into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 1500;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+    handle.wait_for_rx_pending().await;
+
+    // Inject a normal (non-GSO) packet.
+    let payload = b"normal-packet";
+    handle.inject_rx_packet(payload);
+
+    let (used_id, used_len) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+    assert_eq!(used_len, NET_HEADER_SIZE + payload.len() as u32);
+
+    let hdr = read_virtio_header(&harness.mem, gpa);
+    let gso = VirtioNetHeaderGso::from(hdr.gso_type);
+
+    assert_eq!(gso.protocol(), VirtioNetHeaderGsoProtocol::NONE);
+    assert_eq!(hdr.gso_size, 0);
+    assert_eq!(hdr.hdr_len, 0);
 }

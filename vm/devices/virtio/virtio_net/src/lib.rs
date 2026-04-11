@@ -29,6 +29,7 @@ use net_backend::Endpoint;
 use net_backend::EndpointAction;
 use net_backend::QueueConfig;
 use net_backend::RxId;
+use net_backend::RxOffloadSupport;
 use net_backend::TxFlags;
 use net_backend::TxId;
 use net_backend::TxMetadata;
@@ -138,6 +139,21 @@ struct NetStatus {
 
 const DEFAULT_MTU: u16 = 1514;
 
+/// Negotiated guest-side GSO feature flags, derived from the feature
+/// negotiation and passed to the RX buffer pool so that `write_header`
+/// can construct appropriate virtio-net headers for GSO packets.
+#[derive(Debug, Copy, Clone, Default)]
+struct GuestGsoFeatures {
+    /// VIRTIO_NET_F_GUEST_TSO4 — guest can receive TSOv4.
+    guest_tso4: bool,
+    /// VIRTIO_NET_F_GUEST_TSO6 — guest can receive TSOv6.
+    guest_tso6: bool,
+    /// VIRTIO_NET_F_GUEST_USO4 — guest can receive USOv4.
+    guest_uso4: bool,
+    /// VIRTIO_NET_F_GUEST_USO6 — guest can receive USOv6.
+    guest_uso6: bool,
+}
+
 #[expect(dead_code)]
 const VIRTIO_NET_MAX_QUEUES: u16 = 0x8000;
 
@@ -223,6 +239,7 @@ struct Adapter {
     tx_fast_completions: bool,
     mac_address: MacAddress,
     tx_offload_support: TxOffloadSupport,
+    rx_offload_support: RxOffloadSupport,
 }
 
 pub struct Device {
@@ -253,6 +270,7 @@ enum QueuePairState {
 impl VirtioDevice for Device {
     fn traits(&self) -> DeviceTraits {
         let offloads = &self.adapter.tx_offload_support;
+        let rx_offloads = &self.adapter.rx_offload_support;
 
         // VIRTIO_NET_F_CSUM: we can handle partial checksum from the guest
         let csum = offloads.tcp && offloads.udp;
@@ -264,7 +282,25 @@ impl VirtioDevice for Device {
             .with_csum(csum)
             .with_guest_csum(true)
             .with_host_tso4(host_tso)
-            .with_host_tso6(host_tso);
+            .with_host_tso6(host_tso)
+            // VIRTIO_NET_F_GUEST_TSO4/6: guest can receive large TCP segments.
+            // Requires GUEST_CSUM (always offered above).
+            .with_guest_tso4(rx_offloads.guest_tso4)
+            .with_guest_tso6(rx_offloads.guest_tso6);
+
+        // VIRTIO_NET_F_GUEST_USO4/6: guest can receive large UDP segments.
+        // Requires GUEST_CSUM (always offered above).
+        let features_bank1 = NetworkFeaturesBank1::new()
+            .with_guest_uso4(rx_offloads.guest_uso4)
+            .with_guest_uso6(rx_offloads.guest_uso6);
+
+        // Combine net-specific bank1 features with virtio transport features.
+        let bank1 = virtio::spec::VirtioDeviceFeaturesBank1::from_bits(
+            virtio::spec::VirtioDeviceFeaturesBank1::new()
+                .with_ring_packed(true)
+                .into_bits()
+                | features_bank1.into_bits(),
+        );
 
         DeviceTraits {
             device_id: virtio::spec::VirtioDeviceType::NET,
@@ -274,7 +310,7 @@ impl VirtioDevice for Device {
                         .with_ring_event_idx(true)
                         .with_ring_indirect_desc(true),
                 )
-                .with_bank1(virtio::spec::VirtioDeviceFeaturesBank1::new().with_ring_packed(true)),
+                .with_bank1(bank1),
             max_queues: 2 * self.registers.max_virtqueue_pairs,
             device_register_length: size_of::<NetConfig>() as u32,
             shared_memory: DeviceTraitsSharedMemory { id: 0, size: 0 },
@@ -324,6 +360,7 @@ impl VirtioDevice for Device {
         .context("failed creating virtio net queue")?;
 
         let negotiated_features = NetworkFeaturesBank0::from(features.bank(0));
+        let negotiated_features_bank1 = NetworkFeaturesBank1::from(features.bank(1));
         let pair_idx = (idx / 2) as usize;
         let is_rx = idx.is_multiple_of(2);
 
@@ -379,7 +416,7 @@ impl VirtioDevice for Device {
                     tx_queue,
                     tx_queue_size,
                 };
-                self.insert_worker(virtio_state, pair_idx, &guest_memory, negotiated_features);
+                self.insert_worker(virtio_state, pair_idx, &guest_memory, negotiated_features, negotiated_features_bank1);
 
                 if first_pair {
                     self.coordinator.start();
@@ -492,10 +529,15 @@ struct ActiveState {
 }
 
 impl ActiveState {
-    fn new(mem: GuestMemory, rx_queue_size: u16, tx_queue_size: u16) -> Self {
+    fn new(
+        mem: GuestMemory,
+        rx_queue_size: u16,
+        tx_queue_size: u16,
+        guest_gso: GuestGsoFeatures,
+    ) -> Self {
         Self {
             pending_tx_packets: (0..tx_queue_size).map(|_| None).collect(),
-            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size),
+            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size, guest_gso),
             data: ProcessingData::new(rx_queue_size, tx_queue_size),
             stats: Default::default(),
         }
@@ -531,12 +573,14 @@ impl NicBuilder {
 
         let driver = driver_source.simple();
         let tx_offload_support = endpoint.tx_offload_support();
+        let rx_offload_support = endpoint.rx_offload_support();
         let adapter = Arc::new(Adapter {
             driver,
             max_queue_pairs,
             tx_fast_completions: endpoint.tx_fast_completions(),
             mac_address,
             tx_offload_support,
+            rx_offload_support,
         });
 
         let coordinator = TaskControl::new(CoordinatorState {
@@ -606,6 +650,7 @@ impl Device {
         idx: usize,
         guest_memory: &GuestMemory,
         negotiated_features: NetworkFeaturesBank0,
+        negotiated_features_bank1: NetworkFeaturesBank1,
     ) {
         let mut builder = self.driver_source.builder();
         // TODO: set this correctly
@@ -617,10 +662,18 @@ impl Device {
         builder.run_on_target(!self.adapter.tx_fast_completions);
         let driver = builder.build("virtio-net");
 
+        let guest_gso = GuestGsoFeatures {
+            guest_tso4: negotiated_features.guest_tso4(),
+            guest_tso6: negotiated_features.guest_tso6(),
+            guest_uso4: negotiated_features_bank1.guest_uso4(),
+            guest_uso6: negotiated_features_bank1.guest_uso6(),
+        };
+
         let active_state = ActiveState::new(
             guest_memory.clone(),
             virtio_state.rx_queue_size,
             virtio_state.tx_queue_size,
+            guest_gso,
         );
         let worker = Worker {
             virtio_state,
