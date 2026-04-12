@@ -106,6 +106,9 @@ pub mod blk {
     pub struct VirtioBlkHandle {
         pub disk: Resource<DiskHandleKind>,
         pub read_only: bool,
+        /// If non-zero, enable adaptive busy-polling with this many spins
+        /// before falling back to event-based notification.
+        pub busy_poll_spins: u32,
     }
 
     impl ResourceId<VirtioDeviceHandle> for VirtioBlkHandle {

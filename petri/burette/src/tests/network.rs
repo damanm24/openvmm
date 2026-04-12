@@ -167,6 +167,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
                                 virtio_resources::blk::VirtioBlkHandle {
                                     disk: FileDiskHandle(erofs_file.into()).into_resource(),
                                     read_only: true,
+                                    busy_poll_spins: 0,
                                 }
                                 .into_resource(),
                             )

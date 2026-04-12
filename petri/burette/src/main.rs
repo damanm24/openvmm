@@ -143,6 +143,11 @@ struct RunArgs {
     /// Data disk size in GiB for the disk_io test.
     #[arg(long, default_value = "4")]
     data_disk_size_gib: u64,
+
+    /// Disable virtio-blk adaptive busy-polling (use pure interrupt-driven
+    /// notification). Useful for A/B latency comparison.
+    #[arg(long)]
+    no_busy_poll: bool,
 }
 
 #[derive(clap::Args)]
@@ -315,6 +320,7 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                     data_disk: args.data_disk.clone(),
                     data_disk_size_gib: args.data_disk_size_gib,
                     perf_dir: args.perf_dir.clone(),
+                    no_busy_poll: args.no_busy_poll,
                 };
 
                 let artifacts = resolve_artifacts(tests::disk_io::register_artifacts)?;

@@ -24,6 +24,7 @@ use pal_async::wait::PolledWait;
 use scsi_buffers::RequestBuffers;
 use std::future::Future;
 use std::future::poll_fn;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -32,6 +33,7 @@ use task_control::InspectTask;
 use task_control::StopTask;
 use task_control::TaskControl;
 use unicycle::FuturesUnordered;
+use virtio::BusyPollBudget;
 use virtio::DeviceTraits;
 use virtio::DeviceTraitsSharedMemory;
 use virtio::QueueResources;
@@ -51,6 +53,12 @@ use zerocopy::IntoBytes;
 
 const MAX_IO_DEPTH: usize = 64;
 
+/// Default busy-poll spin count for the virtio-blk queue.
+///
+/// 1024 spins covers the typical NVMe-class completion window without
+/// excessive CPU cost on idle queues. Set to 0 to disable.
+const DEFAULT_BUSY_POLL_SPINS: u32 = 1024;
+
 /// The virtio-blk device.
 #[derive(InspectMut)]
 pub struct VirtioBlkDevice {
@@ -61,6 +69,8 @@ pub struct VirtioBlkDevice {
     read_only: bool,
     supports_discard: bool,
     config: VirtioBlkConfig,
+    /// Optional busy-poll budget for the virtqueue. See [`BusyPollBudget`].
+    busy_poll_budget: Option<BusyPollBudget>,
 }
 
 /// Persistent worker state. Survives across enable/disable cycles.
@@ -81,8 +91,10 @@ struct BlkWorker {
 }
 
 /// Transient queue state, created in `enable()` and removed in `poll_disable()`.
+#[derive(Inspect)]
 struct BlkQueueState {
     queue: VirtioQueue,
+    #[inspect(skip)]
     memory: GuestMemory,
 }
 
@@ -97,8 +109,8 @@ struct WorkerStats {
 }
 
 impl InspectTask<BlkQueueState> for BlkWorker {
-    fn inspect(&self, req: inspect::Request<'_>, _state: Option<&BlkQueueState>) {
-        Inspect::inspect(self, req);
+    fn inspect(&self, req: inspect::Request<'_>, state: Option<&BlkQueueState>) {
+        req.respond().merge(self).merge(state);
     }
 }
 
@@ -288,7 +300,18 @@ impl VirtioBlkDevice {
             read_only,
             supports_discard,
             config,
+            busy_poll_budget: NonZeroU32::new(DEFAULT_BUSY_POLL_SPINS)
+                .map(|spins| BusyPollBudget { spins }),
         }
+    }
+
+    /// Enable adaptive busy-polling for the virtio queue.
+    ///
+    /// When set, the queue will spin-poll for new descriptors up to
+    /// `budget.spins` times before falling back to event-based
+    /// notification. This can reduce I/O latency at the cost of CPU.
+    pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
+        self.busy_poll_budget = budget;
     }
 }
 
@@ -364,7 +387,7 @@ impl VirtioDevice for VirtioBlkDevice {
         let queue_event = PolledWait::new(&self.driver, resources.event)
             .context("failed to create queue event")?;
 
-        let queue = VirtioQueue::new(
+        let mut queue = VirtioQueue::new(
             features.clone(),
             resources.params,
             resources.guest_memory.clone(),
@@ -373,6 +396,8 @@ impl VirtioDevice for VirtioBlkDevice {
             initial_state,
         )
         .context("failed to create virtio queue")?;
+
+        queue.set_busy_poll_budget(self.busy_poll_budget);
 
         self.worker.insert(
             self.driver.clone(),

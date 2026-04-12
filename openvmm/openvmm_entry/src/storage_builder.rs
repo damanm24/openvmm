@@ -503,6 +503,7 @@ impl StorageBuilder {
                     VirtioBlkHandle {
                         disk: vblk.disk,
                         read_only: vblk.read_only,
+                        busy_poll_spins: 0,
                     }
                     .into_resource(),
                 )
@@ -517,6 +518,7 @@ impl StorageBuilder {
                     VirtioBlkHandle {
                         disk: vblk.disk,
                         read_only: vblk.read_only,
+                        busy_poll_spins: 0,
                     }
                     .into_resource(),
                 )

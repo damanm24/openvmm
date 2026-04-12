@@ -13,6 +13,8 @@
 
 use crate::report::MetricResult;
 use anyhow::Context as _;
+use petri::PetriVmInspector as _;
+use petri::PetriVmRuntime as _;
 use petri::pipette::cmd;
 use petri_artifacts_common::tags::MachineArch;
 use std::path::PathBuf;
@@ -49,6 +51,8 @@ pub struct DiskIoTest {
     pub data_disk_size_gib: u64,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<PathBuf>,
+    /// Disable adaptive busy-polling for virtio-blk queues.
+    pub no_busy_poll: bool,
 }
 
 /// State kept across warm iterations.
@@ -170,6 +174,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         // Attach erofs + data disk and NIC. Only one modify_backend() call is
         // allowed, so combine all PCIe device setup in a single call.
         let data_disk_path = self.data_disk.clone();
+        let data_disk_poll_spins = if self.no_busy_poll { u32::MAX } else { 0 };
         match self.backend {
             DiskBackend::VirtioBlk => {
                 // Build the disk resource before entering the closure (which
@@ -190,6 +195,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
                                     virtio_resources::blk::VirtioBlkHandle {
                                         disk: FileDiskHandle(erofs_file.into()).into_resource(),
                                         read_only: true,
+                                        busy_poll_spins: 0,
                                     }
                                     .into_resource(),
                                 )
@@ -202,6 +208,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
                                     virtio_resources::blk::VirtioBlkHandle {
                                         disk,
                                         read_only: false,
+                                        busy_poll_spins: data_disk_poll_spins,
                                     }
                                     .into_resource(),
                                 )
@@ -230,6 +237,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
                                         virtio_resources::blk::VirtioBlkHandle {
                                             disk: FileDiskHandle(erofs_file.into()).into_resource(),
                                             read_only: true,
+                                            busy_poll_spins: 0,
                                         }
                                         .into_resource(),
                                     )
@@ -285,6 +293,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         let mut metrics = Vec::new();
         let label = self.backend;
         let pid = state.vm.backend().pid();
+        let inspector = state.vm.backend().inspector();
         let mut recorder = crate::harness::PerfRecorder::new(self.perf_dir.as_deref(), pid)?;
         let dev = &state.disk_device;
 
@@ -311,18 +320,56 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
             let perf_label = format!("fio_{label}_{prefix}_{phase}");
             recorder.start(&perf_label)?;
 
-            let json = run_fio_job(&state.agent, dev, rw_mode)
+            let json = run_fio_job(&state.agent, dev, rw_mode, 32)
                 .await
                 .with_context(|| format!("fio {rw_mode} failed"))?;
 
             recorder.stop()?;
 
-            let bw_name = format!("fio_{label}_{prefix}_{phase}_bw");
-            metrics.push(parse_fio_bw(&json, &bw_name, field)?);
+            let metric_prefix = format!("fio_{label}_{prefix}_{phase}");
+            metrics.push(parse_fio_bw(&json, &format!("{metric_prefix}_bw"), field)?);
+            metrics.extend(parse_fio_clat(&json, &metric_prefix, field)?);
 
             if is_random {
-                let iops_name = format!("fio_{label}_{prefix}_{phase}_iops");
-                metrics.push(parse_fio_iops(&json, &iops_name, field)?);
+                metrics.push(parse_fio_iops(
+                    &json,
+                    &format!("{metric_prefix}_iops"),
+                    field,
+                )?);
+            }
+        }
+
+        // iodepth=1 random-read job — every IO goes through the notification
+        // path, so the clat directly reflects notification overhead.
+        {
+            let perf_label = format!("fio_{label}_lat_randread");
+            recorder.start(&perf_label)?;
+
+            let json = run_fio_job(&state.agent, dev, "randread", 1)
+                .await
+                .context("fio iodepth=1 randread failed")?;
+
+            recorder.stop()?;
+
+            let prefix = format!("fio_{label}_qd1_rand_read");
+            metrics.push(parse_fio_iops(&json, &format!("{prefix}_iops"), "read")?);
+            metrics.extend(parse_fio_clat(&json, &prefix, "read")?);
+        }
+
+        // Collect host-side virtqueue pickup stats from the VMM inspect tree.
+        if self.backend == DiskBackend::VirtioBlk {
+            if let Some(ref inspector) = inspector {
+                match inspector.inspect_all().await {
+                    Ok(tree) => {
+                        extract_pickup_stats(&tree, label, &mut metrics);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = &*e as &dyn std::error::Error,
+                            "failed to inspect VMM for pickup stats"
+                        );
+                    }
+                }
             }
         }
 
@@ -409,10 +456,12 @@ async fn run_fio_job(
     agent: &petri::pipette::PipetteClient,
     device: &str,
     rw_mode: &str,
+    iodepth: u32,
 ) -> anyhow::Result<String> {
     let mut sh = agent.unix_shell();
     sh.chroot("/perf");
-    let output: String = cmd!(sh, "fio --name=test --filename={device} --rw={rw_mode} --bs=4k --ioengine=io_uring --direct=1 --runtime=10 --ramp_time=5 --iodepth=32 --numjobs=1 --output-format=json")
+    let iodepth_str = iodepth.to_string();
+    let output: String = cmd!(sh, "fio --name=test --filename={device} --rw={rw_mode} --bs=4k --ioengine=io_uring --direct=1 --runtime=10 --ramp_time=5 --iodepth={iodepth_str} --numjobs=1 --percentile_list=50:99:99.9 --output-format=json")
         .read()
         .await
         .with_context(|| format!("fio {rw_mode} on {device} failed"))?;
@@ -451,4 +500,139 @@ fn parse_fio_iops(json: &str, metric_name: &str, field: &str) -> anyhow::Result<
         unit: "IOPS".to_string(),
         value: iops,
     })
+}
+
+/// Parse completion latency (clat) mean and p99 from fio JSON output.
+///
+/// fio reports `clat_ns` in nanoseconds; we convert to microseconds.
+fn parse_fio_clat(
+    json: &str,
+    metric_prefix: &str,
+    field: &str,
+) -> anyhow::Result<Vec<MetricResult>> {
+    let v: serde_json::Value = serde_json::from_str(json).context("failed to parse fio JSON")?;
+    let clat = &v["jobs"][0][field]["clat_ns"];
+
+    let mut out = Vec::new();
+
+    if let Some(mean_ns) = clat["mean"].as_f64() {
+        out.push(MetricResult {
+            name: format!("{metric_prefix}_clat_mean"),
+            unit: "us".to_string(),
+            value: mean_ns / 1000.0,
+        });
+    }
+
+    // fio uses string keys like "99.000000" for percentiles.
+    if let Some(p99_ns) = clat["percentile"]["99.000000"].as_f64() {
+        out.push(MetricResult {
+            name: format!("{metric_prefix}_clat_p99"),
+            unit: "us".to_string(),
+            value: p99_ns / 1000.0,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Walk an inspect tree to find a named child.
+fn inspect_child<'a>(node: &'a inspect::Node, name: &str) -> Option<&'a inspect::Node> {
+    match node {
+        inspect::Node::Dir(entries) => entries.iter().find(|e| e.name == name).map(|e| &e.node),
+        _ => None,
+    }
+}
+
+/// Extract a `u64` counter value from an inspect node.
+fn inspect_counter(node: &inspect::Node) -> Option<u64> {
+    match node {
+        inspect::Node::Value(v) => match &v.kind {
+            inspect::ValueKind::Unsigned(n) => Some(*n),
+            inspect::ValueKind::Signed(n) => Some(*n as u64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Extract virtqueue pickup stats from the VMM inspect tree and append
+/// them as metrics.
+///
+/// The stats live somewhere under the VPCI subtree (exact path varies).
+/// We search for the first node that has `total_dequeues` as a direct
+/// child, which identifies the queue stats node.
+fn extract_pickup_stats(tree: &inspect::Node, label: DiskBackend, metrics: &mut Vec<MetricResult>) {
+    let mut queue_node = None;
+    find_queue_stats(tree, &mut queue_node);
+
+    let Some(qn) = queue_node else {
+        tracing::debug!("no virtqueue pickup stats found in inspect tree");
+        return;
+    };
+
+    let counters = [
+        ("total_dequeues", "count"),
+        ("immediate_dequeues", "count"),
+        ("poll_dequeues", "count"),
+        ("poll_wait_us", "us"),
+        ("event_dequeues", "count"),
+        ("event_wait_us", "us"),
+    ];
+
+    for (name, unit) in counters {
+        if let Some(val) = inspect_child(qn, name).and_then(inspect_counter) {
+            metrics.push(MetricResult {
+                name: format!("virtqueue_{label}_{name}"),
+                unit: unit.to_string(),
+                value: val as f64,
+            });
+        }
+    }
+
+    // Compute mean wait time for poll and event dequeues separately.
+    for (count_field, sum_field, metric_name) in [
+        ("poll_dequeues", "poll_wait_us", "mean_poll_wait_us"),
+        ("event_dequeues", "event_wait_us", "mean_event_wait_us"),
+    ] {
+        let count = inspect_child(qn, count_field).and_then(inspect_counter);
+        let sum = inspect_child(qn, sum_field).and_then(inspect_counter);
+        if let (Some(c), Some(s)) = (count, sum) {
+            if c > 0 {
+                metrics.push(MetricResult {
+                    name: format!("virtqueue_{label}_{metric_name}"),
+                    unit: "us".to_string(),
+                    value: s as f64 / c as f64,
+                });
+            }
+        }
+    }
+
+    // Extract the wait-time histogram buckets.
+    if let Some(inspect::Node::Dir(entries)) = inspect_child(qn, "wait_us") {
+        for entry in entries {
+            if let Some(count) = inspect_counter(&entry.node) {
+                metrics.push(MetricResult {
+                    name: format!("virtqueue_{label}_wait_us_{}", entry.name),
+                    unit: "count".to_string(),
+                    value: count as f64,
+                });
+            }
+        }
+    }
+}
+
+/// Depth-first search for a node that has `total_dequeues` as a child.
+fn find_queue_stats<'a>(node: &'a inspect::Node, result: &mut Option<&'a inspect::Node>) {
+    if result.is_some() {
+        return;
+    }
+    if let inspect::Node::Dir(entries) = node {
+        if entries.iter().any(|e| e.name == "total_dequeues") {
+            *result = Some(node);
+            return;
+        }
+        for entry in entries {
+            find_queue_stats(&entry.node, result);
+        }
+    }
 }

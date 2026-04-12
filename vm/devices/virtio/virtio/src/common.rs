@@ -17,16 +17,36 @@ use guestmem::DoorbellRegistration;
 use guestmem::GuestMemory;
 use guestmem::GuestMemoryError;
 use inspect::Inspect;
+use inspect_counters::Counter;
+use inspect_counters::Histogram;
 use pal_async::wait::PolledWait;
 use pal_event::Event;
 use std::io::Error;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::task::ready;
+use std::time::Instant;
 use thiserror::Error;
 use vmcore::interrupt::Interrupt;
+
+/// Configuration for adaptive busy-polling on a virtio queue.
+///
+/// When set, the queue will spin-poll for new work up to `spins` times
+/// before falling back to arming kick notification and sleeping on the
+/// event. This trades CPU time for lower latency under high-throughput
+/// workloads.
+///
+/// The budget resets every time work is found, so sustained bursts stay
+/// in polling mode while idle queues quickly fall back to interrupts.
+#[derive(Debug, Clone, Copy, Inspect)]
+pub struct BusyPollBudget {
+    /// Maximum number of consecutive empty `try_next` polls before
+    /// falling back to event-based notification.
+    pub spins: NonZeroU32,
+}
 
 /// Read all readable payload buffers into `target`. Returns the number of bytes read.
 fn read_from_payload(
@@ -250,6 +270,33 @@ impl<'a> PeekedWork<'a> {
     }
 }
 
+/// Per-dequeue statistics for the virtio queue.
+///
+/// Every successful `try_next()` in `poll_next_buffer` is classified as one of:
+/// - **immediate**: work was available on the first attempt (queue was not empty)
+/// - **busy_poll**: work was found during the spin-poll phase
+/// - **event**: work was found after falling back to eventfd notification
+///
+/// For non-immediate dequeues, the wait time (from first failed `try_next()`
+/// to eventual success) is accumulated so the mean can be computed.
+#[derive(Debug, Default, Inspect)]
+pub struct QueuePickupStats {
+    /// Total number of work items dequeued.
+    total_dequeues: Counter,
+    /// Work was already available — no waiting at all.
+    immediate_dequeues: Counter,
+    /// Work found during the busy-poll spin phase.
+    poll_dequeues: Counter,
+    /// Cumulative wait time (µs) for poll_dequeues.
+    poll_wait_us: Counter,
+    /// Work found after falling back to eventfd wakeup.
+    event_dequeues: Counter,
+    /// Cumulative wait time (µs) for event_dequeues.
+    event_wait_us: Counter,
+    /// Wait-time histogram across all non-immediate dequeues (µs).
+    wait_us: Histogram<14>,
+}
+
 #[derive(Debug, Inspect)]
 pub struct VirtioQueue {
     #[inspect(flatten)]
@@ -260,6 +307,19 @@ pub struct VirtioQueue {
     notify_guest: Interrupt,
     #[inspect(skip)]
     queue_event: PolledWait<Event>,
+    /// Optional busy-poll budget. `None` means pure interrupt-driven.
+    busy_poll_budget: Option<BusyPollBudget>,
+    /// Number of consecutive empty polls in the current busy-poll cycle.
+    poll_misses: u32,
+    /// Timestamp when the queue entered the idle/polling phase.
+    #[inspect(skip)]
+    idle_since: Option<Instant>,
+    /// Whether the current wait has transitioned to the event-based path.
+    #[inspect(skip)]
+    fell_back_to_event: bool,
+    /// Per-dequeue pickup statistics.
+    #[inspect(flatten)]
+    stats: QueuePickupStats,
 }
 
 impl VirtioQueue {
@@ -277,7 +337,22 @@ impl VirtioQueue {
             complete: complete_work,
             notify_guest: notify,
             queue_event,
+            busy_poll_budget: None,
+            poll_misses: 0,
+            idle_since: None,
+            fell_back_to_event: false,
+            stats: QueuePickupStats::default(),
         })
+    }
+
+    /// Enable adaptive busy-polling for this queue.
+    ///
+    /// When set, the queue's [`Stream`] implementation will spin-poll
+    /// up to `budget.spins` times before falling back to the
+    /// event-based path. Pass `None` to disable (the default).
+    pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
+        self.busy_poll_budget = budget;
+        self.poll_misses = 0;
     }
 
     /// Returns the current queue progress state.
@@ -382,8 +457,52 @@ impl VirtioQueue {
     ) -> Poll<Result<VirtioQueueCallbackWork, Error>> {
         loop {
             if let Some(work) = self.try_next()? {
+                self.stats.total_dequeues.increment();
+
+                match self.idle_since.take() {
+                    None => {
+                        // Work was available on the very first try_next()
+                        // in this poll cycle — no waiting at all.
+                        self.stats.immediate_dequeues.increment();
+                    }
+                    Some(since) => {
+                        let us = since.elapsed().as_micros() as u64;
+                        self.stats.wait_us.add_sample(us);
+
+                        if self.fell_back_to_event {
+                            self.stats.event_dequeues.increment();
+                            self.stats.event_wait_us.add(us);
+                        } else {
+                            self.stats.poll_dequeues.increment();
+                            self.stats.poll_wait_us.add(us);
+                        }
+                    }
+                }
+
+                self.poll_misses = 0;
+                self.fell_back_to_event = false;
                 return Poll::Ready(Ok(work));
             }
+
+            // Record the instant we start waiting for work.
+            if self.idle_since.is_none() {
+                self.idle_since = Some(Instant::now());
+            }
+
+            if let Some(budget) = self.busy_poll_budget {
+                if self.poll_misses < budget.spins.get() {
+                    self.poll_misses += 1;
+                    // Re-enter the executor promptly via a self-wake so
+                    // that other tasks (e.g. IO completions) also get a
+                    // chance to run between spins.
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                // Budget exhausted — fall through to event-based wait.
+                self.poll_misses = 0;
+            }
+
+            self.fell_back_to_event = true;
             ready!(self.poll_kick(cx));
         }
     }

@@ -294,6 +294,7 @@ async fn virtio_blk_device(config: PetriVmBuilder<OpenVmmPetriBackend>) -> anyho
                     VirtioBlkHandle {
                         disk: disk_resource,
                         read_only: false,
+                        busy_poll_spins: 0,
                     }
                     .into_resource(),
                 ));
