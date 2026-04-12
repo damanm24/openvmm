@@ -13,6 +13,8 @@
 
 use crate::report::MetricResult;
 use anyhow::Context as _;
+use petri::PetriVmInspector;
+use petri::PetriVmRuntime;
 use petri::pipette::cmd;
 use petri_artifacts_common::tags::MachineArch;
 use std::path::PathBuf;
@@ -329,7 +331,25 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         Ok(metrics)
     }
 
-    async fn teardown(&self, state: DiskIoTestState) -> anyhow::Result<()> {
+    async fn teardown(&self, mut state: DiskIoTestState) -> anyhow::Result<()> {
+        if let Some(inspector) = state.vm.backend().inspector() {
+            match inspector.inspect_all().await {
+                Ok(node) => {
+                    tracing::info!(
+                        test = self.name(),
+                        inspect = %node.json(),
+                        "VMM inspect state at teardown"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        test = self.name(),
+                        error = &*err as &dyn std::error::Error,
+                        "failed to inspect VMM state at teardown"
+                    );
+                }
+            }
+        }
         state.agent.power_off().await?;
         state.vm.wait_for_clean_teardown().await?;
         Ok(())

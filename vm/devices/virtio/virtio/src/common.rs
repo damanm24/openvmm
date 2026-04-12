@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::task::ready;
+use std::time::Instant;
 use thiserror::Error;
 use vmcore::interrupt::Interrupt;
 
@@ -250,6 +251,83 @@ impl<'a> PeekedWork<'a> {
     }
 }
 
+/// Tracks latency between successive `poll_next_buffer` completions.
+///
+/// This helps evaluate whether a busy-wait strategy before sleeping on
+/// the queue event would reduce wake-up overhead.
+struct PollLatencyStats {
+    last_buffer_time: Option<Instant>,
+    count: u64,
+    total_ns: u64,
+    min_ns: u64,
+    max_ns: u64,
+}
+
+impl PollLatencyStats {
+    fn new() -> Self {
+        Self {
+            last_buffer_time: None,
+            count: 0,
+            total_ns: 0,
+            min_ns: u64::MAX,
+            max_ns: 0,
+        }
+    }
+
+    fn record(&mut self) {
+        let now = Instant::now();
+        if let Some(prev) = self.last_buffer_time {
+            let elapsed_ns = now.duration_since(prev).as_nanos() as u64;
+            self.count += 1;
+            self.total_ns += elapsed_ns;
+            self.min_ns = self.min_ns.min(elapsed_ns);
+            self.max_ns = self.max_ns.max(elapsed_ns);
+        }
+        self.last_buffer_time = Some(now);
+    }
+
+    fn avg_ns(&self) -> u64 {
+        if self.count == 0 {
+            0
+        } else {
+            self.total_ns / self.count
+        }
+    }
+}
+
+impl Inspect for PollLatencyStats {
+    fn inspect(&self, req: inspect::Request<'_>) {
+        req.respond()
+            .field("sample_count", self.count)
+            .field("avg_latency_us", self.avg_ns() / 1000)
+            .field(
+                "min_latency_us",
+                if self.count > 0 {
+                    self.min_ns / 1000
+                } else {
+                    0
+                },
+            )
+            .field(
+                "max_latency_us",
+                if self.count > 0 {
+                    self.max_ns / 1000
+                } else {
+                    0
+                },
+            );
+    }
+}
+
+impl std::fmt::Debug for PollLatencyStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PollLatencyStats")
+            .field("count", &self.count)
+            .field("avg_ns", &self.avg_ns())
+            .finish()
+    }
+}
+
 #[derive(Debug, Inspect)]
 pub struct VirtioQueue {
     #[inspect(flatten)]
@@ -260,6 +338,7 @@ pub struct VirtioQueue {
     notify_guest: Interrupt,
     #[inspect(skip)]
     queue_event: PolledWait<Event>,
+    poll_latency: PollLatencyStats,
 }
 
 impl VirtioQueue {
@@ -277,6 +356,7 @@ impl VirtioQueue {
             complete: complete_work,
             notify_guest: notify,
             queue_event,
+            poll_latency: PollLatencyStats::new(),
         })
     }
 
@@ -382,6 +462,7 @@ impl VirtioQueue {
     ) -> Poll<Result<VirtioQueueCallbackWork, Error>> {
         loop {
             if let Some(work) = self.try_next()? {
+                self.poll_latency.record();
                 return Poll::Ready(Ok(work));
             }
             ready!(self.poll_kick(cx));
