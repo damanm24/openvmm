@@ -97,8 +97,12 @@ struct WorkerStats {
 }
 
 impl InspectTask<BlkQueueState> for BlkWorker {
-    fn inspect(&self, req: inspect::Request<'_>, _state: Option<&BlkQueueState>) {
-        Inspect::inspect(self, req);
+    fn inspect(&self, req: inspect::Request<'_>, state: Option<&BlkQueueState>) {
+        let mut resp = req.respond();
+        resp.merge(self);
+        if let Some(state) = state {
+            resp.field("queue", &state.queue);
+        }
     }
 }
 
