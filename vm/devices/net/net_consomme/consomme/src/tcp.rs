@@ -1323,7 +1323,7 @@ impl TcpConnectionInner {
 
                     // Stage 2: Record the range in the assembler. Do this
                     // *before* writing to the ring so that rejected segments
-                    // (TooManyGaps) don't leave stale bytes in unwritten
+                    // (RangeSetFull) don't leave stale bytes in unwritten
                     // ring space.
                     let (rx_consumed, assembler_fin, accepted) =
                         match self
@@ -1331,7 +1331,7 @@ impl TcpConnectionInner {
                             .add(seq_offset as u32, payload.len() as u32, fin)
                         {
                             Ok(result) => (result.consumed as usize, result.fin, true),
-                            Err(assembler::TooManyGaps) => (0, false, false),
+                            Err(_) => (0, false, false),
                         };
 
                     // Stage 3: Write payload into the ring and advance the

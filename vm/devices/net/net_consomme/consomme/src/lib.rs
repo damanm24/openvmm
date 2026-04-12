@@ -22,7 +22,9 @@ mod dhcpv6;
 mod dns;
 mod dns_resolver;
 mod icmp;
+mod ip_reassembly;
 mod ndp;
+mod range_set;
 mod tcp;
 mod udp;
 
@@ -52,6 +54,7 @@ use smoltcp::wire::Ipv6Address;
 use smoltcp::wire::Ipv6Packet;
 use std::task::Context;
 use std::time::Duration;
+use std::time::Instant;
 use thiserror::Error;
 
 /// A consomme instance.
@@ -63,6 +66,7 @@ pub struct Consomme {
     #[inspect(mut)]
     udp: udp::Udp,
     icmp: icmp::Icmp,
+    ip_reassembly: ip_reassembly::IpReassembly,
     dns: Option<dns_resolver::DnsResolver>,
     host_has_ipv6: bool,
 }
@@ -489,6 +493,7 @@ impl Consomme {
             tcp: tcp::Tcp::new(),
             udp: udp::Udp::new(timeout),
             icmp: icmp::Icmp::new(),
+            ip_reassembly: ip_reassembly::IpReassembly::new(),
             dns,
             host_has_ipv6,
         }
@@ -524,9 +529,25 @@ impl<T: Client> Access<'_, T> {
 
     /// Polls for work, transmitting any ready packets to the client.
     pub fn poll(&mut self, cx: &mut Context<'_>) {
+        self.expire_ip_fragments();
         self.poll_udp(cx);
         self.poll_tcp(cx);
         self.poll_icmp(cx);
+    }
+
+    /// Expire stale IP fragment reassembly queues and send ICMP Time Exceeded
+    /// (Fragment Reassembly Time Exceeded, Type 11 Code 1) back to the guest
+    /// for any queue that had received its first fragment.
+    fn expire_ip_fragments(&mut self) {
+        let expired = self.inner.ip_reassembly.expire(Instant::now());
+        for eq in expired {
+            if let Err(e) = self.send_icmp_time_exceeded_fragment(&eq) {
+                tracelimit::warn_ratelimited!(
+                    error = ?e,
+                    "failed to send ICMP Time Exceeded for expired fragment queue"
+                );
+            }
+        }
     }
 
     /// Update all sockets to use the new client's IO driver. This must be
@@ -607,7 +628,13 @@ impl<T: Client> Access<'_, T> {
         }
 
         if ipv4.more_frags() || ipv4.frag_offset() != 0 {
-            return Err(DropReason::FragmentedPacket);
+            match self.inner.ip_reassembly.process_fragment(&ipv4) {
+                ip_reassembly::FragmentResult::Reassembled(packet_data) => {
+                    return self.handle_ipv4(frame, &packet_data, &ChecksumState::IPV4_ONLY);
+                }
+                ip_reassembly::FragmentResult::Buffered => return Ok(()),
+                ip_reassembly::FragmentResult::Dropped(reason) => return Err(reason),
+            }
         }
 
         if !checksum.ipv4 && !ipv4.verify_checksum() {

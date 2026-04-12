@@ -288,6 +288,54 @@ impl<T: Client> Access<'_, T> {
         }
     }
 
+    /// Build and send an ICMP Time Exceeded (Fragment Reassembly) message
+    /// back to the guest for an expired IP fragment reassembly queue.
+    pub(crate) fn send_icmp_time_exceeded_fragment(
+        &mut self,
+        expired: &crate::ip_reassembly::ExpiredQueue,
+    ) -> Result<(), DropReason> {
+        let icmp_payload_len = expired.header_and_payload.len();
+        let icmp_total_len = ICMPV4_HEADER_LEN + icmp_payload_len;
+        let ipv4_total_len = IPV4_HEADER_LEN + icmp_total_len;
+        let eth_total_len = ETHERNET_HEADER_LEN + ipv4_total_len;
+
+        if eth_total_len > MIN_MTU {
+            return Err(DropReason::MalformedPacket);
+        }
+
+        let mut buffer = [0u8; MIN_MTU];
+
+        // Ethernet header.
+        let mut eth = EthernetFrame::new_unchecked(&mut buffer[..]);
+        eth.set_ethertype(EthernetProtocol::Ipv4);
+        eth.set_src_addr(self.inner.state.params.gateway_mac);
+        eth.set_dst_addr(self.inner.state.params.client_mac);
+
+        // IPv4 header.
+        let resp_ipv4 = Ipv4Repr {
+            src_addr: self.inner.state.params.gateway_ip,
+            dst_addr: expired.src_addr,
+            next_header: IpProtocol::Icmp,
+            payload_len: icmp_total_len,
+            hop_limit: 64,
+        };
+        let mut ipv4 = Ipv4Packet::new_unchecked(eth.payload_mut());
+        resp_ipv4.emit(&mut ipv4, &ChecksumCapabilities::default());
+
+        // ICMP Time Exceeded header (Type 11, Code 1).
+        let icmp_buf = &mut ipv4.payload_mut()[..icmp_total_len];
+        let mut icmp = Icmpv4Packet::new_unchecked(icmp_buf);
+        icmp.set_msg_type(Icmpv4Message::TimeExceeded);
+        icmp.set_msg_code(1); // Fragment Reassembly Time Exceeded
+        // Bytes 4-7 of ICMP header are unused (must be zero) — already zeroed.
+        icmp.data_mut()[..icmp_payload_len].copy_from_slice(&expired.header_and_payload);
+        icmp.fill_checksum();
+
+        self.client
+            .recv(&buffer[..eth_total_len], &ChecksumState::IPV4_ONLY);
+        Ok(())
+    }
+
     fn bind<A: Into<Ipv4Addr>>(socket: &mut Socket, addr: A) -> std::io::Result<()> {
         let addr = SocketAddr::new(IpAddr::V4(addr.into()), 0);
         socket.bind(&addr.into())?;

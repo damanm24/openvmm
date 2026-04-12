@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::range_set::RangeSet;
+use crate::range_set::RangeSetFull;
 use inspect::Inspect;
 
 /// Maximum non-contiguous ranges the assembler can track. Each range is a
@@ -11,8 +13,7 @@ const MAX_RANGES: usize = 4;
 
 /// The assembler's range table is full and the new segment does not overlap
 /// or touch any existing range, so it cannot be tracked.
-#[derive(Debug, PartialEq, Eq)]
-pub struct TooManyGaps;
+pub type TooManyGaps = RangeSetFull;
 
 /// Result of an `add` call.
 #[derive(Debug, PartialEq, Eq)]
@@ -38,10 +39,7 @@ pub struct AddResult {
 /// Internally stores up to `MAX_RANGES` sorted, non-overlapping,
 /// non-adjacent `(start, end)` half-open ranges.
 pub(super) struct Assembler {
-    /// `ranges[..count]` are valid. Sorted by start.
-    /// Invariant: `ranges[i].1 < ranges[i+1].0` for all `i < count - 1`.
-    ranges: [(u32, u32); MAX_RANGES],
-    count: u8,
+    ranges: RangeSet<u32, MAX_RANGES>,
     /// If a FIN has been received, this is `Some(offset)` where `offset` is
     /// the FIN's position relative to the current frontier. The FIN occupies
     /// zero bytes in the data stream but has a sequence-space position equal
@@ -53,7 +51,7 @@ pub(super) struct Assembler {
 impl Inspect for Assembler {
     fn inspect(&self, req: inspect::Request<'_>) {
         let mut resp = req.respond();
-        for (i, &(start, end)) in self.ranges[..self.count as usize].iter().enumerate() {
+        for (i, &(start, end)) in self.ranges.ranges().iter().enumerate() {
             resp.field(&format!("range_{i}"), format!("[{start}, {end})"));
         }
         if let Some(fo) = self.fin_offset {
@@ -65,15 +63,14 @@ impl Inspect for Assembler {
 impl Assembler {
     pub fn new() -> Self {
         Self {
-            ranges: [(0, 0); MAX_RANGES],
-            count: 0,
+            ranges: RangeSet::new(),
             fin_offset: None,
         }
     }
 
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.count == 0
+        self.ranges.count() == 0
     }
 
     /// Record that bytes `[offset, offset + len)` have been received.
@@ -104,59 +101,11 @@ impl Assembler {
             return Ok(self.try_fin(0));
         }
 
-        let new_start = offset;
-        let new_end = offset + len;
+        self.ranges.insert(offset, offset + len)?;
 
-        // Find the range of existing entries that overlap or are adjacent to
-        // the new range. Two half-open ranges [s,e) and [ns,ne)
-        // overlap-or-touch when s <= ne && ns <= e.
-        let ranges = &self.ranges[..self.count as usize];
-        let first = ranges
-            .iter()
-            .position(|&(s, e)| s <= new_end && new_start <= e);
-        let last = ranges
-            .iter()
-            .rposition(|&(s, e)| s <= new_end && new_start <= e);
-
-        match (first, last) {
-            (Some(first), Some(last)) => {
-                // Merge new range with ranges[first..=last].
-                let merged_start = new_start.min(self.ranges[first].0);
-                let merged_end = new_end.max(self.ranges[last].1);
-                self.ranges[first] = (merged_start, merged_end);
-                // Remove the now-redundant entries (first+1..=last) by
-                // shifting everything after `last` down.
-                let remove = last - first;
-                self.ranges
-                    .copy_within(last + 1..self.count as usize, first + 1);
-                self.count -= remove as u8;
-            }
-            (None, None) => {
-                // No overlap: insert as a new entry.
-                let count = self.count as usize;
-                if count >= MAX_RANGES {
-                    return Err(TooManyGaps);
-                }
-                let pos = ranges
-                    .iter()
-                    .position(|&(s, _)| s > new_start)
-                    .unwrap_or(count);
-                self.ranges.copy_within(pos..count, pos + 1);
-                self.ranges[pos] = (new_start, new_end);
-                self.count += 1;
-            }
-            _ => unreachable!("first.is_some() iff last.is_some()"),
-        }
-
-        // Consume the contiguous prefix. If ranges[0] starts at 0, those
-        // bytes are ready — remove the range and shift coordinates.
-        if self.count > 0 && self.ranges[0].0 == 0 {
-            let front = self.ranges[0].1;
-            let new_count = self.count as usize - 1;
-            for i in 0..new_count {
-                self.ranges[i] = (self.ranges[i + 1].0 - front, self.ranges[i + 1].1 - front);
-            }
-            self.count = new_count as u8;
+        // Consume the contiguous prefix. If the first range starts at 0,
+        // those bytes are ready — remove it and shift remaining coordinates.
+        if let Some(front) = self.ranges.consume_front() {
             // Shift the FIN offset by the consumed amount.
             if let Some(ref mut fo) = self.fin_offset {
                 *fo -= front;
@@ -169,7 +118,7 @@ impl Assembler {
 
     #[cfg(test)]
     pub fn clear(&mut self) {
-        self.count = 0;
+        self.ranges.clear();
         self.fin_offset = None;
     }
 
@@ -179,7 +128,7 @@ impl Assembler {
     /// is cleared and `AddResult::fin` is set to true.
     fn try_fin(&mut self, consumed: u32) -> AddResult {
         let fin = match self.fin_offset {
-            Some(0) if self.count == 0 => {
+            Some(0) if self.ranges.count() == 0 => {
                 self.fin_offset = None;
                 true
             }
@@ -190,13 +139,15 @@ impl Assembler {
 
     #[cfg(test)]
     fn ranges(&self) -> &[(u32, u32)] {
-        &self.ranges[..self.count as usize]
+        self.ranges.ranges()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::range_set::RangeSetFull;
 
     #[test]
     fn test_empty() {
@@ -459,7 +410,7 @@ mod tests {
         assert_eq!(a.ranges(), &[(10, 11), (20, 21), (30, 31), (40, 41)]);
 
         let r = a.add(50, 1, false);
-        assert_eq!(r, Err(TooManyGaps));
+        assert_eq!(r, Err(RangeSetFull));
         // State unchanged.
         assert_eq!(a.ranges(), &[(10, 11), (20, 21), (30, 31), (40, 41)]);
     }
