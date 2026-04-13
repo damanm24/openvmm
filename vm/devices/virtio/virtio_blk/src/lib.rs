@@ -300,8 +300,8 @@ impl VirtioBlkDevice {
 
     /// Enable adaptive busy-polling for the virtio queue.
     ///
-    /// When set, the queue will spin-poll for new descriptors up to
-    /// `budget.spins` times before falling back to event-based
+    /// When set, the queue will adaptively spin-poll for new descriptors
+    /// (up to `budget.max_spins` ceiling) before falling back to event-based
     /// notification. This can reduce I/O latency at the cost of CPU.
     pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
         self.busy_poll_budget = budget;
@@ -311,7 +311,7 @@ impl VirtioBlkDevice {
     ///
     /// `0` disables busy-polling (`None`), any other value enables it.
     pub fn spins_to_budget(spins: u32) -> Option<BusyPollBudget> {
-        NonZeroU32::new(spins).map(|spins| BusyPollBudget { spins })
+        NonZeroU32::new(spins).map(BusyPollBudget::new)
     }
 }
 

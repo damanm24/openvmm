@@ -47,8 +47,7 @@ impl AsyncResolveResource<VirtioDeviceHandle, VirtioNetHandle> for VirtioNetReso
             )
             .await?;
 
-        let mut device = builder.build(input.driver_source, endpoint.0, resource.mac_address);
-        device.set_busy_poll_budget(resource.poll_spins.and_then(Device::spins_to_budget));
+        let device = builder.build(input.driver_source, endpoint.0, resource.mac_address);
 
         Ok(device.into())
     }

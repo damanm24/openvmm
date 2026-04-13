@@ -39,7 +39,6 @@ use net_backend_resources::mac_address::MacAddress;
 use pal_async::wait::PolledWait;
 use std::future::pending;
 use std::mem::offset_of;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::task::Poll;
 use task_control::AsyncRun;
@@ -47,7 +46,6 @@ use task_control::InspectTaskMut;
 use task_control::StopTask;
 use task_control::TaskControl;
 use thiserror::Error;
-use virtio::BusyPollBudget;
 use virtio::DeviceTraits;
 use virtio::DeviceTraitsSharedMemory;
 use virtio::QueueResources;
@@ -234,8 +232,6 @@ pub struct Device {
     driver_source: VmTaskDriverSource,
     /// Per-pair state tracking.
     pairs: Vec<QueuePairState>,
-    /// Optional busy-poll budget for the virtqueues. See [`BusyPollBudget`].
-    busy_poll_budget: Option<BusyPollBudget>,
 }
 
 /// Tracks the state of a queue pair through the start_queue lifecycle.
@@ -317,7 +313,7 @@ impl VirtioDevice for Device {
         let queue_size = resources.params.size;
         let queue_event = PolledWait::new(&self.adapter.driver, resources.event)
             .context("failed creating queue event")?;
-        let mut queue = VirtioQueue::new(
+        let queue = VirtioQueue::new(
             features.clone(),
             resources.params,
             resources.guest_memory,
@@ -327,7 +323,11 @@ impl VirtioDevice for Device {
         )
         .context("failed creating virtio net queue")?;
 
-        queue.set_busy_poll_budget(self.busy_poll_budget);
+        // Note: busy-poll is intentionally not applied to virtio_net queues.
+        // The net device's main loop multiplexes TX kick, RX kick, and
+        // endpoint readiness in a single poll_fn. Spinning in poll_kick
+        // re-enters that poll_fn on every iteration — re-polling all three
+        // event sources — which wastes CPU and hurts throughput.
 
         let negotiated_features = NetworkFeaturesBank0::from(features.bank(0));
         let pair_idx = (idx / 2) as usize;
@@ -570,7 +570,6 @@ impl NicBuilder {
             pairs: (0..max_queue_pairs)
                 .map(|_| QueuePairState::Empty)
                 .collect(),
-            busy_poll_budget: None,
         }
     }
 }
@@ -580,22 +579,6 @@ impl Device {
         NicBuilder {
             max_queue_pairs: !0,
         }
-    }
-
-    /// Enable adaptive busy-polling for all virtqueues.
-    ///
-    /// When set, each queue will spin-poll for new descriptors up to
-    /// `budget.spins` times before falling back to event-based
-    /// notification. This can reduce latency at the cost of CPU.
-    pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
-        self.busy_poll_budget = budget;
-    }
-
-    /// Convert a spin count to a [`BusyPollBudget`].
-    ///
-    /// `0` disables busy-polling (`None`), any other value enables it.
-    pub fn spins_to_budget(spins: u32) -> Option<BusyPollBudget> {
-        NonZeroU32::new(spins).map(|spins| BusyPollBudget { spins })
     }
 }
 
