@@ -49,8 +49,8 @@ pub struct DiskIoTest {
     pub data_disk_size_gib: u64,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<PathBuf>,
-    /// Disable adaptive busy-polling for virtio-blk queues.
-    pub no_busy_poll: bool,
+    /// Enable adaptive busy-polling for virtio-blk queues.
+    pub busy_poll: bool,
 }
 
 /// State kept across warm iterations.
@@ -172,7 +172,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         // Attach erofs + data disk and NIC. Only one modify_backend() call is
         // allowed, so combine all PCIe device setup in a single call.
         let data_disk_path = self.data_disk.clone();
-        let data_disk_poll_spins = if self.no_busy_poll { None } else { Some(1024) };
+        let data_disk_poll_spins = if self.busy_poll { Some(1024) } else { None };
         match self.backend {
             DiskBackend::VirtioBlk => {
                 // Build the disk resource before entering the closure (which

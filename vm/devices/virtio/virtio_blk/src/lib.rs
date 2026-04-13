@@ -53,12 +53,6 @@ use zerocopy::IntoBytes;
 
 const MAX_IO_DEPTH: usize = 64;
 
-/// Default busy-poll spin count for the virtio-blk queue.
-///
-/// 1024 spins covers the typical NVMe-class completion window without
-/// excessive CPU cost on idle queues. Set to 0 to disable.
-const DEFAULT_BUSY_POLL_SPINS: u32 = 1024;
-
 /// The virtio-blk device.
 #[derive(InspectMut)]
 pub struct VirtioBlkDevice {
@@ -300,8 +294,7 @@ impl VirtioBlkDevice {
             read_only,
             supports_discard,
             config,
-            busy_poll_budget: NonZeroU32::new(DEFAULT_BUSY_POLL_SPINS)
-                .map(|spins| BusyPollBudget { spins }),
+            busy_poll_budget: None,
         }
     }
 

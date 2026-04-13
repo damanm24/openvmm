@@ -227,9 +227,6 @@ struct Adapter {
     tx_offload_support: TxOffloadSupport,
 }
 
-/// Default busy-poll spin count for virtio-net queues.
-const DEFAULT_BUSY_POLL_SPINS: u32 = 1024;
-
 pub struct Device {
     registers: NetConfig,
     coordinator: TaskControl<CoordinatorState, Coordinator>,
@@ -573,8 +570,7 @@ impl NicBuilder {
             pairs: (0..max_queue_pairs)
                 .map(|_| QueuePairState::Empty)
                 .collect(),
-            busy_poll_budget: NonZeroU32::new(DEFAULT_BUSY_POLL_SPINS)
-                .map(|spins| BusyPollBudget { spins }),
+            busy_poll_budget: None,
         }
     }
 }
