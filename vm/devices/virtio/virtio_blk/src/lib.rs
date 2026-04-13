@@ -313,6 +313,13 @@ impl VirtioBlkDevice {
     pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
         self.busy_poll_budget = budget;
     }
+
+    /// Convert a spin count to a [`BusyPollBudget`].
+    ///
+    /// `0` disables busy-polling (`None`), any other value enables it.
+    pub fn spins_to_budget(spins: u32) -> Option<BusyPollBudget> {
+        NonZeroU32::new(spins).map(|spins| BusyPollBudget { spins })
+    }
 }
 
 impl VirtioDevice for VirtioBlkDevice {

@@ -419,7 +419,6 @@ dependencies = [
  "fs-err",
  "futures",
  "guid",
- "inspect",
  "jiff",
  "libc",
  "openvmm_defs",

@@ -102,7 +102,7 @@ mod linux {
                     let virtio_handle = VirtioBlkHandle {
                         disk: Resource::new(FileDiskHandle(file)),
                         read_only: *read_only,
-                        busy_poll_spins: 0,
+                        poll_spins: None,
                     };
 
                     let resolved = resolver

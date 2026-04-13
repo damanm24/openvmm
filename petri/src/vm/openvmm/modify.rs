@@ -173,7 +173,15 @@ impl PetriVmConfigOpenVmm {
     ///
     /// This exposes a virtio-net device on a PCIe root port, suitable for
     /// guests running virtio drivers (e.g. Linux with UEFI boot).
-    pub fn with_virtio_nic(mut self, port_name: &str) -> Self {
+    pub fn with_virtio_nic(self, port_name: &str) -> Self {
+        self.with_virtio_nic_config(port_name, None)
+    }
+
+    /// Enable a virtio-net NIC with explicit busy-poll configuration.
+    ///
+    /// `poll_spins`: `None` = disabled, `Some(0)` = disabled,
+    /// `Some(n)` = spin `n` times.
+    pub fn with_virtio_nic_config(mut self, port_name: &str, poll_spins: Option<u32>) -> Self {
         let endpoint =
             net_backend_resources::consomme::ConsommeHandle { cidr: None }.into_resource();
 
@@ -184,6 +192,7 @@ impl PetriVmConfigOpenVmm {
                     max_queues: None,
                     mac_address: NIC_MAC_ADDRESS,
                     endpoint,
+                    poll_spins,
                 }
                 .into_resource(),
             )

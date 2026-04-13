@@ -51,6 +51,7 @@ pub(super) struct StorageBuilder {
 struct VirtioBlkDisk {
     disk: Resource<DiskHandleKind>,
     read_only: bool,
+    poll_spins: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -58,7 +59,10 @@ pub enum DiskLocation {
     Ide(Option<u8>, Option<u8>),
     Scsi(Option<u8>),
     Nvme(Option<u32>, Option<String>),
-    VirtioBlk(Option<String>),
+    VirtioBlk {
+        pcie_port: Option<String>,
+        poll_spins: Option<u32>,
+    },
 }
 
 impl From<UnderhillDiskSource> for DiskLocation {
@@ -261,14 +265,21 @@ impl StorageBuilder {
                 });
                 Some(nsid)
             }
-            DiskLocation::VirtioBlk(pcie_port) => {
+            DiskLocation::VirtioBlk {
+                pcie_port,
+                poll_spins,
+            } => {
                 if vtl != DeviceVtl::Vtl0 {
                     anyhow::bail!("virtio-blk only supported for VTL0");
                 }
                 if is_dvd {
                     anyhow::bail!("dvd not supported with virtio-blk");
                 }
-                let vblk = VirtioBlkDisk { disk, read_only };
+                let vblk = VirtioBlkDisk {
+                    disk,
+                    read_only,
+                    poll_spins,
+                };
                 if let Some(port) = pcie_port {
                     self.pcie_virtio_blk_disks.push((port, vblk));
                 } else {
@@ -314,7 +325,7 @@ impl StorageBuilder {
                     NVME_VTL0_INSTANCE_ID
                 },
             ),
-            DiskLocation::VirtioBlk(_) => {
+            DiskLocation::VirtioBlk { .. } => {
                 anyhow::bail!("underhill not supported with virtio-blk")
             }
         };
@@ -335,7 +346,7 @@ impl StorageBuilder {
                 let nsid = nsid.unwrap_or(self.underhill_nvme_luns.len() as u32 + 1);
                 (&mut self.underhill_nvme_luns, nsid)
             }
-            DiskLocation::VirtioBlk(_) => {
+            DiskLocation::VirtioBlk { .. } => {
                 anyhow::bail!("underhill not supported with virtio-blk")
             }
         };
@@ -503,7 +514,7 @@ impl StorageBuilder {
                     VirtioBlkHandle {
                         disk: vblk.disk,
                         read_only: vblk.read_only,
-                        busy_poll_spins: 0,
+                        poll_spins: vblk.poll_spins,
                     }
                     .into_resource(),
                 )
@@ -518,7 +529,7 @@ impl StorageBuilder {
                     VirtioBlkHandle {
                         disk: vblk.disk,
                         read_only: vblk.read_only,
-                        busy_poll_spins: 0,
+                        poll_spins: vblk.poll_spins,
                     }
                     .into_resource(),
                 )

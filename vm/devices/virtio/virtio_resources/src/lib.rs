@@ -106,9 +106,12 @@ pub mod blk {
     pub struct VirtioBlkHandle {
         pub disk: Resource<DiskHandleKind>,
         pub read_only: bool,
-        /// If non-zero, enable adaptive busy-polling with this many spins
-        /// before falling back to event-based notification.
-        pub busy_poll_spins: u32,
+        /// Number of spin-polls before falling back to event-based notification.
+        ///
+        /// - `None` — disable busy-polling (pure interrupt-driven).
+        /// - `Some(0)` — disable busy-polling (same as `None`).
+        /// - `Some(n)` — spin up to `n` times before falling back to events.
+        pub poll_spins: Option<u32>,
     }
 
     impl ResourceId<VirtioDeviceHandle> for VirtioBlkHandle {
@@ -129,6 +132,12 @@ pub mod net {
         pub max_queues: Option<u16>,
         pub mac_address: MacAddress,
         pub endpoint: Resource<NetEndpointHandleKind>,
+        /// Number of spin-polls before falling back to event-based notification.
+        ///
+        /// - `None` — disable busy-polling (pure interrupt-driven).
+        /// - `Some(0)` — disable busy-polling (same as `None`).
+        /// - `Some(n)` — spin up to `n` times before falling back to events.
+        pub poll_spins: Option<u32>,
     }
 
     impl ResourceId<VirtioDeviceHandle> for VirtioNetHandle {

@@ -302,6 +302,7 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                     diag: args.diag,
                     nic: args.nic,
                     perf_dir: args.perf_dir.clone(),
+                    no_busy_poll: args.no_busy_poll,
                 };
 
                 let artifacts = resolve_artifacts(tests::network::register_artifacts)?;

@@ -13,8 +13,6 @@
 
 use crate::report::MetricResult;
 use anyhow::Context as _;
-use petri::PetriVmInspector;
-use petri::PetriVmRuntime;
 use petri::pipette::cmd;
 use petri_artifacts_common::tags::MachineArch;
 use std::path::PathBuf;
@@ -174,7 +172,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         // Attach erofs + data disk and NIC. Only one modify_backend() call is
         // allowed, so combine all PCIe device setup in a single call.
         let data_disk_path = self.data_disk.clone();
-        let data_disk_poll_spins = if self.no_busy_poll { u32::MAX } else { 0 };
+        let data_disk_poll_spins = if self.no_busy_poll { None } else { Some(1024) };
         match self.backend {
             DiskBackend::VirtioBlk => {
                 // Build the disk resource before entering the closure (which
@@ -195,7 +193,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
                                     virtio_resources::blk::VirtioBlkHandle {
                                         disk: FileDiskHandle(erofs_file.into()).into_resource(),
                                         read_only: true,
-                                        busy_poll_spins: 0,
+                                        poll_spins: None,
                                     }
                                     .into_resource(),
                                 )
@@ -208,7 +206,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
                                     virtio_resources::blk::VirtioBlkHandle {
                                         disk,
                                         read_only: false,
-                                        busy_poll_spins: data_disk_poll_spins,
+                                        poll_spins: data_disk_poll_spins,
                                     }
                                     .into_resource(),
                                 )
@@ -237,7 +235,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
                                         virtio_resources::blk::VirtioBlkHandle {
                                             disk: FileDiskHandle(erofs_file.into()).into_resource(),
                                             read_only: true,
-                                            busy_poll_spins: 0,
+                                            poll_spins: None,
                                         }
                                         .into_resource(),
                                     )
@@ -293,7 +291,6 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         let mut metrics = Vec::new();
         let label = self.backend;
         let pid = state.vm.backend().pid();
-        let inspector = state.vm.backend().inspector();
         let mut recorder = crate::harness::PerfRecorder::new(self.perf_dir.as_deref(), pid)?;
         let dev = &state.disk_device;
 
@@ -356,45 +353,10 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
             metrics.extend(parse_fio_clat(&json, &prefix, "read")?);
         }
 
-        // Collect host-side virtqueue pickup stats from the VMM inspect tree.
-        if self.backend == DiskBackend::VirtioBlk {
-            if let Some(ref inspector) = inspector {
-                match inspector.inspect_all().await {
-                    Ok(tree) => {
-                        extract_pickup_stats(&tree, label, &mut metrics);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = &*e as &dyn std::error::Error,
-                            "failed to inspect VMM for pickup stats"
-                        );
-                    }
-                }
-            }
-        }
-
         Ok(metrics)
     }
 
-    async fn teardown(&self, mut state: DiskIoTestState) -> anyhow::Result<()> {
-        if let Some(inspector) = state.vm.backend().inspector() {
-            match inspector.inspect_all().await {
-                Ok(node) => {
-                    tracing::info!(
-                        test = self.name(),
-                        inspect = %node.json(),
-                        "VMM inspect state at teardown"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        test = self.name(),
-                        error = &*err as &dyn std::error::Error,
-                        "failed to inspect VMM state at teardown"
-                    );
-                }
-            }
-        }
+    async fn teardown(&self, state: DiskIoTestState) -> anyhow::Result<()> {
         state.agent.power_off().await?;
         state.vm.wait_for_clean_teardown().await?;
         Ok(())
@@ -551,106 +513,4 @@ fn parse_fio_clat(
     }
 
     Ok(out)
-}
-
-/// Walk an inspect tree to find a named child.
-fn inspect_child<'a>(node: &'a inspect::Node, name: &str) -> Option<&'a inspect::Node> {
-    match node {
-        inspect::Node::Dir(entries) => entries.iter().find(|e| e.name == name).map(|e| &e.node),
-        _ => None,
-    }
-}
-
-/// Extract a `u64` counter value from an inspect node.
-fn inspect_counter(node: &inspect::Node) -> Option<u64> {
-    match node {
-        inspect::Node::Value(v) => match &v.kind {
-            inspect::ValueKind::Unsigned(n) => Some(*n),
-            inspect::ValueKind::Signed(n) => Some(*n as u64),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Extract virtqueue pickup stats from the VMM inspect tree and append
-/// them as metrics.
-///
-/// The stats live somewhere under the VPCI subtree (exact path varies).
-/// We search for the first node that has `total_dequeues` as a direct
-/// child, which identifies the queue stats node.
-fn extract_pickup_stats(tree: &inspect::Node, label: DiskBackend, metrics: &mut Vec<MetricResult>) {
-    let mut queue_node = None;
-    find_queue_stats(tree, &mut queue_node);
-
-    let Some(qn) = queue_node else {
-        tracing::debug!("no virtqueue pickup stats found in inspect tree");
-        return;
-    };
-
-    let counters = [
-        ("total_dequeues", "count"),
-        ("immediate_dequeues", "count"),
-        ("poll_dequeues", "count"),
-        ("poll_wait_us", "us"),
-        ("event_dequeues", "count"),
-        ("event_wait_us", "us"),
-    ];
-
-    for (name, unit) in counters {
-        if let Some(val) = inspect_child(qn, name).and_then(inspect_counter) {
-            metrics.push(MetricResult {
-                name: format!("virtqueue_{label}_{name}"),
-                unit: unit.to_string(),
-                value: val as f64,
-            });
-        }
-    }
-
-    // Compute mean wait time for poll and event dequeues separately.
-    for (count_field, sum_field, metric_name) in [
-        ("poll_dequeues", "poll_wait_us", "mean_poll_wait_us"),
-        ("event_dequeues", "event_wait_us", "mean_event_wait_us"),
-    ] {
-        let count = inspect_child(qn, count_field).and_then(inspect_counter);
-        let sum = inspect_child(qn, sum_field).and_then(inspect_counter);
-        if let (Some(c), Some(s)) = (count, sum) {
-            if c > 0 {
-                metrics.push(MetricResult {
-                    name: format!("virtqueue_{label}_{metric_name}"),
-                    unit: "us".to_string(),
-                    value: s as f64 / c as f64,
-                });
-            }
-        }
-    }
-
-    // Extract the wait-time histogram buckets.
-    if let Some(inspect::Node::Dir(entries)) = inspect_child(qn, "wait_us") {
-        for entry in entries {
-            if let Some(count) = inspect_counter(&entry.node) {
-                metrics.push(MetricResult {
-                    name: format!("virtqueue_{label}_wait_us_{}", entry.name),
-                    unit: "count".to_string(),
-                    value: count as f64,
-                });
-            }
-        }
-    }
-}
-
-/// Depth-first search for a node that has `total_dequeues` as a child.
-fn find_queue_stats<'a>(node: &'a inspect::Node, result: &mut Option<&'a inspect::Node>) {
-    if result.is_some() {
-        return;
-    }
-    if let inspect::Node::Dir(entries) = node {
-        if entries.iter().any(|e| e.name == "total_dequeues") {
-            *result = Some(node);
-            return;
-        }
-        for entry in entries {
-            find_queue_stats(&entry.node, result);
-        }
-    }
 }

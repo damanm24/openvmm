@@ -1223,7 +1223,7 @@ fn vmbus_storage_controllers_to_openvmm(
                             VirtioBlkHandle {
                                 disk: petri_disk_to_openvmm(disk)?,
                                 read_only: false,
-                                busy_poll_spins: 0,
+                                poll_spins: None,
                             }
                             .into_resource(),
                         )

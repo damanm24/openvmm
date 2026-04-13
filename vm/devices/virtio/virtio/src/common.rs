@@ -18,7 +18,6 @@ use guestmem::GuestMemory;
 use guestmem::GuestMemoryError;
 use inspect::Inspect;
 use inspect_counters::Counter;
-use inspect_counters::Histogram;
 use pal_async::wait::PolledWait;
 use pal_event::Event;
 use std::io::Error;
@@ -28,7 +27,6 @@ use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 use std::task::ready;
-use std::time::Instant;
 use thiserror::Error;
 use vmcore::interrupt::Interrupt;
 
@@ -270,33 +268,6 @@ impl<'a> PeekedWork<'a> {
     }
 }
 
-/// Per-dequeue statistics for the virtio queue.
-///
-/// Every successful `try_next()` in `poll_next_buffer` is classified as one of:
-/// - **immediate**: work was available on the first attempt (queue was not empty)
-/// - **busy_poll**: work was found during the spin-poll phase
-/// - **event**: work was found after falling back to eventfd notification
-///
-/// For non-immediate dequeues, the wait time (from first failed `try_next()`
-/// to eventual success) is accumulated so the mean can be computed.
-#[derive(Debug, Default, Inspect)]
-pub struct QueuePickupStats {
-    /// Total number of work items dequeued.
-    total_dequeues: Counter,
-    /// Work was already available — no waiting at all.
-    immediate_dequeues: Counter,
-    /// Work found during the busy-poll spin phase.
-    poll_dequeues: Counter,
-    /// Cumulative wait time (µs) for poll_dequeues.
-    poll_wait_us: Counter,
-    /// Work found after falling back to eventfd wakeup.
-    event_dequeues: Counter,
-    /// Cumulative wait time (µs) for event_dequeues.
-    event_wait_us: Counter,
-    /// Wait-time histogram across all non-immediate dequeues (µs).
-    wait_us: Histogram<14>,
-}
-
 #[derive(Debug, Inspect)]
 pub struct VirtioQueue {
     #[inspect(flatten)]
@@ -311,15 +282,12 @@ pub struct VirtioQueue {
     busy_poll_budget: Option<BusyPollBudget>,
     /// Number of consecutive empty polls in the current busy-poll cycle.
     poll_misses: u32,
-    /// Timestamp when the queue entered the idle/polling phase.
-    #[inspect(skip)]
-    idle_since: Option<Instant>,
-    /// Whether the current wait has transitioned to the event-based path.
-    #[inspect(skip)]
-    fell_back_to_event: bool,
-    /// Per-dequeue pickup statistics.
-    #[inspect(flatten)]
-    stats: QueuePickupStats,
+    /// Work was already available — no waiting at all.
+    immediate_dequeues: Counter,
+    /// Work found during the busy-poll spin phase.
+    poll_dequeues: Counter,
+    /// Work found after falling back to eventfd wakeup.
+    event_dequeues: Counter,
 }
 
 impl VirtioQueue {
@@ -339,9 +307,9 @@ impl VirtioQueue {
             queue_event,
             busy_poll_budget: None,
             poll_misses: 0,
-            idle_since: None,
-            fell_back_to_event: false,
-            stats: QueuePickupStats::default(),
+            immediate_dequeues: Counter::default(),
+            poll_dequeues: Counter::default(),
+            event_dequeues: Counter::default(),
         })
     }
 
@@ -366,11 +334,26 @@ impl VirtioQueue {
     /// Polls until the queue is kicked by the guest, indicating new work may be
     /// available.
     ///
+    /// If a [`BusyPollBudget`] is configured, this method will first spin-poll
+    /// up to `budget.spins` times — waking the executor on each iteration so
+    /// other tasks can make progress — before falling back to arming kick
+    /// notification and sleeping on the event.
+    ///
     /// Before sleeping, this arms kick notification and rechecks the queue. If
     /// new data arrived during arming, it returns immediately without sleeping.
     /// On wakeup, kicks are suppressed to avoid unnecessary doorbells while
     /// the caller drains the queue.
     pub fn poll_kick(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        // Busy-poll phase: spin for a while before arming the event.
+        if let Some(budget) = self.busy_poll_budget {
+            if self.poll_misses < budget.spins.get() {
+                self.poll_misses += 1;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            // Budget exhausted — fall through to event-based wait.
+        }
+
         if self.core.arm_for_kick() {
             ready!(self.queue_event.wait().poll_unpin(cx)).expect("waits on Event cannot fail");
         }
@@ -457,52 +440,18 @@ impl VirtioQueue {
     ) -> Poll<Result<VirtioQueueCallbackWork, Error>> {
         loop {
             if let Some(work) = self.try_next()? {
-                self.stats.total_dequeues.increment();
-
-                match self.idle_since.take() {
-                    None => {
-                        // Work was available on the very first try_next()
-                        // in this poll cycle — no waiting at all.
-                        self.stats.immediate_dequeues.increment();
-                    }
-                    Some(since) => {
-                        let us = since.elapsed().as_micros() as u64;
-                        self.stats.wait_us.add_sample(us);
-
-                        if self.fell_back_to_event {
-                            self.stats.event_dequeues.increment();
-                            self.stats.event_wait_us.add(us);
-                        } else {
-                            self.stats.poll_dequeues.increment();
-                            self.stats.poll_wait_us.add(us);
-                        }
-                    }
+                // Classify how we got this work item based on the
+                // busy-poll state at the time of dequeue.
+                if self.poll_misses == 0 {
+                    self.immediate_dequeues.increment();
+                } else if self.busy_poll_budget.is_some() {
+                    self.poll_dequeues.increment();
+                } else {
+                    self.event_dequeues.increment();
                 }
-
                 self.poll_misses = 0;
-                self.fell_back_to_event = false;
                 return Poll::Ready(Ok(work));
             }
-
-            // Record the instant we start waiting for work.
-            if self.idle_since.is_none() {
-                self.idle_since = Some(Instant::now());
-            }
-
-            if let Some(budget) = self.busy_poll_budget {
-                if self.poll_misses < budget.spins.get() {
-                    self.poll_misses += 1;
-                    // Re-enter the executor promptly via a self-wake so
-                    // that other tasks (e.g. IO completions) also get a
-                    // chance to run between spins.
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                }
-                // Budget exhausted — fall through to event-based wait.
-                self.poll_misses = 0;
-            }
-
-            self.fell_back_to_event = true;
             ready!(self.poll_kick(cx));
         }
     }

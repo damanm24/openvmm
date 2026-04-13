@@ -6,8 +6,6 @@
 use crate::VirtioBlkDevice;
 use async_trait::async_trait;
 use disk_backend::resolve::ResolveDiskParameters;
-use std::num::NonZeroU32;
-use virtio::BusyPollBudget;
 use virtio::resolve::ResolvedVirtioDevice;
 use virtio::resolve::VirtioResolveInput;
 use virtio_resources::blk::VirtioBlkHandle;
@@ -46,15 +44,11 @@ impl AsyncResolveResource<VirtioDeviceHandle, VirtioBlkHandle> for VirtioBlkReso
             .await?;
 
         let mut dev = VirtioBlkDevice::new(input.driver_source, disk.0, resource.read_only);
-        match resource.busy_poll_spins {
-            // 0 = use the default built into VirtioBlkDevice::new().
-            0 => {}
-            // u32::MAX = explicitly disable busy-polling.
-            u32::MAX => dev.set_busy_poll_budget(None),
-            n => dev.set_busy_poll_budget(Some(BusyPollBudget {
-                spins: NonZeroU32::new(n).unwrap(),
-            })),
-        }
+        dev.set_busy_poll_budget(
+            resource
+                .poll_spins
+                .and_then(VirtioBlkDevice::spins_to_budget),
+        );
         Ok(dev.into())
     }
 }
