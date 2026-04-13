@@ -177,7 +177,7 @@ impl PetriVmConfigOpenVmm {
         self.with_virtio_nic_config(port_name, None)
     }
 
-    /// Enable a virtio-net NIC with explicit busy-poll configuration.
+    /// Enable a virtio-net NIC with explicit halt-poll configuration.
     ///
     /// `poll_spins`: `None` = disabled, `Some(0)` = disabled,
     /// `Some(n)` = spin `n` times.

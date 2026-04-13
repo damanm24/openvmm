@@ -42,8 +42,8 @@ pub struct NetworkTest {
     pub nic: NicBackend,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<std::path::PathBuf>,
-    /// Enable adaptive busy-polling for virtio queues.
-    pub busy_poll: bool,
+    /// Enable adaptive halt-polling for virtio queues.
+    pub halt_poll: bool,
 }
 
 /// State kept across warm iterations: the running VM and pipette agent.
@@ -145,7 +145,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
             })
             .modify_backend({
                 let nic = self.nic;
-                let poll_spins = if self.busy_poll { Some(1024) } else { None };
+                let poll_spins = if self.halt_poll { Some(1024) } else { None };
                 move |c| {
                     let (c, blk_port) = match nic {
                         NicBackend::Vmbus => {

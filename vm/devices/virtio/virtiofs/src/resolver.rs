@@ -60,7 +60,7 @@ impl ResolveResource<VirtioDeviceHandle, VirtioFsHandle> for VirtioFsResolver {
                 anyhow::bail!("section fs not supported on this platform")
             }
         };
-        device.set_busy_poll_budget(
+        device.set_halt_poll_budget(
             resource
                 .poll_spins
                 .and_then(VirtioFsDevice::spins_to_budget),

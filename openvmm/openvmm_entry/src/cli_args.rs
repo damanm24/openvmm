@@ -237,7 +237,7 @@ flags:
 
 options:
     `pcie_port=<name>`             present the disk using pcie under the specified port
-    `poll_spins=<n>`               busy-poll up to n times before falling back to events
+    `poll_spins=<n>`               halt-poll up to n times before falling back to events
 "#)]
     #[clap(long = "virtio-blk")]
     pub virtio_blk: Vec<VirtioBlkCli>,
@@ -469,7 +469,7 @@ options:
     /// Prefix with `uh:` to add this NIC via Mana emulation through OpenHCL,
     /// `vtl2:` to assign this NIC to VTL2, `pcie_port=<port_name>:` to
     /// expose the NIC over emulated PCIe at the specified port, or
-    /// `poll_spins=<n>:` to busy-poll up to n times before falling back to
+    /// `poll_spins=<n>:` to halt-poll up to n times before falling back to
     /// events.
     #[clap(long)]
     pub virtio_net: Vec<VirtioNetCli>,

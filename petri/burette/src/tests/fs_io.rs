@@ -28,8 +28,8 @@ pub struct FsIoTest {
     pub share_dir: Option<PathBuf>,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<PathBuf>,
-    /// Enable adaptive busy-polling for virtio-fs queues.
-    pub busy_poll: bool,
+    /// Enable adaptive halt-polling for virtio-fs queues.
+    pub halt_poll: bool,
 }
 
 /// State kept across warm iterations.
@@ -132,7 +132,7 @@ impl crate::harness::WarmPerfTest for FsIoTest {
             });
 
         // Attach erofs (for fio tooling) and virtio-fs device on PCIe.
-        let data_poll_spins = if self.busy_poll { Some(1024) } else { None };
+        let data_poll_spins = if self.halt_poll { Some(1024) } else { None };
         builder = builder.modify_backend(move |b| {
             b.with_nic()
                 .with_pcie_root_topology(1, 1, 2)

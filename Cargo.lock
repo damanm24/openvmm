@@ -9114,7 +9114,6 @@ dependencies = [
  "futures",
  "guestmem",
  "inspect",
- "inspect_counters",
  "mesh",
  "pal_async",
  "pal_event",

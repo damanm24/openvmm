@@ -29,7 +29,7 @@ use std::task::ready;
 use thiserror::Error;
 use vmcore::interrupt::Interrupt;
 
-/// Adaptive busy-polling state for a virtio queue.
+/// Adaptive halt-polling state for a virtio queue.
 ///
 /// Tracks a spin window that dynamically adjusts between 0 and `max_spins`
 /// using a KVM-style algorithm:
@@ -43,7 +43,7 @@ use vmcore::interrupt::Interrupt;
 /// The net effect is that sustained bursts keep the window near `max_spins`,
 /// while idle queues quickly drop to zero.
 #[derive(Debug, Clone, Copy, Inspect)]
-pub struct BusyPollBudget {
+pub struct HaltPollBudget {
     /// Upper bound for the adaptive spin window.
     pub max_spins: NonZeroU32,
     /// Current number of spins allowed before falling back to events.
@@ -52,7 +52,7 @@ pub struct BusyPollBudget {
     poll_misses: u32,
 }
 
-impl BusyPollBudget {
+impl HaltPollBudget {
     /// Create a new budget with `max_spins` as the ceiling.
     ///
     /// The spin window starts at `max_spins`.
@@ -324,8 +324,8 @@ pub struct VirtioQueue {
     notify_guest: Interrupt,
     #[inspect(skip)]
     queue_event: PolledWait<Event>,
-    /// Optional adaptive busy-poll state. `None` means pure interrupt-driven.
-    busy_poll_budget: Option<BusyPollBudget>,
+    /// Optional adaptive halt-poll state. `None` means pure interrupt-driven.
+    halt_poll_budget: Option<HaltPollBudget>,
 }
 
 impl VirtioQueue {
@@ -343,11 +343,11 @@ impl VirtioQueue {
             complete: complete_work,
             notify_guest: notify,
             queue_event,
-            busy_poll_budget: None,
+            halt_poll_budget: None,
         })
     }
 
-    /// Enable adaptive busy-polling for this queue.
+    /// Enable adaptive halt-polling for this queue.
     ///
     /// When set, the queue's [`Stream`] implementation will spin-poll
     /// before falling back to the event-based path. The spin window
@@ -355,8 +355,8 @@ impl VirtioQueue {
     /// workload.
     ///
     /// Pass `None` to disable (the default).
-    pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
-        self.busy_poll_budget = budget;
+    pub fn set_halt_poll_budget(&mut self, budget: Option<HaltPollBudget>) {
+        self.halt_poll_budget = budget;
     }
 
     /// Returns the current queue progress state.
@@ -370,7 +370,7 @@ impl VirtioQueue {
     /// Polls until the queue is kicked by the guest, indicating new work may be
     /// available.
     ///
-    /// If a [`BusyPollBudget`] is configured, this method will first spin-poll
+    /// If a [`HaltPollBudget`] is configured, this method will first spin-poll
     /// up to `current_spins` times — waking the executor on each iteration so
     /// other tasks can make progress — before falling back to arming kick
     /// notification and sleeping on the event.  The `current_spins` window
@@ -382,8 +382,8 @@ impl VirtioQueue {
     /// On wakeup, kicks are suppressed to avoid unnecessary doorbells while
     /// the caller drains the queue.
     pub fn poll_kick(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        // Busy-poll phase: spin for a while before arming the event.
-        if let Some(budget) = &mut self.busy_poll_budget {
+        // Halt-poll phase: spin for a while before arming the event.
+        if let Some(budget) = &mut self.halt_poll_budget {
             if !budget.record_miss() {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -478,7 +478,7 @@ impl VirtioQueue {
         loop {
             if let Some(work) = self.try_next()? {
                 // Work found — grow the spin window and reset for next cycle.
-                if let Some(budget) = &mut self.busy_poll_budget {
+                if let Some(budget) = &mut self.halt_poll_budget {
                     budget.grow();
                     budget.reset_cycle();
                 }

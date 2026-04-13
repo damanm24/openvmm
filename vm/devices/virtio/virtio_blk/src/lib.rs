@@ -33,7 +33,7 @@ use task_control::InspectTask;
 use task_control::StopTask;
 use task_control::TaskControl;
 use unicycle::FuturesUnordered;
-use virtio::BusyPollBudget;
+use virtio::HaltPollBudget;
 use virtio::DeviceTraits;
 use virtio::DeviceTraitsSharedMemory;
 use virtio::QueueResources;
@@ -63,8 +63,8 @@ pub struct VirtioBlkDevice {
     read_only: bool,
     supports_discard: bool,
     config: VirtioBlkConfig,
-    /// Optional busy-poll budget for the virtqueue. See [`BusyPollBudget`].
-    busy_poll_budget: Option<BusyPollBudget>,
+    /// Optional halt-poll budget for the virtqueue. See [`HaltPollBudget`].
+    halt_poll_budget: Option<HaltPollBudget>,
 }
 
 /// Persistent worker state. Survives across enable/disable cycles.
@@ -294,24 +294,24 @@ impl VirtioBlkDevice {
             read_only,
             supports_discard,
             config,
-            busy_poll_budget: None,
+            halt_poll_budget: None,
         }
     }
 
-    /// Enable adaptive busy-polling for the virtio queue.
+    /// Enable adaptive halt-polling for the virtio queue.
     ///
     /// When set, the queue will adaptively spin-poll for new descriptors
     /// (up to `budget.max_spins` ceiling) before falling back to event-based
     /// notification. This can reduce I/O latency at the cost of CPU.
-    pub fn set_busy_poll_budget(&mut self, budget: Option<BusyPollBudget>) {
-        self.busy_poll_budget = budget;
+    pub fn set_halt_poll_budget(&mut self, budget: Option<HaltPollBudget>) {
+        self.halt_poll_budget = budget;
     }
 
-    /// Convert a spin count to a [`BusyPollBudget`].
+    /// Convert a spin count to a [`HaltPollBudget`].
     ///
-    /// `0` disables busy-polling (`None`), any other value enables it.
-    pub fn spins_to_budget(spins: u32) -> Option<BusyPollBudget> {
-        NonZeroU32::new(spins).map(BusyPollBudget::new)
+    /// `0` disables halt-polling (`None`), any other value enables it.
+    pub fn spins_to_budget(spins: u32) -> Option<HaltPollBudget> {
+        NonZeroU32::new(spins).map(HaltPollBudget::new)
     }
 }
 
@@ -397,7 +397,7 @@ impl VirtioDevice for VirtioBlkDevice {
         )
         .context("failed to create virtio queue")?;
 
-        queue.set_busy_poll_budget(self.busy_poll_budget);
+        queue.set_halt_poll_budget(self.halt_poll_budget);
 
         self.worker.insert(
             self.driver.clone(),
