@@ -49,6 +49,8 @@ enum TestName {
     Network,
     /// Block I/O throughput via fio (Alpine VM + data disk).
     DiskIo,
+    /// Filesystem I/O throughput via fio over virtio-fs.
+    FsIo,
 }
 
 /// Global log source for petri, initialized once.
@@ -148,6 +150,11 @@ struct RunArgs {
     /// to interrupt-driven notification). Useful for A/B latency comparison.
     #[arg(long)]
     busy_poll: bool,
+
+    /// Host directory to share via virtio-fs for the fs_io test.
+    /// If omitted, a temporary directory is created.
+    #[arg(long)]
+    share_dir: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -236,6 +243,7 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
         TestName::Memory,
         TestName::Network,
         TestName::DiskIo,
+        TestName::FsIo,
     ];
     let tests_to_run: Vec<TestName> = if let Some(name) = args.test {
         vec![name]
@@ -333,6 +341,23 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                 .context("disk_io test failed")?;
                 all_stats.extend(stats);
             }
+            TestName::FsIo => {
+                let test = tests::fs_io::FsIoTest {
+                    diag: args.diag,
+                    share_dir: args.share_dir.clone(),
+                    perf_dir: args.perf_dir.clone(),
+                    busy_poll: args.busy_poll,
+                };
+
+                let artifacts = resolve_artifacts(tests::fs_io::register_artifacts)?;
+                let resolver = petri::ArtifactResolver::resolver(&artifacts);
+
+                let stats = pal_async::DefaultPool::run_with(async |driver| {
+                    harness::run_warm_test(&test, &resolver, &driver, args.iterations).await
+                })
+                .context("fs_io test failed")?;
+                all_stats.extend(stats);
+            }
         }
     }
 
@@ -363,6 +388,7 @@ fn cmd_package(args: PackageArgs) -> anyhow::Result<()> {
         tests::memory::register_artifacts,
         tests::network::register_artifacts,
         tests::disk_io::register_artifacts,
+        tests::fs_io::register_artifacts,
     ];
 
     let mut requirements = petri::TestArtifactRequirements::new();

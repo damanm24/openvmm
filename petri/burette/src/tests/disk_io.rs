@@ -11,6 +11,8 @@
 //!
 //! Supports both virtio-blk and storvsc (synthetic SCSI) disk backends.
 
+use super::fio_helpers;
+use super::fio_helpers::FioTarget;
 use crate::report::MetricResult;
 use anyhow::Context as _;
 use petri::pipette::cmd;
@@ -61,30 +63,16 @@ pub struct DiskIoTestState {
     disk_device: String,
 }
 
-fn build_firmware(resolver: &petri::ArtifactResolver<'_>) -> petri::Firmware {
-    petri::Firmware::linux_direct(resolver, MachineArch::host())
-}
-
-fn require_petritools_erofs(
-    resolver: &petri::ArtifactResolver<'_>,
-) -> petri_artifacts_core::ResolvedArtifact {
-    use petri_artifacts_vmm_test::artifacts::petritools::*;
-    match MachineArch::host() {
-        MachineArch::X86_64 => resolver.require(PETRITOOLS_EROFS_X64).erase(),
-        MachineArch::Aarch64 => resolver.require(PETRITOOLS_EROFS_AARCH64).erase(),
-    }
-}
-
 /// Register artifacts needed by the disk I/O test.
 pub fn register_artifacts(resolver: &petri::ArtifactResolver<'_>) {
-    let firmware = build_firmware(resolver);
+    let firmware = fio_helpers::build_firmware(resolver);
     petri::PetriVmArtifacts::<petri::openvmm::OpenVmmPetriBackend>::new(
         resolver,
         firmware,
         MachineArch::host(),
         true,
     );
-    require_petritools_erofs(resolver);
+    fio_helpers::require_petritools_erofs(resolver);
 }
 
 /// GUID for the data disk SCSI controller (used for storvsc backend).
@@ -137,7 +125,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
             );
         }
 
-        let firmware = build_firmware(resolver);
+        let firmware = fio_helpers::build_firmware(resolver);
 
         let artifacts = petri::PetriVmArtifacts::<petri::openvmm::OpenVmmPetriBackend>::new(
             resolver,
@@ -156,7 +144,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         };
 
         // Open the perf rootfs erofs image for the virtio-blk device.
-        let erofs_path = require_petritools_erofs(resolver);
+        let erofs_path = fio_helpers::require_petritools_erofs(resolver);
         let erofs_file = fs_err::File::open(&erofs_path)?;
 
         let mut builder = petri::PetriVmBuilder::minimal(params, artifacts, driver)?
@@ -265,14 +253,7 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
         let (vm, agent) = builder.run().await.context("failed to boot minimal VM")?;
 
         // Mount the erofs image and prepare chroot (fio is pre-installed).
-        agent
-            .mount("/dev/vda", "/perf", "erofs", 1 /* MS_RDONLY */, true)
-            .await
-            .context("failed to mount erofs on /dev/vda")?;
-        agent
-            .prepare_chroot("/perf")
-            .await
-            .context("failed to prepare chroot at /perf")?;
+        fio_helpers::mount_erofs_chroot(&agent).await?;
 
         // Discover the data disk device.
         let disk_device = discover_data_disk(&agent, self.backend)
@@ -288,72 +269,14 @@ impl crate::harness::WarmPerfTest for DiskIoTest {
     }
 
     async fn run_once(&self, state: &mut DiskIoTestState) -> anyhow::Result<Vec<MetricResult>> {
-        let mut metrics = Vec::new();
-        let label = self.backend;
+        let label = self.backend.to_string();
         let pid = state.vm.backend().pid();
         let mut recorder = crate::harness::PerfRecorder::new(self.perf_dir.as_deref(), pid)?;
-        let dev = &state.disk_device;
+        let target = FioTarget::BlockDevice {
+            device: &state.disk_device,
+        };
 
-        // Each fio job: 10s runtime + 5s ramp = 15s.
-        // For sequential modes we only extract BW; for random modes we extract
-        // both BW and IOPS from a single fio run to avoid redundant work.
-        let fio_jobs: &[(&str, &str)] = &[
-            // (fio_rw_mode, primary_field)
-            ("read", "read"),
-            ("write", "write"),
-            ("randread", "read"),
-            ("randwrite", "write"),
-        ];
-
-        for &(rw_mode, field) in fio_jobs {
-            let is_random = rw_mode.starts_with("rand");
-            let phase = if is_random {
-                rw_mode.strip_prefix("rand").unwrap()
-            } else {
-                rw_mode
-            };
-            let prefix = if is_random { "rand" } else { "seq" };
-
-            let perf_label = format!("fio_{label}_{prefix}_{phase}");
-            recorder.start(&perf_label)?;
-
-            let json = run_fio_job(&state.agent, dev, rw_mode, 32)
-                .await
-                .with_context(|| format!("fio {rw_mode} failed"))?;
-
-            recorder.stop()?;
-
-            let metric_prefix = format!("fio_{label}_{prefix}_{phase}");
-            metrics.push(parse_fio_bw(&json, &format!("{metric_prefix}_bw"), field)?);
-            metrics.extend(parse_fio_clat(&json, &metric_prefix, field)?);
-
-            if is_random {
-                metrics.push(parse_fio_iops(
-                    &json,
-                    &format!("{metric_prefix}_iops"),
-                    field,
-                )?);
-            }
-        }
-
-        // iodepth=1 random-read job — every IO goes through the notification
-        // path, so the clat directly reflects notification overhead.
-        {
-            let perf_label = format!("fio_{label}_lat_randread");
-            recorder.start(&perf_label)?;
-
-            let json = run_fio_job(&state.agent, dev, "randread", 1)
-                .await
-                .context("fio iodepth=1 randread failed")?;
-
-            recorder.stop()?;
-
-            let prefix = format!("fio_{label}_qd1_rand_read");
-            metrics.push(parse_fio_iops(&json, &format!("{prefix}_iops"), "read")?);
-            metrics.extend(parse_fio_clat(&json, &prefix, "read")?);
-        }
-
-        Ok(metrics)
+        fio_helpers::run_standard_fio_suite(&state.agent, &target, &label, &mut recorder).await
     }
 
     async fn teardown(&self, state: DiskIoTestState) -> anyhow::Result<()> {
@@ -429,88 +352,4 @@ async fn discover_data_disk(
             Ok(format!("/dev/{dev}"))
         }
     }
-}
-
-/// Run a single fio job and return the raw JSON output.
-async fn run_fio_job(
-    agent: &petri::pipette::PipetteClient,
-    device: &str,
-    rw_mode: &str,
-    iodepth: u32,
-) -> anyhow::Result<String> {
-    let mut sh = agent.unix_shell();
-    sh.chroot("/perf");
-    let iodepth_str = iodepth.to_string();
-    let output: String = cmd!(sh, "fio --name=test --filename={device} --rw={rw_mode} --bs=4k --ioengine=io_uring --direct=1 --runtime=10 --ramp_time=5 --iodepth={iodepth_str} --numjobs=1 --percentile_list=50:99:99.9 --output-format=json")
-        .read()
-        .await
-        .with_context(|| format!("fio {rw_mode} on {device} failed"))?;
-
-    Ok(output)
-}
-
-/// Parse bandwidth (MiB/s) from fio JSON output.
-fn parse_fio_bw(json: &str, metric_name: &str, field: &str) -> anyhow::Result<MetricResult> {
-    let v: serde_json::Value = serde_json::from_str(json).context("failed to parse fio JSON")?;
-
-    let bw_bytes = v["jobs"][0][field]["bw_bytes"].as_f64().with_context(|| {
-        tracing::error!(json = %json, "failed to find {field}.bw_bytes in fio output");
-        format!("missing {field}.bw_bytes in fio output for {metric_name}")
-    })?;
-
-    let mib_s = bw_bytes / (1024.0 * 1024.0);
-    Ok(MetricResult {
-        name: metric_name.to_string(),
-        unit: "MiB/s".to_string(),
-        value: mib_s,
-    })
-}
-
-/// Parse IOPS from fio JSON output.
-fn parse_fio_iops(json: &str, metric_name: &str, field: &str) -> anyhow::Result<MetricResult> {
-    let v: serde_json::Value = serde_json::from_str(json).context("failed to parse fio JSON")?;
-
-    let iops = v["jobs"][0][field]["iops"].as_f64().with_context(|| {
-        tracing::error!(json = %json, "failed to find {field}.iops in fio output");
-        format!("missing {field}.iops in fio output for {metric_name}")
-    })?;
-
-    Ok(MetricResult {
-        name: metric_name.to_string(),
-        unit: "IOPS".to_string(),
-        value: iops,
-    })
-}
-
-/// Parse completion latency (clat) mean and p99 from fio JSON output.
-///
-/// fio reports `clat_ns` in nanoseconds; we convert to microseconds.
-fn parse_fio_clat(
-    json: &str,
-    metric_prefix: &str,
-    field: &str,
-) -> anyhow::Result<Vec<MetricResult>> {
-    let v: serde_json::Value = serde_json::from_str(json).context("failed to parse fio JSON")?;
-    let clat = &v["jobs"][0][field]["clat_ns"];
-
-    let mut out = Vec::new();
-
-    if let Some(mean_ns) = clat["mean"].as_f64() {
-        out.push(MetricResult {
-            name: format!("{metric_prefix}_clat_mean"),
-            unit: "us".to_string(),
-            value: mean_ns / 1000.0,
-        });
-    }
-
-    // fio uses string keys like "99.000000" for percentiles.
-    if let Some(p99_ns) = clat["percentile"]["99.000000"].as_f64() {
-        out.push(MetricResult {
-            name: format!("{metric_prefix}_clat_p99"),
-            unit: "us".to_string(),
-            value: p99_ns / 1000.0,
-        });
-    }
-
-    Ok(out)
 }

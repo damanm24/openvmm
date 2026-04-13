@@ -49,6 +49,12 @@ pub mod fs {
     pub struct VirtioFsHandle {
         pub tag: String,
         pub fs: VirtioFsBackend,
+        /// Number of spin-polls before falling back to event-based notification.
+        ///
+        /// - `None` — disable busy-polling (pure interrupt-driven).
+        /// - `Some(0)` — disable busy-polling (same as `None`).
+        /// - `Some(n)` — spin up to `n` times before falling back to events.
+        pub poll_spins: Option<u32>,
     }
 
     #[derive(MeshPayload)]
