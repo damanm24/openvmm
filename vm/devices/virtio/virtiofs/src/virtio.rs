@@ -31,12 +31,6 @@ use zerocopy::Immutable;
 use zerocopy::IntoBytes;
 use zerocopy::KnownLayout;
 
-/// Default halt-poll spin budget for virtio-fs request queues.
-const DEFAULT_HALT_POLL_SPINS: std::num::NonZeroU32 = match std::num::NonZeroU32::new(1024) {
-    Some(v) => v,
-    None => unreachable!(),
-};
-
 /// PCI configuration space values for virtio-fs devices.
 #[repr(C)]
 #[derive(IntoBytes, Immutable, KnownLayout)]
@@ -175,7 +169,7 @@ impl VirtioDevice for VirtioFsDevice {
         )
         .context("failed to create virtio queue")?;
 
-        queue.set_halt_poll_budget(Some(HaltPollBudget::new(DEFAULT_HALT_POLL_SPINS)));
+        queue.set_halt_poll_budget(Some(HaltPollBudget::new(HaltPollBudget::DEFAULT_MAX_SPINS)));
 
         tc.insert(
             self.driver.clone(),

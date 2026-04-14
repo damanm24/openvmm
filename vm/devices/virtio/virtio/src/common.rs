@@ -53,6 +53,9 @@ pub struct HaltPollBudget {
 }
 
 impl HaltPollBudget {
+    /// Default maximum spin count used by virtio device queues (1024).
+    pub const DEFAULT_MAX_SPINS: NonZeroU32 = NonZeroU32::new(1024).unwrap();
+
     /// Create a new budget with `max_spins` as the ceiling.
     ///
     /// The spin window starts at `max_spins`.

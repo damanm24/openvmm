@@ -24,7 +24,6 @@ use pal_async::wait::PolledWait;
 use scsi_buffers::RequestBuffers;
 use std::future::Future;
 use std::future::poll_fn;
-use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
@@ -52,12 +51,6 @@ use zerocopy::FromZeros;
 use zerocopy::IntoBytes;
 
 const MAX_IO_DEPTH: usize = 64;
-
-/// Default halt-poll spin budget for the virtio-blk request queue.
-const DEFAULT_HALT_POLL_SPINS: NonZeroU32 = match NonZeroU32::new(1024) {
-    Some(v) => v,
-    None => unreachable!(),
-};
 
 /// The virtio-blk device.
 #[derive(InspectMut)]
@@ -382,7 +375,7 @@ impl VirtioDevice for VirtioBlkDevice {
         )
         .context("failed to create virtio queue")?;
 
-        queue.set_halt_poll_budget(Some(HaltPollBudget::new(DEFAULT_HALT_POLL_SPINS)));
+        queue.set_halt_poll_budget(Some(HaltPollBudget::new(HaltPollBudget::DEFAULT_MAX_SPINS)));
 
         self.worker.insert(
             self.driver.clone(),
