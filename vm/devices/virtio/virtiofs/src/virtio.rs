@@ -11,13 +11,11 @@ use inspect::InspectMut;
 use pal_async::wait::PolledWait;
 use std::io;
 use std::io::Write;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use task_control::AsyncRun;
 use task_control::Cancelled;
 use task_control::StopTask;
 use task_control::TaskControl;
-use virtio::HaltPollBudget;
 use virtio::DeviceTraits;
 use virtio::DeviceTraitsSharedMemory;
 use virtio::QueueResources;
@@ -56,7 +54,6 @@ pub struct VirtioFsDevice {
     shared_memory_region: Option<Arc<dyn MappedMemoryRegion>>,
     #[inspect(skip)]
     notify_corruption: Arc<dyn Fn() + Sync + Send>,
-    halt_poll_budget: Option<HaltPollBudget>,
 }
 
 impl VirtioFsDevice {
@@ -95,24 +92,7 @@ impl VirtioFsDevice {
             shmem_size,
             shared_memory_region: None,
             notify_corruption,
-            halt_poll_budget: None,
         }
-    }
-
-    /// Enable adaptive halt-polling for the virtio queues.
-    ///
-    /// When set, the queue will spin-poll for new descriptors up to
-    /// `budget.max_spins` ceiling) before falling back to event-based
-    /// notification. This can reduce I/O latency at the cost of CPU.
-    pub fn set_halt_poll_budget(&mut self, budget: Option<HaltPollBudget>) {
-        self.halt_poll_budget = budget;
-    }
-
-    /// Convert a spin count to a [`HaltPollBudget`].
-    ///
-    /// `0` disables halt-polling (`None`), any other value enables it.
-    pub fn spins_to_budget(spins: u32) -> Option<HaltPollBudget> {
-        NonZeroU32::new(spins).map(HaltPollBudget::new)
     }
 }
 
@@ -178,7 +158,7 @@ impl VirtioDevice for VirtioFsDevice {
 
         let queue_event = PolledWait::new(&self.driver, resources.event)
             .context("failed to create polled wait")?;
-        let mut queue = VirtioQueue::new(
+        let queue = VirtioQueue::new(
             features.clone(),
             resources.params,
             resources.guest_memory.clone(),
@@ -187,8 +167,6 @@ impl VirtioDevice for VirtioFsDevice {
             initial_state,
         )
         .context("failed to create virtio queue")?;
-
-        queue.set_halt_poll_budget(self.halt_poll_budget);
 
         tc.insert(
             self.driver.clone(),

@@ -42,8 +42,7 @@ pub struct NetworkTest {
     pub nic: NicBackend,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<std::path::PathBuf>,
-    /// Enable adaptive halt-polling for virtio queues.
-    pub halt_poll: bool,
+
 }
 
 /// State kept across warm iterations: the running VM and pipette agent.
@@ -145,7 +144,6 @@ impl crate::harness::WarmPerfTest for NetworkTest {
             })
             .modify_backend({
                 let nic = self.nic;
-                let poll_spins = if self.halt_poll { Some(1024) } else { None };
                 move |c| {
                     let (c, blk_port) = match nic {
                         NicBackend::Vmbus => {
@@ -153,7 +151,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
                         }
                         NicBackend::VirtioNet => (
                             c.with_pcie_root_topology(1, 1, 2)
-                                .with_virtio_nic_config("s0rc0rp0", poll_spins),
+                                .with_virtio_nic("s0rc0rp0"),
                             "s0rc0rp1",
                         ),
                     };
@@ -170,7 +168,6 @@ impl crate::harness::WarmPerfTest for NetworkTest {
                                 virtio_resources::blk::VirtioBlkHandle {
                                     disk: FileDiskHandle(erofs_file.into()).into_resource(),
                                     read_only: true,
-                                    poll_spins: None,
                                 }
                                 .into_resource(),
                             )

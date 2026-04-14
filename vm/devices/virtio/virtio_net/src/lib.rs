@@ -323,7 +323,7 @@ impl VirtioDevice for Device {
         )
         .context("failed creating virtio net queue")?;
 
-        // Note: halt-poll is intentionally not applied to virtio_net queues.
+        // Note: busy-poll is intentionally not applied to virtio_net queues.
         // The net device's main loop multiplexes TX kick, RX kick, and
         // endpoint readiness in a single poll_fn. Spinning in poll_kick
         // re-enters that poll_fn on every iteration — re-polling all three

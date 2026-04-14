@@ -191,7 +191,6 @@ async fn vpci_filter(config: PetriVmBuilder<OpenVmmPetriBackend>) -> anyhow::Res
                                 max_queues: None,
                                 mac_address: MacAddress::new([0x00, 0x15, 0x5D, 0x12, 0x12, 0x12]),
                                 endpoint: NullHandle.into_resource(),
-                                poll_spins: None,
                             }
                             .into_resource(),
                         )
@@ -295,7 +294,6 @@ async fn virtio_blk_device(config: PetriVmBuilder<OpenVmmPetriBackend>) -> anyho
                     VirtioBlkHandle {
                         disk: disk_resource,
                         read_only: false,
-                        poll_spins: None,
                     }
                     .into_resource(),
                 ));

@@ -237,10 +237,9 @@ flags:
 
 options:
     `pcie_port=<name>`             present the disk using pcie under the specified port
-    `poll_spins=<n>`               halt-poll up to n times before falling back to events
 "#)]
     #[clap(long = "virtio-blk")]
-    pub virtio_blk: Vec<VirtioBlkCli>,
+    pub virtio_blk: Vec<DiskCli>,
 
     /// Attach a vhost-user device via a Unix socket.
     ///
@@ -467,13 +466,10 @@ options:
     /// none)
     ///
     /// Prefix with `uh:` to add this NIC via Mana emulation through OpenHCL,
-    /// `vtl2:` to assign this NIC to VTL2, `pcie_port=<port_name>:` to
-    /// expose the NIC over emulated PCIe at the specified port, or
-    /// `poll_spins=<n>:` to halt-poll up to n times before falling back to
-    /// events.
+    /// `vtl2:` to assign this NIC to VTL2, or `pcie_port=<port_name>:` to
+    /// expose the NIC over emulated PCIe at the specified port.
     #[clap(long)]
-    pub virtio_net: Vec<VirtioNetCli>,
-
+    pub virtio_net: Vec<NicConfigCli>,
     /// send log output from the worker process to a file instead of stderr. the file will be overwritten.
     #[clap(long, value_name = "PATH")]
     pub log_file: Option<PathBuf>,
@@ -1258,38 +1254,6 @@ impl FromStr for DiskCli {
     }
 }
 
-/// Virtio-blk CLI config, wrapping [`DiskCli`] with virtio-specific options.
-///
-/// Parses the same comma-separated format as `DiskCli`, but recognises an
-/// additional `poll_spins=N` option that is stripped before delegation.
-#[derive(Clone)]
-pub struct VirtioBlkCli {
-    pub disk: DiskCli,
-    pub poll_spins: Option<u32>,
-}
-
-impl FromStr for VirtioBlkCli {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> anyhow::Result<Self> {
-        let mut poll_spins = None;
-        let mut remaining: Vec<&str> = Vec::new();
-
-        for (i, part) in s.split(',').enumerate() {
-            if i > 0 {
-                if let Some(val) = part.strip_prefix("poll_spins=") {
-                    poll_spins = Some(val.parse::<u32>().context("invalid value for poll_spins")?);
-                    continue;
-                }
-            }
-            remaining.push(part);
-        }
-
-        let disk: DiskCli = remaining.join(",").parse()?;
-        Ok(VirtioBlkCli { disk, poll_spins })
-    }
-}
-
 // <kind>[,ro,s]
 #[derive(Clone)]
 pub struct IdeDiskCli {
@@ -1576,48 +1540,6 @@ impl FromStr for NicConfigCli {
             underhill,
             pcie_port,
         })
-    }
-}
-
-/// Virtio-net CLI config, wrapping [`NicConfigCli`] with virtio-specific
-/// options.
-///
-/// Parses the same colon-prefixed format as `NicConfigCli`, but recognises
-/// an additional `poll_spins=N:` prefix that is stripped before delegation.
-#[derive(Clone)]
-pub struct VirtioNetCli {
-    pub nic: NicConfigCli,
-    pub poll_spins: Option<u32>,
-}
-
-impl FromStr for VirtioNetCli {
-    type Err = String;
-
-    fn from_str(mut s: &str) -> Result<Self, Self::Err> {
-        let mut poll_spins = None;
-
-        // Scan colon-separated prefixes for virtio-specific options.
-        // Stop at the first prefix we don't recognise, leaving it for
-        // NicConfigCli to parse.
-        while let Some((opt, rest)) = s.split_once(':') {
-            if let Some((key, val)) = opt.split_once('=') {
-                match key {
-                    "poll_spins" => {
-                        poll_spins = Some(
-                            val.parse::<u32>()
-                                .map_err(|_| "invalid value for poll_spins")?,
-                        );
-                        s = rest;
-                    }
-                    _ => break,
-                }
-            } else {
-                break;
-            }
-        }
-
-        let nic: NicConfigCli = s.parse()?;
-        Ok(VirtioNetCli { nic, poll_spins })
     }
 }
 

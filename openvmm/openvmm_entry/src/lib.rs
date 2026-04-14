@@ -488,17 +488,13 @@ async fn vm_config_from_command_line(
         )?;
     }
 
-    for cli_args::VirtioBlkCli {
-        disk:
-            cli_args::DiskCli {
-                vtl,
-                kind,
-                read_only,
-                is_dvd,
-                underhill,
-                pcie_port,
-            },
-        poll_spins,
+    for cli_args::DiskCli {
+        vtl,
+        kind,
+        read_only,
+        is_dvd,
+        underhill,
+        pcie_port,
     } in &opt.virtio_blk
     {
         if underhill.is_some() {
@@ -509,7 +505,6 @@ async fn vm_config_from_command_line(
             None,
             storage_builder::DiskLocation::VirtioBlk {
                 pcie_port: pcie_port.clone(),
-                poll_spins: *poll_spins,
             },
             kind,
             *is_dvd,
@@ -1343,8 +1338,7 @@ async fn vm_config_from_command_line(
         }
     };
 
-    for virtio_cfg in &opt.virtio_net {
-        let cli_cfg = &virtio_cfg.nic;
+    for cli_cfg in &opt.virtio_net {
         if cli_cfg.underhill {
             anyhow::bail!("use --net uh:[...] to add underhill NICs")
         }
@@ -1353,7 +1347,6 @@ async fn vm_config_from_command_line(
             max_queues: vport.max_queues,
             mac_address: vport.mac_address,
             endpoint: vport.endpoint,
-            poll_spins: virtio_cfg.poll_spins,
         }
         .into_resource();
         if let Some(pcie_port) = &cli_cfg.pcie_port {
@@ -1373,7 +1366,6 @@ async fn vm_config_from_command_line(
                 root_path: args.path.clone(),
                 mount_options: args.options.clone(),
             },
-            poll_spins: None,
         }
         .into_resource();
         if let Some(pcie_port) = &args.pcie_port {
@@ -1392,7 +1384,6 @@ async fn vm_config_from_command_line(
             fs: virtio_resources::fs::VirtioFsBackend::SectionFs {
                 root_path: args.path.clone(),
             },
-            poll_spins: None,
         }
         .into_resource();
         if let Some(pcie_port) = &args.pcie_port {

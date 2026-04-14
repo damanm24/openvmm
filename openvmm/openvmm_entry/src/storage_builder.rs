@@ -51,7 +51,6 @@ pub(super) struct StorageBuilder {
 struct VirtioBlkDisk {
     disk: Resource<DiskHandleKind>,
     read_only: bool,
-    poll_spins: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -61,7 +60,6 @@ pub enum DiskLocation {
     Nvme(Option<u32>, Option<String>),
     VirtioBlk {
         pcie_port: Option<String>,
-        poll_spins: Option<u32>,
     },
 }
 
@@ -267,7 +265,6 @@ impl StorageBuilder {
             }
             DiskLocation::VirtioBlk {
                 pcie_port,
-                poll_spins,
             } => {
                 if vtl != DeviceVtl::Vtl0 {
                     anyhow::bail!("virtio-blk only supported for VTL0");
@@ -278,7 +275,6 @@ impl StorageBuilder {
                 let vblk = VirtioBlkDisk {
                     disk,
                     read_only,
-                    poll_spins,
                 };
                 if let Some(port) = pcie_port {
                     self.pcie_virtio_blk_disks.push((port, vblk));
@@ -514,7 +510,6 @@ impl StorageBuilder {
                     VirtioBlkHandle {
                         disk: vblk.disk,
                         read_only: vblk.read_only,
-                        poll_spins: vblk.poll_spins,
                     }
                     .into_resource(),
                 )
@@ -529,7 +524,6 @@ impl StorageBuilder {
                     VirtioBlkHandle {
                         disk: vblk.disk,
                         read_only: vblk.read_only,
-                        poll_spins: vblk.poll_spins,
                     }
                     .into_resource(),
                 )

@@ -146,11 +146,6 @@ struct RunArgs {
     #[arg(long, default_value = "4")]
     data_disk_size_gib: u64,
 
-    /// Enable virtio adaptive halt-polling (spin-polls before falling back
-    /// to interrupt-driven notification). Useful for A/B latency comparison.
-    #[arg(long)]
-    halt_poll: bool,
-
     /// Host directory to share via virtio-fs for the fs_io test.
     /// If omitted, a temporary directory is created.
     #[arg(long)]
@@ -310,7 +305,6 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                     diag: args.diag,
                     nic: args.nic,
                     perf_dir: args.perf_dir.clone(),
-                    halt_poll: args.halt_poll,
                 };
 
                 let artifacts = resolve_artifacts(tests::network::register_artifacts)?;
@@ -329,7 +323,6 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                     data_disk: args.data_disk.clone(),
                     data_disk_size_gib: args.data_disk_size_gib,
                     perf_dir: args.perf_dir.clone(),
-                    halt_poll: args.halt_poll,
                 };
 
                 let artifacts = resolve_artifacts(tests::disk_io::register_artifacts)?;
@@ -346,7 +339,6 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                     diag: args.diag,
                     share_dir: args.share_dir.clone(),
                     perf_dir: args.perf_dir.clone(),
-                    halt_poll: args.halt_poll,
                 };
 
                 let artifacts = resolve_artifacts(tests::fs_io::register_artifacts)?;

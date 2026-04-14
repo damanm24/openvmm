@@ -49,12 +49,6 @@ pub mod fs {
     pub struct VirtioFsHandle {
         pub tag: String,
         pub fs: VirtioFsBackend,
-        /// Number of spin-polls before falling back to event-based notification.
-        ///
-        /// - `None` — disable halt-polling (pure interrupt-driven).
-        /// - `Some(0)` — disable halt-polling (same as `None`).
-        /// - `Some(n)` — spin up to `n` times before falling back to events.
-        pub poll_spins: Option<u32>,
     }
 
     #[derive(MeshPayload)]
@@ -112,12 +106,6 @@ pub mod blk {
     pub struct VirtioBlkHandle {
         pub disk: Resource<DiskHandleKind>,
         pub read_only: bool,
-        /// Number of spin-polls before falling back to event-based notification.
-        ///
-        /// - `None` — disable halt-polling (pure interrupt-driven).
-        /// - `Some(0)` — disable halt-polling (same as `None`).
-        /// - `Some(n)` — spin up to `n` times before falling back to events.
-        pub poll_spins: Option<u32>,
     }
 
     impl ResourceId<VirtioDeviceHandle> for VirtioBlkHandle {
@@ -138,12 +126,6 @@ pub mod net {
         pub max_queues: Option<u16>,
         pub mac_address: MacAddress,
         pub endpoint: Resource<NetEndpointHandleKind>,
-        /// Number of spin-polls before falling back to event-based notification.
-        ///
-        /// - `None` — disable halt-polling (pure interrupt-driven).
-        /// - `Some(0)` — disable halt-polling (same as `None`).
-        /// - `Some(n)` — spin up to `n` times before falling back to events.
-        pub poll_spins: Option<u32>,
     }
 
     impl ResourceId<VirtioDeviceHandle> for VirtioNetHandle {

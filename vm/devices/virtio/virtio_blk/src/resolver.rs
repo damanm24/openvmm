@@ -43,12 +43,7 @@ impl AsyncResolveResource<VirtioDeviceHandle, VirtioBlkHandle> for VirtioBlkReso
             )
             .await?;
 
-        let mut dev = VirtioBlkDevice::new(input.driver_source, disk.0, resource.read_only);
-        dev.set_halt_poll_budget(
-            resource
-                .poll_spins
-                .and_then(VirtioBlkDevice::spins_to_budget),
-        );
+        let dev = VirtioBlkDevice::new(input.driver_source, disk.0, resource.read_only);
         Ok(dev.into())
     }
 }
