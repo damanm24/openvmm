@@ -488,27 +488,25 @@ async fn vm_config_from_command_line(
         )?;
     }
 
-    for cli_args::DiskCli {
+    for &cli_args::DiskCli {
         vtl,
-        kind,
+        ref kind,
         read_only,
         is_dvd,
-        underhill,
-        pcie_port,
+        ref underhill,
+        ref pcie_port,
     } in &opt.virtio_blk
     {
         if underhill.is_some() {
             anyhow::bail!("underhill not supported with virtio-blk");
         }
         storage.add(
-            *vtl,
+            vtl,
             None,
-            storage_builder::DiskLocation::VirtioBlk {
-                pcie_port: pcie_port.clone(),
-            },
+            storage_builder::DiskLocation::VirtioBlk(pcie_port.clone()),
             kind,
-            *is_dvd,
-            *read_only,
+            is_dvd,
+            read_only,
         )?;
     }
 

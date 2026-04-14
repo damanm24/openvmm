@@ -42,7 +42,6 @@ pub struct NetworkTest {
     pub nic: NicBackend,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<std::path::PathBuf>,
-
 }
 
 /// State kept across warm iterations: the running VM and pipette agent.

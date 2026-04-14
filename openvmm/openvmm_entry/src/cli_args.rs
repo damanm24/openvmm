@@ -470,6 +470,7 @@ options:
     /// expose the NIC over emulated PCIe at the specified port.
     #[clap(long)]
     pub virtio_net: Vec<NicConfigCli>,
+
     /// send log output from the worker process to a file instead of stderr. the file will be overwritten.
     #[clap(long, value_name = "PATH")]
     pub log_file: Option<PathBuf>,

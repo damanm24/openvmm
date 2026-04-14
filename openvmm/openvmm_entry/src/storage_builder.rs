@@ -58,9 +58,7 @@ pub enum DiskLocation {
     Ide(Option<u8>, Option<u8>),
     Scsi(Option<u8>),
     Nvme(Option<u32>, Option<String>),
-    VirtioBlk {
-        pcie_port: Option<String>,
-    },
+    VirtioBlk(Option<String>),
 }
 
 impl From<UnderhillDiskSource> for DiskLocation {
@@ -263,19 +261,14 @@ impl StorageBuilder {
                 });
                 Some(nsid)
             }
-            DiskLocation::VirtioBlk {
-                pcie_port,
-            } => {
+            DiskLocation::VirtioBlk(pcie_port) => {
                 if vtl != DeviceVtl::Vtl0 {
                     anyhow::bail!("virtio-blk only supported for VTL0");
                 }
                 if is_dvd {
                     anyhow::bail!("dvd not supported with virtio-blk");
                 }
-                let vblk = VirtioBlkDisk {
-                    disk,
-                    read_only,
-                };
+                let vblk = VirtioBlkDisk { disk, read_only };
                 if let Some(port) = pcie_port {
                     self.pcie_virtio_blk_disks.push((port, vblk));
                 } else {
@@ -321,7 +314,7 @@ impl StorageBuilder {
                     NVME_VTL0_INSTANCE_ID
                 },
             ),
-            DiskLocation::VirtioBlk { .. } => {
+            DiskLocation::VirtioBlk(_) => {
                 anyhow::bail!("underhill not supported with virtio-blk")
             }
         };
@@ -342,7 +335,7 @@ impl StorageBuilder {
                 let nsid = nsid.unwrap_or(self.underhill_nvme_luns.len() as u32 + 1);
                 (&mut self.underhill_nvme_luns, nsid)
             }
-            DiskLocation::VirtioBlk { .. } => {
+            DiskLocation::VirtioBlk(_) => {
                 anyhow::bail!("underhill not supported with virtio-blk")
             }
         };
