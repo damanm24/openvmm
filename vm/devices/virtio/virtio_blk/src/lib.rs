@@ -28,7 +28,7 @@ use std::pin::Pin;
 use std::task::Context;
 use std::task::Poll;
 use task_control::AsyncRun;
-use task_control::InspectTaskMut;
+use task_control::InspectTask;
 use task_control::StopTask;
 use task_control::TaskControl;
 use unicycle::FuturesUnordered;
@@ -55,7 +55,7 @@ const MAX_IO_DEPTH: usize = 64;
 /// The virtio-blk device.
 #[derive(InspectMut)]
 pub struct VirtioBlkDevice {
-    #[inspect(flatten, mut)]
+    #[inspect(flatten)]
     worker: TaskControl<BlkWorker, BlkQueueState>,
     #[inspect(skip)]
     driver: VmTaskDriver,
@@ -82,7 +82,7 @@ struct BlkWorker {
 }
 
 /// Transient queue state, created in `enable()` and removed in `poll_disable()`.
-#[derive(InspectMut)]
+#[derive(Inspect)]
 struct BlkQueueState {
     queue: VirtioQueue,
     memory: GuestMemory,
@@ -98,9 +98,9 @@ struct WorkerStats {
     errors: Counter,
 }
 
-impl InspectTaskMut<BlkQueueState> for BlkWorker {
-    fn inspect_mut(&mut self, req: inspect::Request<'_>, state: Option<&mut BlkQueueState>) {
-        req.respond().merge(&*self).merge(state);
+impl InspectTask<BlkQueueState> for BlkWorker {
+    fn inspect(&self, req: inspect::Request<'_>, state: Option<&BlkQueueState>) {
+        req.respond().merge(self).merge(state);
     }
 }
 
