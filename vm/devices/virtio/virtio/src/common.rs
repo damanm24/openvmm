@@ -34,11 +34,12 @@ use vmcore::interrupt::Interrupt;
 /// Tracks a spin window that dynamically adjusts between 0 and `max_spins`
 /// using a KVM-style algorithm:
 ///
-/// - [`grow`](Self::grow): doubles `current_spins` (capped at `max_spins`).
-///   Called when work is found within the spin budget — spinning paid off.
-/// - [`shrink`](Self::shrink): halves `current_spins` (floored at 0).
-///   Called when the spin budget is exhausted without finding work —
-///   spinning was wasteful.
+/// - [`found_work`](Self::found_work): doubles `current_spins` (capped at
+///   `max_spins`) and resets the miss counter. Called when work is found
+///   within the spin budget — spinning paid off.
+/// - [`spin_once`](Self::spin_once): records a miss. When the budget is
+///   exhausted, halves `current_spins` (floored at 0) and resets the miss
+///   counter. Called each time the spin loop finds no work.
 ///
 /// The net effect is that sustained bursts keep the window near `max_spins`,
 /// while idle queues quickly drop to zero.
@@ -67,31 +68,33 @@ impl HaltPollBudget {
         }
     }
 
-    /// Record an empty poll. Returns `true` if the budget is exhausted.
-    fn record_miss(&mut self) -> bool {
+    /// Record an empty poll and return `true` if the caller should keep
+    /// spinning (budget not yet exhausted).
+    ///
+    /// When the budget *is* exhausted, the spin window is automatically
+    /// shrunk and the miss counter is reset for the next cycle.
+    fn spin_once(&mut self) -> bool {
         self.poll_misses += 1;
-        self.poll_misses >= self.current_spins
+        if self.poll_misses >= self.current_spins {
+            self.current_spins /= 2;
+            self.poll_misses = 0;
+            false
+        } else {
+            true
+        }
     }
 
-    /// Reset the miss counter for a new spin cycle.
-    fn reset_cycle(&mut self) {
-        self.poll_misses = 0;
-    }
-
-    /// Grow the spin window — call when work was found within the spin
-    /// budget. Doubles `current_spins`, capped at `max_spins`.
-    pub fn grow(&mut self) {
+    /// Signal that work was found during the spin window.
+    ///
+    /// Doubles `current_spins` (capped at `max_spins`) and resets the
+    /// miss counter for the next cycle.
+    fn found_work(&mut self) {
         let max = self.max_spins.get();
         self.current_spins = std::cmp::min(
             self.current_spins.saturating_add(self.current_spins.max(1)),
             max,
         );
-    }
-
-    /// Shrink the spin window — call when the spin budget was exhausted
-    /// without finding work. Halves `current_spins`, floored at 0.
-    pub fn shrink(&mut self) {
-        self.current_spins /= 2;
+        self.poll_misses = 0;
     }
 }
 
@@ -387,14 +390,10 @@ impl VirtioQueue {
     pub fn poll_kick(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         // Halt-poll phase: spin for a while before arming the event.
         if let Some(budget) = &mut self.halt_poll_budget {
-            if !budget.record_miss() {
+            if budget.spin_once() {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            // Spin budget exhausted — shrink the window and reset the miss
-            // counter for the next cycle.
-            budget.shrink();
-            budget.reset_cycle();
         }
 
         if self.core.arm_for_kick() {
@@ -483,10 +482,8 @@ impl VirtioQueue {
     ) -> Poll<Result<VirtioQueueCallbackWork, Error>> {
         loop {
             if let Some(work) = self.try_next()? {
-                // Work found — grow the spin window and reset for next cycle.
                 if let Some(budget) = &mut self.halt_poll_budget {
-                    budget.grow();
-                    budget.reset_cycle();
+                    budget.found_work();
                 }
                 return Poll::Ready(Ok(work));
             }
