@@ -82,7 +82,6 @@ struct BlkWorker {
 }
 
 /// Transient queue state, created in `enable()` and removed in `poll_disable()`.
-#[derive(Inspect)]
 struct BlkQueueState {
     queue: VirtioQueue,
     memory: GuestMemory,
@@ -99,8 +98,8 @@ struct WorkerStats {
 }
 
 impl InspectTask<BlkQueueState> for BlkWorker {
-    fn inspect(&self, req: inspect::Request<'_>, state: Option<&BlkQueueState>) {
-        req.respond().merge(self).merge(state);
+    fn inspect(&self, req: inspect::Request<'_>, _state: Option<&BlkQueueState>) {
+        Inspect::inspect(self, req);
     }
 }
 
