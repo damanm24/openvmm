@@ -391,8 +391,10 @@ impl VirtioQueue {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            // Spin budget exhausted — shrink the window for next cycle.
+            // Spin budget exhausted — shrink the window and reset the miss
+            // counter for the next cycle.
             budget.shrink();
+            budget.reset_cycle();
         }
 
         if self.core.arm_for_kick() {
