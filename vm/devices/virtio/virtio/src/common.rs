@@ -20,6 +20,7 @@ use inspect::Inspect;
 use pal_async::wait::PolledWait;
 use pal_event::Event;
 use std::io::Error;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -27,6 +28,69 @@ use std::task::Poll;
 use std::task::ready;
 use thiserror::Error;
 use vmcore::interrupt::Interrupt;
+
+/// Adaptive halt-polling state for a virtio queue.
+///
+/// Tracks a spin window that dynamically adjusts between 0 and `max_spins`
+/// using a KVM-style algorithm:
+///
+/// - [`grow`](Self::grow): doubles `current_spins` (capped at `max_spins`).
+///   Called when work is found within the spin budget — spinning paid off.
+/// - [`shrink`](Self::shrink): halves `current_spins` (floored at 0).
+///   Called when the spin budget is exhausted without finding work —
+///   spinning was wasteful.
+///
+/// The net effect is that sustained bursts keep the window near `max_spins`,
+/// while idle queues quickly drop to zero.
+#[derive(Debug, Clone, Copy, Inspect)]
+pub struct HaltPollBudget {
+    /// Upper bound for the adaptive spin window.
+    pub max_spins: NonZeroU32,
+    /// Current number of spins allowed before falling back to events.
+    current_spins: u32,
+    /// Consecutive empty polls in the current spin cycle.
+    poll_misses: u32,
+}
+
+impl HaltPollBudget {
+    /// Create a new budget with `max_spins` as the ceiling.
+    ///
+    /// The spin window starts at `max_spins`.
+    pub fn new(max_spins: NonZeroU32) -> Self {
+        Self {
+            max_spins,
+            current_spins: max_spins.get(),
+            poll_misses: 0,
+        }
+    }
+
+    /// Record an empty poll. Returns `true` if the budget is exhausted.
+    fn record_miss(&mut self) -> bool {
+        self.poll_misses += 1;
+        self.poll_misses >= self.current_spins
+    }
+
+    /// Reset the miss counter for a new spin cycle.
+    fn reset_cycle(&mut self) {
+        self.poll_misses = 0;
+    }
+
+    /// Grow the spin window — call when work was found within the spin
+    /// budget. Doubles `current_spins`, capped at `max_spins`.
+    pub fn grow(&mut self) {
+        let max = self.max_spins.get();
+        self.current_spins = std::cmp::min(
+            self.current_spins.saturating_add(self.current_spins.max(1)),
+            max,
+        );
+    }
+
+    /// Shrink the spin window — call when the spin budget was exhausted
+    /// without finding work. Halves `current_spins`, floored at 0.
+    pub fn shrink(&mut self) {
+        self.current_spins /= 2;
+    }
+}
 
 /// Read all readable payload buffers into `target`. Returns the number of bytes read.
 fn read_from_payload(
@@ -260,6 +324,8 @@ pub struct VirtioQueue {
     notify_guest: Interrupt,
     #[inspect(skip)]
     queue_event: PolledWait<Event>,
+    /// Optional adaptive halt-poll state. `None` means pure interrupt-driven.
+    halt_poll_budget: Option<HaltPollBudget>,
 }
 
 impl VirtioQueue {
@@ -277,7 +343,20 @@ impl VirtioQueue {
             complete: complete_work,
             notify_guest: notify,
             queue_event,
+            halt_poll_budget: None,
         })
+    }
+
+    /// Enable adaptive halt-polling for this queue.
+    ///
+    /// When set, the queue's [`Stream`] implementation will spin-poll
+    /// before falling back to the event-based path. The spin window
+    /// adapts dynamically between 0 and `budget.max_spins` based on
+    /// workload.
+    ///
+    /// Pass `None` to disable (the default).
+    pub fn set_halt_poll_budget(&mut self, budget: Option<HaltPollBudget>) {
+        self.halt_poll_budget = budget;
     }
 
     /// Returns the current queue progress state.
@@ -291,11 +370,28 @@ impl VirtioQueue {
     /// Polls until the queue is kicked by the guest, indicating new work may be
     /// available.
     ///
+    /// If a [`HaltPollBudget`] is configured, this method will first spin-poll
+    /// up to `current_spins` times — waking the executor on each iteration so
+    /// other tasks can make progress — before falling back to arming kick
+    /// notification and sleeping on the event.  The `current_spins` window
+    /// adapts automatically: it grows when spinning finds work and shrinks
+    /// (to zero) when spins are exhausted.
+    ///
     /// Before sleeping, this arms kick notification and rechecks the queue. If
     /// new data arrived during arming, it returns immediately without sleeping.
     /// On wakeup, kicks are suppressed to avoid unnecessary doorbells while
     /// the caller drains the queue.
     pub fn poll_kick(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        // Halt-poll phase: spin for a while before arming the event.
+        if let Some(budget) = &mut self.halt_poll_budget {
+            if !budget.record_miss() {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            // Spin budget exhausted — shrink the window for next cycle.
+            budget.shrink();
+        }
+
         if self.core.arm_for_kick() {
             ready!(self.queue_event.wait().poll_unpin(cx)).expect("waits on Event cannot fail");
         }
@@ -382,6 +478,11 @@ impl VirtioQueue {
     ) -> Poll<Result<VirtioQueueCallbackWork, Error>> {
         loop {
             if let Some(work) = self.try_next()? {
+                // Work found — grow the spin window and reset for next cycle.
+                if let Some(budget) = &mut self.halt_poll_budget {
+                    budget.grow();
+                    budget.reset_cycle();
+                }
                 return Poll::Ready(Ok(work));
             }
             ready!(self.poll_kick(cx));
