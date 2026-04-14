@@ -19,10 +19,8 @@ use guestmem::GuestMemoryError;
 use inspect::Inspect;
 use pal_async::wait::PolledWait;
 use pal_event::Event;
-use std::collections::BTreeMap;
 use std::io::Error;
 use std::num::NonZeroU32;
-use std::time::Instant;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -44,7 +42,7 @@ use vmcore::interrupt::Interrupt;
 ///
 /// The net effect is that sustained bursts keep the window near `max_spins`,
 /// while idle queues quickly drop to zero.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, Inspect)]
 pub struct HaltPollBudget {
     /// Upper bound for the adaptive spin window.
     pub max_spins: NonZeroU32,
@@ -52,47 +50,6 @@ pub struct HaltPollBudget {
     current_spins: u32,
     /// Consecutive empty polls in the current spin cycle.
     poll_misses: u32,
-    /// Timestamp and `current_spins` value when the current spin cycle began.
-    /// Set on the first `record_miss` of a cycle, consumed by `end_cycle`.
-    cycle_start: Option<(Instant, u32)>,
-    /// Per-spin-count timing statistics.
-    spin_time_stats: BTreeMap<u32, SpinTimeStats>,
-}
-
-impl Inspect for HaltPollBudget {
-    fn inspect(&self, req: inspect::Request<'_>) {
-        req.respond()
-            .field("max_spins", self.max_spins.get())
-            .field("current_spins", self.current_spins)
-            .field("poll_misses", self.poll_misses)
-            .field(
-                "spin_time_stats",
-                inspect::iter_by_key(&self.spin_time_stats),
-            );
-    }
-}
-
-/// Average wall-clock time spent spinning for a given `current_spins` value.
-#[derive(Debug, Clone, Default)]
-struct SpinTimeStats {
-    /// Number of completed spin cycles at this spin count.
-    count: u64,
-    /// Cumulative nanoseconds spent spinning across all cycles.
-    total_ns: u64,
-}
-
-impl Inspect for SpinTimeStats {
-    fn inspect(&self, req: inspect::Request<'_>) {
-        let avg_ns = if self.count > 0 {
-            self.total_ns / self.count
-        } else {
-            0
-        };
-        req.respond()
-            .field("count", self.count)
-            .field("total_ns", self.total_ns)
-            .field("avg_ns", avg_ns);
-    }
 }
 
 impl HaltPollBudget {
@@ -107,29 +64,13 @@ impl HaltPollBudget {
             max_spins,
             current_spins: max_spins.get(),
             poll_misses: 0,
-            cycle_start: None,
-            spin_time_stats: BTreeMap::new(),
         }
     }
 
     /// Record an empty poll. Returns `true` if the budget is exhausted.
     fn record_miss(&mut self) -> bool {
-        if self.cycle_start.is_none() {
-            self.cycle_start = Some((Instant::now(), self.current_spins));
-        }
         self.poll_misses += 1;
         self.poll_misses >= self.current_spins
-    }
-
-    /// Record the end of a spin cycle, accumulating timing stats keyed by
-    /// the `current_spins` value that was active when the cycle started.
-    fn end_cycle(&mut self) {
-        if let Some((start, spins)) = self.cycle_start.take() {
-            let elapsed_ns = start.elapsed().as_nanos() as u64;
-            let entry = self.spin_time_stats.entry(spins).or_default();
-            entry.count += 1;
-            entry.total_ns += elapsed_ns;
-        }
     }
 
     /// Reset the miss counter for a new spin cycle.
@@ -450,9 +391,8 @@ impl VirtioQueue {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            // Spin budget exhausted — record timing, shrink the window,
-            // and reset the miss counter for the next cycle.
-            budget.end_cycle();
+            // Spin budget exhausted — shrink the window and reset the miss
+            // counter for the next cycle.
             budget.shrink();
             budget.reset_cycle();
         }
@@ -543,10 +483,8 @@ impl VirtioQueue {
     ) -> Poll<Result<VirtioQueueCallbackWork, Error>> {
         loop {
             if let Some(work) = self.try_next()? {
-                // Work found — record timing, grow the spin window,
-                // and reset for next cycle.
+                // Work found — grow the spin window and reset for next cycle.
                 if let Some(budget) = &mut self.halt_poll_budget {
-                    budget.end_cycle();
                     budget.grow();
                     budget.reset_cycle();
                 }
