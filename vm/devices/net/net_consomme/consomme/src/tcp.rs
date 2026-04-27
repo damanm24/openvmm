@@ -404,6 +404,14 @@ impl<T: Client> Access<'_, T> {
                         e.get().backend,
                         TcpBackend::Dns(ref h) if h.is_in_flight()
                     );
+                    if matches!(e.get().backend, TcpBackend::Dns(_)) {
+                        tracing::info!(
+                            ft = %ft,
+                            dns_in_flight,
+                            state = ?e.get().inner.state,
+                            "tcp: removing DNS TCP connection"
+                        );
+                    }
                     e.remove();
                     if dns_in_flight {
                         if let Some(dns) = &mut self.inner.dns {
@@ -733,6 +741,11 @@ impl TcpConnection {
         tcp: &TcpRepr<'_>,
         params: &ConnectionParams,
     ) -> Result<Self, DropReason> {
+        tracing::info!(
+            src = %sender.ft.src,
+            dst = %sender.ft.dst,
+            "tcp: creating virtual DNS TCP connection"
+        );
         let mut inner = Self::new_base(params);
         inner.initialize_from_first_client_packet(tcp)?;
 
@@ -809,6 +822,10 @@ impl TcpConnectionInner {
                 Poll::Ready(Ok(n)) => {
                     if n == 0 {
                         // EOF — close the connection.
+                        tracing::info!(
+                            src = %sender.ft.src,
+                            "tcp: DNS TCP handler returned EOF, closing connection"
+                        );
                         if !self.state.tx_fin() {
                             self.close();
                         }
@@ -816,7 +833,12 @@ impl TcpConnectionInner {
                     }
                     self.tx_buffer.extend_by(n);
                 }
-                Poll::Ready(Err(_)) => {
+                Poll::Ready(Err(e)) => {
+                    tracing::info!(
+                        src = %sender.ft.src,
+                        error = %e,
+                        "tcp: DNS TCP handler error, resetting connection"
+                    );
                     sender.rst(self.tx_send, Some(self.rx_seq));
                     return false;
                 }
@@ -832,8 +854,13 @@ impl TcpConnectionInner {
                 self.rx_buffer.consume(consumed);
             }
             Ok(_) => {}
-            Err(_) => {
+            Err(e) => {
                 // Invalid DNS TCP framing; reset the connection.
+                tracing::info!(
+                    src = %sender.ft.src,
+                    error = %e,
+                    "tcp: DNS TCP ingest error (bad framing), resetting connection"
+                );
                 sender.rst(self.tx_send, Some(self.rx_seq));
                 return false;
             }

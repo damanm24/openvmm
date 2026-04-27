@@ -70,6 +70,13 @@ pub struct DnsTcpHandler {
 
 impl DnsTcpHandler {
     pub fn new(flow: DnsFlow) -> Self {
+        tracing::info!(
+            src_port = flow.src_port,
+            dst_port = flow.dst_port,
+            src_addr = %flow.src_addr,
+            dst_addr = %flow.dst_addr,
+            "dns_tcp: new handler created"
+        );
         let receiver = Receiver::new();
         Self {
             receiver,
@@ -150,11 +157,26 @@ impl DnsTcpHandler {
         }
         let msg_len = u16::from_be_bytes([self.buf[0], self.buf[1]]) as usize;
         if msg_len <= super::DNS_HEADER_SIZE {
+            tracing::info!(
+                msg_len,
+                src_port = self.flow.src_port,
+                "dns_tcp: invalid message length (too small for DNS header)"
+            );
             return Err(DnsTcpError::InvalidMessageLength);
         }
         if self.buf.len() < 2 + msg_len {
             return Ok(false);
         }
+
+        // Extract the DNS transaction ID for correlation.
+        let tx_id = u16::from_be_bytes([self.buf[2], self.buf[3]]);
+
+        tracing::info!(
+            msg_len,
+            tx_id = format_args!("0x{tx_id:04x}"),
+            src_port = self.flow.src_port,
+            "dns_tcp: submitting query to backend"
+        );
 
         // Submit the raw DNS query (without the TCP length prefix).
         let request = DnsRequest {
@@ -195,6 +217,26 @@ impl DnsTcpHandler {
                 Ok(response) => {
                     dns.complete_tcp_query();
                     let payload_len = response.response_data.len();
+
+                    // Extract DNS transaction ID and RCODE from the response for logging.
+                    let (resp_tx_id, rcode) = if payload_len >= 4 {
+                        let tx_id = u16::from_be_bytes([
+                            response.response_data[0],
+                            response.response_data[1],
+                        ]);
+                        let rcode = response.response_data[3] & 0x0F;
+                        (tx_id, rcode)
+                    } else {
+                        (0, 0xFF)
+                    };
+                    tracing::info!(
+                        payload_len,
+                        tx_id = format_args!("0x{resp_tx_id:04x}"),
+                        rcode,
+                        src_port = self.flow.src_port,
+                        "dns_tcp: received response from backend"
+                    );
+
                     if payload_len > MAX_DNS_TCP_PAYLOAD_SIZE {
                         tracelimit::warn_ratelimited!(
                             size = payload_len,
@@ -216,6 +258,10 @@ impl DnsTcpHandler {
                     return Poll::Ready(Ok(n));
                 }
                 Err(_) => {
+                    tracing::info!(
+                        src_port = self.flow.src_port,
+                        "dns_tcp: query cancelled (backend dropped response channel)"
+                    );
                     dns.complete_tcp_query();
                     return Poll::Ready(Err(DnsTcpError::QueryCancelled));
                 }
@@ -264,6 +310,15 @@ impl DnsTcpHandler {
     }
 
     pub fn set_guest_fin(&mut self) {
+        tracing::info!(
+            src_port = self.flow.src_port,
+            phase = match self.phase {
+                Phase::Receiving => "receiving",
+                Phase::InFlight => "in_flight",
+                Phase::Responding => "responding",
+            },
+            "dns_tcp: guest FIN received"
+        );
         self.guest_fin = true;
     }
 

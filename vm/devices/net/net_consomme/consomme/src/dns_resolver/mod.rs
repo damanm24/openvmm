@@ -204,13 +204,25 @@ impl<B: DnsBackend> DnsResolver<B> {
         request: &DnsRequest<'_>,
         response_sender: Sender<DnsResponse>,
     ) -> bool {
-        self.submit_query(request, response_sender)
+        let accepted = self.submit_query(request, response_sender);
+        tracing::info!(
+            accepted,
+            pending = self.pending_requests,
+            max = self.max_pending_requests,
+            src_port = request.flow.src_port,
+            "dns_resolver: submit_tcp_query"
+        );
+        accepted
     }
 
     /// Decrement the pending-request counter after a TCP response has
     /// been consumed by [`dns_tcp::DnsTcpHandler`].
     pub fn complete_tcp_query(&mut self) {
         self.pending_requests = self.pending_requests.saturating_sub(1);
+        tracing::info!(
+            pending = self.pending_requests,
+            "dns_resolver: complete_tcp_query"
+        );
     }
 
     /// Create a resolver with a test backend (for unit tests only).

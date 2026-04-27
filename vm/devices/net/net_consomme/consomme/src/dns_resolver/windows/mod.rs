@@ -72,6 +72,21 @@ impl WindowsDnsResolverBackend {
 
 impl DnsBackend for WindowsDnsResolverBackend {
     fn query(&self, request: &DnsRequest<'_>, response_sender: Sender<DnsResponse>) {
+        // Extract DNS transaction ID for correlation logging.
+        let tx_id = if request.dns_query.len() >= 2 {
+            u16::from_be_bytes([request.dns_query[0], request.dns_query[1]])
+        } else {
+            0
+        };
+        let transport = request.flow.transport;
+
+        tracing::info!(
+            tx_id = format_args!("0x{tx_id:04x}"),
+            query_len = request.dns_query.len(),
+            src_port = request.flow.src_port,
+            ?transport,
+            "windows_dns: submitting DnsQueryRaw"
+        );
         // Clone the sender for error handling
         let response_sender_clone = response_sender.clone();
 
@@ -146,6 +161,11 @@ impl DnsBackend for WindowsDnsResolverBackend {
         let result = unsafe { api::DnsQueryRaw(&dns_request, &mut cancel_handle) };
 
         if result == DNS_REQUEST_PENDING {
+            tracing::info!(
+                tx_id = format_args!("0x{tx_id:04x}"),
+                request_id,
+                "windows_dns: DnsQueryRaw returned PENDING"
+            );
             // Update with real cancel handle (only if entry still exists).
             // If the callback already fired and removed the entry, this is a no-op.
             {
@@ -157,7 +177,11 @@ impl DnsBackend for WindowsDnsResolverBackend {
         } else {
             // Remove placeholder since callback won't fire on error
             self.pending_requests.lock().remove(request_id);
-            tracelimit::warn_ratelimited!("DnsQueryRaw failed with error code: {}", result);
+            tracing::info!(
+                tx_id = format_args!("0x{tx_id:04x}"),
+                result,
+                "windows_dns: DnsQueryRaw failed synchronously"
+            );
             // SAFETY: We're reclaiming ownership of the context we just created
             unsafe {
                 let _ = Box::from_raw(context_ptr);
@@ -249,6 +273,7 @@ unsafe extern "system" fn dns_query_raw_callback(
     // SAFETY: query_results is provided by Windows and will be freed after processing
     let response = match unsafe { process_dns_results(query_results) } {
         Ok(mut response_data) => {
+            let resp_len = response_data.len();
             // For TCP, DnsQueryRaw returns the response with a 2-byte TCP
             // length prefix. Strip it so the DnsTcpHandler can add its own
             // framing.
@@ -257,17 +282,39 @@ unsafe extern "system" fn dns_query_raw_callback(
             {
                 response_data.drain(..2);
             }
+            // Extract transaction ID from the (possibly stripped) response.
+            let resp_tx_id = if response_data.len() >= 2 {
+                u16::from_be_bytes([response_data[0], response_data[1]])
+            } else {
+                0
+            };
+            tracing::info!(
+                tx_id = format_args!("0x{resp_tx_id:04x}"),
+                wire_len = resp_len,
+                payload_len = response_data.len(),
+                transport = ?context.request.flow.transport,
+                src_port = context.request.flow.src_port,
+                "windows_dns: callback received successful response"
+            );
             Some(DnsResponse {
                 flow: context.request.flow.clone(),
                 response_data,
             })
         }
         Err(DnsResultError::QueryFailed(status)) => {
-            tracelimit::warn_ratelimited!(status, "DNS query failed, returning SERVFAIL");
+            tracing::info!(
+                status,
+                src_port = context.request.flow.src_port,
+                "windows_dns: DNS query failed, returning SERVFAIL"
+            );
             None
         }
         Err(e) => {
-            tracelimit::warn_ratelimited!(error = ?e, "DNS query failed, returning SERVFAIL");
+            tracing::info!(
+                error = ?e,
+                src_port = context.request.flow.src_port,
+                "windows_dns: DNS query failed, returning SERVFAIL"
+            );
             None
         }
     };
