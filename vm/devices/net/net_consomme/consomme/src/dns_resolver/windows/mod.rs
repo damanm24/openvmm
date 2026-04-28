@@ -50,7 +50,6 @@ fn is_dns_raw_apis_supported() -> bool {
 
 /// Context passed to the DNS query callback.
 struct RawCallbackContext {
-    /// Unique monotonic identifier for this query (never reused).
     query_id: u64,
     slab_key: usize,
     request: DnsRequestInternal,
@@ -58,9 +57,7 @@ struct RawCallbackContext {
 }
 
 pub struct WindowsDnsResolverBackend {
-    /// Map of pending DNS requests (for cancellation support).
     pending_requests: Arc<Mutex<Slab<DNS_QUERY_RAW_CANCEL>>>,
-    /// Monotonically increasing counter for generating unique query IDs.
     next_query_id: AtomicU64,
 }
 
@@ -267,16 +264,14 @@ unsafe extern "system" fn dns_query_raw_callback(
     // SAFETY: The context pointer was created by us in query() and is valid.
     let context = unsafe { Box::from_raw(query_context.cast::<RawCallbackContext>().cast_mut()) };
 
-    let remaining = {
+    {
         let mut pending = context.pending_requests.lock();
         pending.remove(context.slab_key);
-        pending.len()
-    };
+    }
 
     tracing::trace!(
         query_id = context.query_id,
-        remaining_pending = remaining,
-        transport = ?context.request.flow.transport,
+        flow = ?context.request.flow,
         "dns_windows: callback fired",
     );
 
