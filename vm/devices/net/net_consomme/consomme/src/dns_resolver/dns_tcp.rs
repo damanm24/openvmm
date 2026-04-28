@@ -169,6 +169,12 @@ impl DnsTcpHandler {
             );
             return Err(DnsTcpError::RateLimited);
         }
+        tracing::trace!(
+            msg_len,
+            src_port = self.flow.src_port,
+            dst_port = self.flow.dst_port,
+            "dns_tcp: query submitted, entering in-flight",
+        );
         self.buf.clear();
         self.phase = Phase::InFlight;
         Ok(true)
@@ -195,6 +201,11 @@ impl DnsTcpHandler {
                 Ok(response) => {
                     dns.complete_tcp_query();
                     let payload_len = response.response_data.len();
+                    tracing::trace!(
+                        payload_len,
+                        src_port = self.flow.src_port,
+                        "dns_tcp: response received from backend",
+                    );
                     if payload_len > MAX_DNS_TCP_PAYLOAD_SIZE {
                         tracelimit::warn_ratelimited!(
                             size = payload_len,
@@ -217,6 +228,10 @@ impl DnsTcpHandler {
                 }
                 Err(_) => {
                     dns.complete_tcp_query();
+                    tracing::trace!(
+                        src_port = self.flow.src_port,
+                        "dns_tcp: query cancelled (channel closed without response)",
+                    );
                     return Poll::Ready(Err(DnsTcpError::QueryCancelled));
                 }
             },

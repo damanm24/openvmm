@@ -385,7 +385,7 @@ impl<T: Client> Access<'_, T> {
                 src: SocketAddr::V6(SocketAddrV6::new(addresses.src_addr, tcp.src_port, 0, 0)),
             },
         };
-        trace_tcp_packet(&tcp, tcp.payload.len(), "recv");
+        trace_tcp_packet(&ft, &tcp, tcp.payload.len(), "recv");
 
         let is_dns_tcp =
             is_gateway_dns_tcp(&ft, &self.inner.state.params, self.inner.dns.is_some());
@@ -569,7 +569,7 @@ impl<T: Client> Sender<'_, T> {
             payload: &[],
         };
 
-        trace_tcp_packet(&tcp, 0, "rst xmit");
+        trace_tcp_packet(self.ft, &tcp, 0, "rst xmit");
 
         self.send_packet(&tcp, None);
     }
@@ -769,6 +769,13 @@ impl TcpConnectionInner {
         // Propagate guest FIN before the tx path so that poll_read can
         // detect EOF on the same iteration.
         if self.state.rx_fin() && !dns_handler.guest_fin() {
+            tracing::trace!(
+                src = %sender.ft.src,
+                dst = %sender.ft.dst,
+                tx_buffer_len = self.tx_buffer.len(),
+                tx_buffer_full = self.tx_buffer.is_full(),
+                "dns_tcp: guest FIN received, signaling EOF to handler",
+            );
             dns_handler.set_guest_fin();
         }
 
@@ -1082,7 +1089,7 @@ impl TcpConnectionInner {
             assert!(tx_next <= tx_end);
             assert!(self.needs_ack || tx_next > self.tx_send);
 
-            trace_tcp_packet(&tcp, payload_len, "xmit");
+            trace_tcp_packet(sender.ft, &tcp, payload_len, "xmit");
 
             let payload = self
                 .tx_buffer
@@ -1137,7 +1144,7 @@ impl TcpConnectionInner {
             payload: &[],
         };
 
-        trace_tcp_packet(&tcp, 0, "ack");
+        trace_tcp_packet(sender.ft, &tcp, 0, "ack");
 
         sender.send_packet(&tcp, None);
     }
@@ -1439,9 +1446,11 @@ impl TcpListener {
 /// Logs protocol-relevant fields (flags, seq, ack, window, payload length)
 /// as individual tracing fields instead of dumping the full `TcpRepr` Debug
 /// output which includes raw payload bytes.
-fn trace_tcp_packet(tcp: &TcpRepr<'_>, payload_len: usize, label: &str) {
+fn trace_tcp_packet(ft: &FourTuple, tcp: &TcpRepr<'_>, payload_len: usize, label: &str) {
     tracing::trace!(
         label,
+        src = %ft.src,
+        dst = %ft.dst,
         flags = match tcp.control {
             TcpControl::Syn => Some("SYN"),
             TcpControl::Fin => Some("FIN"),

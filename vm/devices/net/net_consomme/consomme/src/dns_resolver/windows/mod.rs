@@ -19,6 +19,8 @@ use parking_lot::Mutex;
 use slab::Slab;
 use std::ptr::null_mut;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use windows_sys::Win32::Foundation::DNS_REQUEST_PENDING;
 use windows_sys::Win32::Foundation::NO_ERROR;
 use windows_sys::Win32::NetworkManagement::Dns::DNS_PROTOCOL_TCP;
@@ -48,7 +50,9 @@ fn is_dns_raw_apis_supported() -> bool {
 
 /// Context passed to the DNS query callback.
 struct RawCallbackContext {
-    request_id: usize,
+    /// Unique monotonic identifier for this query (never reused).
+    query_id: u64,
+    slab_key: usize,
     request: DnsRequestInternal,
     pending_requests: Arc<Mutex<Slab<DNS_QUERY_RAW_CANCEL>>>,
 }
@@ -56,6 +60,8 @@ struct RawCallbackContext {
 pub struct WindowsDnsResolverBackend {
     /// Map of pending DNS requests (for cancellation support).
     pending_requests: Arc<Mutex<Slab<DNS_QUERY_RAW_CANCEL>>>,
+    /// Monotonically increasing counter for generating unique query IDs.
+    next_query_id: AtomicU64,
 }
 
 impl WindowsDnsResolverBackend {
@@ -66,6 +72,7 @@ impl WindowsDnsResolverBackend {
 
         Ok(WindowsDnsResolverBackend {
             pending_requests: Arc::new(Mutex::new(Slab::new())),
+            next_query_id: AtomicU64::new(0),
         })
     }
 }
@@ -102,14 +109,25 @@ impl DnsBackend for WindowsDnsResolverBackend {
 
         // Pre-insert placeholder before calling DnsQueryRaw to avoid race condition
         // where callback fires before we can insert the cancel handle.
-        let request_id = self
+        let slab_key = self
             .pending_requests
             .lock()
             .insert(DNS_QUERY_RAW_CANCEL::default());
 
+        let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
+        let pending_count = self.pending_requests.lock().len();
+        tracing::trace!(
+            query_id,
+            pending_count,
+            query_len = dns_query_size,
+            transport = ?request.flow.transport,
+            "dns_windows: submitting query to DnsQueryRaw",
+        );
+
         // Create callback context
         let context = Box::new(RawCallbackContext {
-            request_id,
+            query_id,
+            slab_key,
             request: internal_request,
             pending_requests: self.pending_requests.clone(),
         });
@@ -150,14 +168,22 @@ impl DnsBackend for WindowsDnsResolverBackend {
             // If the callback already fired and removed the entry, this is a no-op.
             {
                 let mut pending = self.pending_requests.lock();
-                if let Some(v) = pending.get_mut(request_id) {
+                if let Some(v) = pending.get_mut(slab_key) {
                     *v = cancel_handle;
                 }
             }
+            tracing::trace!(
+                query_id,
+                "dns_windows: query pending, awaiting callback",
+            );
         } else {
             // Remove placeholder since callback won't fire on error
-            self.pending_requests.lock().remove(request_id);
-            tracelimit::warn_ratelimited!("DnsQueryRaw failed with error code: {}", result);
+            self.pending_requests.lock().remove(slab_key);
+            tracelimit::warn_ratelimited!(
+                query_id,
+                result,
+                "dns_windows: DnsQueryRaw failed",
+            );
             // SAFETY: We're reclaiming ownership of the context we just created
             unsafe {
                 let _ = Box::from_raw(context_ptr);
@@ -241,10 +267,18 @@ unsafe extern "system" fn dns_query_raw_callback(
     // SAFETY: The context pointer was created by us in query() and is valid.
     let context = unsafe { Box::from_raw(query_context.cast::<RawCallbackContext>().cast_mut()) };
 
-    {
+    let remaining = {
         let mut pending = context.pending_requests.lock();
-        pending.remove(context.request_id);
-    }
+        pending.remove(context.slab_key);
+        pending.len()
+    };
+
+    tracing::trace!(
+        query_id = context.query_id,
+        remaining_pending = remaining,
+        transport = ?context.request.flow.transport,
+        "dns_windows: callback fired",
+    );
 
     // SAFETY: query_results is provided by Windows and will be freed after processing
     let response = match unsafe { process_dns_results(query_results) } {
