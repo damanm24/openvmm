@@ -5,7 +5,7 @@ use inspect::Inspect;
 use mesh_channel_core::Receiver;
 use mesh_channel_core::Sender;
 use smoltcp::wire::EthernetAddress;
-use smoltcp::wire::IpAddress;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -37,10 +37,8 @@ pub enum DnsTransport {
 
 #[derive(Debug, Clone)]
 pub struct DnsFlow {
-    pub src_addr: IpAddress,
-    pub dst_addr: IpAddress,
-    pub src_port: u16,
-    pub dst_port: u16,
+    pub src: SocketAddr,
+    pub dst: SocketAddr,
     pub gateway_mac: EthernetAddress,
     pub client_mac: EthernetAddress,
     // Used by the glibc and Windows DNS backends. The musl resolver

@@ -709,10 +709,8 @@ impl TcpConnection {
         inner.initialize_from_first_client_packet(tcp)?;
 
         let flow = crate::dns_resolver::DnsFlow {
-            src_addr: sender.ft.src.ip().into(),
-            dst_addr: sender.ft.dst.ip().into(),
-            src_port: sender.ft.src.port(),
-            dst_port: sender.ft.dst.port(),
+            src: sender.ft.src,
+            dst: sender.ft.dst,
             gateway_mac: sender.state.params.gateway_mac,
             client_mac: sender.state.params.client_mac,
             transport: crate::dns_resolver::DnsTransport::Tcp,
@@ -970,7 +968,12 @@ impl TcpConnectionInner {
             // Avoid resetting so that the guest doesn't think there is a
             // responding TCP stack at this address. The guest will time out on
             // its own.
-            tracing::debug!(error = &err as &dyn std::error::Error, "connect timed out");
+            tracing::debug!(
+                src = %sender.ft.src,
+                dst = %sender.ft.dst,
+                error = &err as &dyn std::error::Error,
+                "connect timed out",
+            );
         } else {
             log_connect_error(&err);
             sender.rst(self.tx_send, Some(self.rx_seq));

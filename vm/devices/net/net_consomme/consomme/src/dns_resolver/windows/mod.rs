@@ -271,7 +271,9 @@ unsafe extern "system" fn dns_query_raw_callback(
 
     tracing::trace!(
         query_id = context.query_id,
-        flow = ?context.request.flow,
+        src = %context.request.flow.src,
+        dst = %context.request.flow.dst,
+        transport = ?context.request.flow.transport,
         "dns_windows: callback fired",
     );
 

@@ -164,15 +164,15 @@ impl DnsTcpHandler {
         if !dns.submit_tcp_query(&request, self.receiver.sender()) {
             tracelimit::warn_ratelimited!(
                 msg_len,
-                src_port = self.flow.src_port,
+                src = %self.flow.src,
                 "dns_tcp: query rate-limited, closing connection"
             );
             return Err(DnsTcpError::RateLimited);
         }
         tracing::trace!(
             msg_len,
-            src_port = self.flow.src_port,
-            dst_port = self.flow.dst_port,
+            src = %self.flow.src,
+            dst = %self.flow.dst,
             "dns_tcp: query submitted, entering in-flight",
         );
         self.buf.clear();
@@ -203,7 +203,7 @@ impl DnsTcpHandler {
                     let payload_len = response.response_data.len();
                     tracing::trace!(
                         payload_len,
-                        src_port = self.flow.src_port,
+                        src = %self.flow.src,
                         "dns_tcp: response received from backend resolver",
                     );
                     if payload_len > MAX_DNS_TCP_PAYLOAD_SIZE {
@@ -229,7 +229,7 @@ impl DnsTcpHandler {
                 Err(_) => {
                     dns.complete_tcp_query();
                     tracing::trace!(
-                        src_port = self.flow.src_port,
+                        src = %self.flow.src,
                         "dns_tcp: query cancelled (channel closed without response)",
                     );
                     return Poll::Ready(Err(DnsTcpError::QueryCancelled));
@@ -313,13 +313,10 @@ mod tests {
 
     fn test_flow() -> DnsFlow {
         use smoltcp::wire::EthernetAddress;
-        use smoltcp::wire::IpAddress;
-        use smoltcp::wire::Ipv4Address;
+        use std::net::SocketAddr;
         DnsFlow {
-            src_addr: IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 2)),
-            dst_addr: IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)),
-            src_port: 12345,
-            dst_port: 53,
+            src: SocketAddr::new([10, 0, 0, 2].into(), 12345),
+            dst: SocketAddr::new([10, 0, 0, 1].into(), 53),
             gateway_mac: EthernetAddress([0x52, 0x55, 10, 0, 0, 1]),
             client_mac: EthernetAddress([0, 0, 0, 0, 1, 0]),
             transport: crate::dns_resolver::DnsTransport::Tcp,
