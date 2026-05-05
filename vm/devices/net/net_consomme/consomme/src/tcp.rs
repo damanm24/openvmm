@@ -784,14 +784,6 @@ impl TcpConnectionInner {
             let mut bufs = [IoSliceMut::new(a), IoSliceMut::new(b)];
             match dns_handler.poll_read(cx, &mut bufs, dns) {
                 Poll::Ready(Ok(n)) => {
-                    tracing::trace!(
-                        src = %sender.ft.src,
-                        dst = %sender.ft.dst,
-                        n,
-                        tx_buffer_len = self.tx_buffer.len() + n,
-                        tx_buffer_full = self.tx_buffer.is_full(),
-                        "tcp: response from DNS handler into tx_buffer",
-                    );
                     if n == 0 {
                         // EOF — close the connection.
                         if !self.state.tx_fin() {
@@ -800,6 +792,14 @@ impl TcpConnectionInner {
                         break;
                     }
                     self.tx_buffer.extend_by(n);
+                    tracing::trace!(
+                        src = %sender.ft.src,
+                        dst = %sender.ft.dst,
+                        n,
+                        tx_buffer_len = self.tx_buffer.len(),
+                        tx_buffer_full = self.tx_buffer.is_full(),
+                        "tcp: response from DNS handler into tx_buffer",
+                    );
                 }
                 Poll::Ready(Err(_)) => {
                     sender.rst(self.tx_send, Some(self.rx_seq));

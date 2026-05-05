@@ -209,7 +209,7 @@ impl DnsTcpHandler {
                     if payload_len > MAX_DNS_TCP_PAYLOAD_SIZE {
                         tracelimit::warn_ratelimited!(
                             size = payload_len,
-                            "dns_tcp:response exceeds maximum message size"
+                            "dns_tcp: response exceeds maximum message size"
                         );
                         return Poll::Ready(Err(DnsTcpError::ResponseTooLarge));
                     }

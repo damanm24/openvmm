@@ -261,7 +261,7 @@ unsafe extern "system" fn dns_query_raw_callback(
 
     {
         let mut pending = context.pending_requests.lock();
-        pending.remove(context.slab_key);
+        let _ = pending.try_remove(context.slab_key);
     }
 
     tracing::trace!(
