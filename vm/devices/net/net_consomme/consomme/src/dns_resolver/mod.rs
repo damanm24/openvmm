@@ -233,7 +233,7 @@ impl<B: DnsBackend> DnsResolver<B> {
 /// Internal DNS request structure used by backend implementations.
 #[derive(Debug)]
 pub(crate) struct DnsRequestInternal {
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(not(target_os = "windows"), expect(dead_code))]
     pub query_id: u64,
     pub flow: DnsFlow,
     pub query: Vec<u8>,
