@@ -852,7 +852,11 @@ impl TcpConnectionInner {
                         return false;
                     }
 
-                    tracing::debug!("connection established");
+                    tracing::debug!(
+                        src = %sender.ft.src,
+                        dst = %sender.ft.dst,
+                        "connection established",
+                    );
                     self.state = TcpState::SynReceived;
                 }
                 Poll::Pending => return true,

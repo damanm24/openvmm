@@ -303,6 +303,7 @@ mod tests {
             &self,
             request: &DnsRequest<'_>,
             response_sender: mesh_channel_core::Sender<DnsResponse>,
+            _query_id: u64,
         ) {
             response_sender.send(DnsResponse {
                 flow: request.flow.clone(),

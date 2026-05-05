@@ -19,8 +19,6 @@ use parking_lot::Mutex;
 use slab::Slab;
 use std::ptr::null_mut;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use windows_sys::Win32::Foundation::DNS_REQUEST_PENDING;
 use windows_sys::Win32::Foundation::NO_ERROR;
 use windows_sys::Win32::NetworkManagement::Dns::DNS_PROTOCOL_TCP;
@@ -50,7 +48,6 @@ fn is_dns_raw_apis_supported() -> bool {
 
 /// Context passed to the DNS query callback.
 struct RawCallbackContext {
-    query_id: u64,
     slab_key: usize,
     request: DnsRequestInternal,
     pending_requests: Arc<Mutex<Slab<DNS_QUERY_RAW_CANCEL>>>,
@@ -58,7 +55,6 @@ struct RawCallbackContext {
 
 pub struct WindowsDnsResolverBackend {
     pending_requests: Arc<Mutex<Slab<DNS_QUERY_RAW_CANCEL>>>,
-    next_query_id: AtomicU64,
 }
 
 impl WindowsDnsResolverBackend {
@@ -69,13 +65,12 @@ impl WindowsDnsResolverBackend {
 
         Ok(WindowsDnsResolverBackend {
             pending_requests: Arc::new(Mutex::new(Slab::new())),
-            next_query_id: AtomicU64::new(0),
         })
     }
 }
 
 impl DnsBackend for WindowsDnsResolverBackend {
-    fn query(&self, request: &DnsRequest<'_>, response_sender: Sender<DnsResponse>) {
+    fn query(&self, request: &DnsRequest<'_>, response_sender: Sender<DnsResponse>, query_id: u64) {
         // Clone the sender for error handling
         let response_sender_clone = response_sender.clone();
 
@@ -96,6 +91,7 @@ impl DnsBackend for WindowsDnsResolverBackend {
         // Create internal request with raw DNS bytes (no TCP prefix) so that
         // SERVFAIL generation works correctly.
         let internal_request = DnsRequestInternal {
+            query_id,
             flow: request.flow.clone(),
             query: request.dns_query.to_vec(),
             response_sender,
@@ -111,19 +107,19 @@ impl DnsBackend for WindowsDnsResolverBackend {
             .lock()
             .insert(DNS_QUERY_RAW_CANCEL::default());
 
-        let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
         let pending_count = self.pending_requests.lock().len();
         tracing::trace!(
             query_id,
             pending_count,
             query_len = dns_query_size,
+            src = %request.flow.src,
+            dst = %request.flow.dst,
             transport = ?request.flow.transport,
             "dns_windows: submitting query to DnsQueryRaw",
         );
 
         // Create callback context
         let context = Box::new(RawCallbackContext {
-            query_id,
             slab_key,
             request: internal_request,
             pending_requests: self.pending_requests.clone(),
@@ -169,15 +165,14 @@ impl DnsBackend for WindowsDnsResolverBackend {
                     *v = cancel_handle;
                 }
             }
-            tracing::trace!(
-                query_id,
-                "dns_windows: query pending, awaiting callback",
-            );
         } else {
             // Remove placeholder since callback won't fire on error
             self.pending_requests.lock().remove(slab_key);
             tracelimit::warn_ratelimited!(
                 query_id,
+                src = %request.flow.src,
+                dst = %request.flow.dst,
+                transport = ?request.flow.transport,
                 result,
                 "dns_windows: DnsQueryRaw failed",
             );
@@ -270,7 +265,7 @@ unsafe extern "system" fn dns_query_raw_callback(
     }
 
     tracing::trace!(
-        query_id = context.query_id,
+        query_id = context.request.query_id,
         src = %context.request.flow.src,
         dst = %context.request.flow.dst,
         transport = ?context.request.flow.transport,
