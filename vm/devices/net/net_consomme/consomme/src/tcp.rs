@@ -792,7 +792,7 @@ impl TcpConnectionInner {
                         n,
                         tx_buffer_len = self.tx_buffer.len() + n,
                         tx_buffer_full = self.tx_buffer.is_full(),
-                        "tcp: read {} bytes from DNS handler into tx buffer",
+                        "tcp: response from DNS handler into tx_buffer",
                     );
                     if n == 0 {
                         // EOF — close the connection.
