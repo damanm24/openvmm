@@ -204,12 +204,12 @@ impl DnsTcpHandler {
                     tracing::trace!(
                         payload_len,
                         src_port = self.flow.src_port,
-                        "dns_tcp: response received from backend",
+                        "dns_tcp: response received from backend resolver",
                     );
                     if payload_len > MAX_DNS_TCP_PAYLOAD_SIZE {
                         tracelimit::warn_ratelimited!(
                             size = payload_len,
-                            "DNS TCP response exceeds maximum message size"
+                            "dns_tcp:response exceeds maximum message size"
                         );
                         return Poll::Ready(Err(DnsTcpError::ResponseTooLarge));
                     }

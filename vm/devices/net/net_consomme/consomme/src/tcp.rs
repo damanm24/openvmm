@@ -774,7 +774,7 @@ impl TcpConnectionInner {
                 dst = %sender.ft.dst,
                 tx_buffer_len = self.tx_buffer.len(),
                 tx_buffer_full = self.tx_buffer.is_full(),
-                "dns_tcp: guest FIN received, signaling EOF to handler",
+                "tcp: guest FIN received, signaling EOF to DNS handler",
             );
             dns_handler.set_guest_fin();
         }
@@ -786,6 +786,14 @@ impl TcpConnectionInner {
             let mut bufs = [IoSliceMut::new(a), IoSliceMut::new(b)];
             match dns_handler.poll_read(cx, &mut bufs, dns) {
                 Poll::Ready(Ok(n)) => {
+                    tracing::trace!(
+                        src = %sender.ft.src,
+                        dst = %sender.ft.dst,
+                        n,
+                        tx_buffer_len = self.tx_buffer.len() + n,
+                        tx_buffer_full = self.tx_buffer.is_full(),
+                        "tcp: read {} bytes from DNS handler into tx buffer",
+                    );
                     if n == 0 {
                         // EOF — close the connection.
                         if !self.state.tx_fin() {
