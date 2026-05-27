@@ -63,6 +63,7 @@ use storvsp_resources::ScsiPath;
 use tracing_helpers::AnyhowValueExt;
 use vm_resource::IntoResource;
 use vm_resource::Resource;
+use vm_resource::kind::VirtioDeviceHandle;
 
 fn maybe_with_radix_u64(s: &str) -> Result<u64, String> {
     let (radix, prefix_len) = if s.starts_with("0x") || s.starts_with("0X") {
@@ -315,6 +316,26 @@ enum InteractiveCommand {
 
     /// Use KVP to interact with the guest.
     Kvp(kvp::KvpCommand),
+
+    /// Hot-add a virtio-fs share to the VM.
+    ///
+    /// Exposes a host directory to the guest as a virtio-fs share via VPCI.
+    /// The guest can mount it using the specified tag.
+    AddShare {
+        /// The mount tag visible to the guest (e.g. "myshare").
+        tag: String,
+        /// The host directory to share.
+        root_path: PathBuf,
+    },
+
+    /// Hot-remove a virtio-fs share from the VM by instance ID.
+    ///
+    /// Use `inspect -r /` or the instance ID printed by add-share to find the
+    /// ID of the share to remove.
+    RmShare {
+        /// The VPCI instance ID (GUID) of the share to remove.
+        instance_id: String,
+    },
 }
 
 /// Subcommands for managing VTL2 settings.
@@ -1473,6 +1494,64 @@ pub(crate) async fn run_repl(
                 };
                 if let Err(err) = kvp::handle_kvp(kvp, command).await {
                     eprintln!("error: {err:#}");
+                }
+            }
+            InteractiveCommand::AddShare { tag, root_path } => {
+                let action = async {
+                    let resource: Resource<VirtioDeviceHandle> =
+                        virtio_resources::fs::VirtioFsHandle {
+                            tag: tag.clone(),
+                            fs: virtio_resources::fs::VirtioFsBackend::HostFs {
+                                root_path: root_path.display().to_string(),
+                                mount_options: String::new(),
+                            },
+                        }
+                        .into_resource();
+
+                    let instance_id = guid::Guid::new_random();
+                    let vpci_cfg = openvmm_defs::config::VpciDeviceConfig {
+                        vtl: DeviceVtl::Vtl0,
+                        instance_id,
+                        resource: virtio_resources::VirtioPciDeviceHandle(resource)
+                            .into_resource(),
+                        vnode: None,
+                    };
+
+                    vm_rpc
+                        .call_failable(VmRpc::AddVpciDevice, vpci_cfg)
+                        .await?;
+                    anyhow::Ok(instance_id)
+                };
+                match action.await {
+                    Ok(id) => {
+                        tracing::info!(
+                            tag,
+                            %id,
+                            "added virtio-fs share (use this instance ID to remove it)"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(error = error.as_error(), "error adding share");
+                    }
+                }
+            }
+            InteractiveCommand::RmShare { instance_id } => {
+                let action = async {
+                    let id: guid::Guid = instance_id
+                        .parse()
+                        .context("invalid instance ID (expected a GUID)")?;
+                    vm_rpc
+                        .call_failable(VmRpc::RemoveVpciDevice, id)
+                        .await?;
+                    anyhow::Ok(())
+                };
+                match action.await {
+                    Ok(()) => {
+                        tracing::info!(instance_id, "removed virtio-fs share");
+                    }
+                    Err(error) => {
+                        tracing::error!(error = error.as_error(), "error removing share");
+                    }
                 }
             }
             InteractiveCommand::Input { .. } | InteractiveCommand::InputMode => unreachable!(),
