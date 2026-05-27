@@ -307,5 +307,6 @@ message ModifyResourceRequest {
         VPMEMDisk vpmem_disk = 6;
         NICConfig nic_config = 7;
         WindowsPCIDevice windows_device = 8;
+        VirtioFSConfig virtiofs = 9;
     }
 }

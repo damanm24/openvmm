@@ -4,6 +4,7 @@
 //! RPC types for communicating with the VM worker.
 
 use crate::config::DeviceVtl;
+use crate::config::VpciDeviceConfig;
 use guid::Guid;
 use mesh::CancelContext;
 use mesh::MeshPayload;
@@ -40,6 +41,10 @@ pub enum VmRpc {
     AddPcieDevice(FailableRpc<(String, Resource<PciDeviceHandleKind>), ()>),
     /// Hot-remove a PCIe device from a named port at runtime.
     RemovePcieDevice(FailableRpc<String, ()>),
+    /// Hot-add a VPCI device at runtime.
+    AddVpciDevice(FailableRpc<VpciDeviceConfig, ()>),
+    /// Hot-remove a VPCI device by instance ID at runtime.
+    RemoveVpciDevice(FailableRpc<Guid, ()>),
     /// Dump VM state (VP registers + memory) to a `.vmrs` file.
     ///
     /// The worker pauses the VM internally, collects state, and restores
@@ -82,6 +87,8 @@ impl fmt::Debug for VmRpc {
             VmRpc::UpdateCliParams(_) => "UpdateCliParams",
             VmRpc::AddPcieDevice(_) => "AddPcieDevice",
             VmRpc::RemovePcieDevice(_) => "RemovePcieDevice",
+            VmRpc::AddVpciDevice(_) => "AddVpciDevice",
+            VmRpc::RemoveVpciDevice(_) => "RemoveVpciDevice",
             VmRpc::DumpState(_) => "DumpState",
         };
         f.pad(s)
