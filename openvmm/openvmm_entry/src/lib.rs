@@ -196,6 +196,7 @@ struct VmResources {
     kvp_ic: Option<mesh::Sender<hyperv_ic_resources::kvp::KvpConnectRpc>>,
     scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
     nvme_vtl2_rpc: Option<mesh::Sender<NvmeControllerRequest>>,
+    consomme_rpc: Option<mesh::Sender<net_backend_resources::consomme::ConsommeRequest>>,
     ged_rpc: Option<mesh::Sender<get_resources::ged::GuestEmulationRequest>>,
     vtl2_settings: Option<vtl2_settings_proto::Vtl2Settings>,
     #[cfg(windows)]
@@ -1847,6 +1848,9 @@ fn parse_endpoint(
     let _ = resources;
     let endpoint = match &cli_cfg.endpoint {
         EndpointConfigCli::Consomme { cidr, host_fwd } => {
+            if resources.consomme_rpc.is_some() {
+                anyhow::bail!("only one consomme endpoint is supported");
+            }
             let ports = host_fwd
                 .iter()
                 .map(|fwd| {
@@ -1864,9 +1868,12 @@ fn parse_endpoint(
                     }
                 })
                 .collect();
+            let (send, recv) = mesh::channel();
+            resources.consomme_rpc = Some(send);
             net_backend_resources::consomme::ConsommeHandle {
                 cidr: cidr.clone(),
                 ports,
+                recv: Some(recv),
             }
             .into_resource()
         }
@@ -2469,6 +2476,7 @@ async fn run_control_inner(
             vm_controller_events: vm_controller_event_recv,
             scsi_rpc: resources.scsi_rpc,
             nvme_vtl2_rpc: resources.nvme_vtl2_rpc,
+            consomme_rpc: resources.consomme_rpc,
             shutdown_ic: resources.shutdown_ic,
             kvp_ic: resources.kvp_ic,
             console_in: resources.console_in,
