@@ -159,7 +159,6 @@ use vmotherboard::options::BaseChipsetDevices;
 use vmotherboard::options::BaseChipsetFoundation;
 use vmotherboard::options::BaseChipsetManifest;
 use vmotherboard::options::VmChipsetCapabilities;
-#[cfg(all(windows, feature = "virt_whp"))]
 use vpci::bus::VpciBus;
 use watchdog_core::platform::BaseWatchdogPlatform;
 use watchdog_core::platform::WatchdogCallback;
@@ -755,6 +754,15 @@ struct LoadedVmInner {
         vmotherboard::DynamicDeviceUnit,
         Arc<closeable_mutex::CloseableMutex<chipset_device_resources::ErasedChipsetDevice>>,
     )>,
+    /// Dynamically hot-added VPCI devices, tracked for removal.
+    vpci_hotplug_devices: Vec<VpciHotplugEntry>,
+}
+
+/// Tracks a dynamically hot-added VPCI device for later removal.
+struct VpciHotplugEntry {
+    instance_id: guid::Guid,
+    pci_unit: vmotherboard::DynamicDeviceUnit,
+    vpci_unit: vmotherboard::DynamicDeviceUnit,
 }
 
 fn convert_vtl2_config(
@@ -2639,6 +2647,7 @@ impl InitializedVm {
                 smmu_configs,
                 #[cfg(guest_arch = "aarch64")]
                 smmu_shared_states,
+                vpci_hotplug_devices: Vec::new(),
             },
         };
 
@@ -3271,6 +3280,122 @@ impl LoadedVm {
                             let (_, unit, _device) = self.inner.pcie_hotplug_devices.remove(idx);
                             unit.remove().await;
 
+                            anyhow::Ok(())
+                        })
+                        .await
+                    }
+                    VmRpc::AddVpciDevice(rpc) => {
+                        rpc.handle_failable(async |dev_cfg: VpciDeviceConfig| {
+                            if !self.inner.partition.supports_virtual_devices() {
+                                anyhow::bail!("partition does not support virtual (VPCI) devices");
+                            }
+
+                            let vtl = match dev_cfg.vtl {
+                                DeviceVtl::Vtl0 => Vtl::Vtl0,
+                                DeviceVtl::Vtl1 => anyhow::bail!("VTL1 VPCI devices not supported"),
+                                DeviceVtl::Vtl2 => Vtl::Vtl2,
+                            };
+
+                            let vmbus = match dev_cfg.vtl {
+                                DeviceVtl::Vtl0 => self.inner.vmbus_server.as_ref(),
+                                DeviceVtl::Vtl1 => None,
+                                DeviceVtl::Vtl2 => self.inner.vtl2_vmbus_server.as_ref(),
+                            }.context("vmbus not available for the requested VTL")?;
+
+                            let instance_id = dev_cfg.instance_id;
+                            let msi_conn = pci_core::msi::MsiConnection::new(
+                                pci_core::bus_range::AssignedBusRange::new(),
+                                0,
+                            );
+
+                            // Step 1: Resolve and create the PCI device.
+                            let (pci_unit, pci_device) = self.inner.chipset_devices.add_dyn_device(
+                                &self.inner.driver_source,
+                                &self.state_units,
+                                format!("vpci-pci-hotplug:{}", instance_id),
+                                async |register_mmio| {
+                                    self.inner.resolver
+                                        .resolve(
+                                            dev_cfg.resource,
+                                            pci_resources::ResolvePciDeviceHandleParams {
+                                                msi_target: msi_conn.target(),
+                                                register_mmio,
+                                                driver_source: &self.inner.driver_source,
+                                                guest_memory: &self.inner.gm,
+                                                doorbell_registration: self.inner.partition.clone()
+                                                    .into_doorbell_registration(vtl),
+                                                shared_mem_mapper: None,
+                                                software_iommu: false,
+                                            },
+                                        )
+                                        .await
+                                        .map(|r| r.0)
+                                        .map_err(|e| anyhow::anyhow!(e))
+                                },
+                            ).await?;
+
+                            // Step 2: Set up MSI via the partition's virtual device support.
+                            let device_id = (instance_id.data2 as u64) << 16
+                                | (instance_id.data3 as u64 & 0xfff8);
+                            let hv_device = self.inner.partition.new_virtual_device(vtl, device_id)?;
+                            msi_conn.connect(hv_device.clone().target());
+                            let interrupt_mapper = hv_device.interrupt_mapper();
+
+                            // Step 3: Create the VpciBus wrapping the PCI device.
+                            let pci_device_dyn: Arc<closeable_mutex::CloseableMutex<dyn chipset_device::ChipsetDevice>> = pci_device;
+                            let vpci_unit_result = self.inner.chipset_devices.add_dyn_device(
+                                &self.inner.driver_source,
+                                &self.state_units,
+                                format!("vpci-hotplug:{}", instance_id),
+                                async |register_mmio| {
+                                    VpciBus::new(
+                                        &self.inner.driver_source,
+                                        instance_id,
+                                        pci_device_dyn,
+                                        register_mmio,
+                                        vmbus.control().as_ref(),
+                                        interrupt_mapper,
+                                        None, // vtom
+                                    )
+                                    .await
+                                    .map_err(|e| anyhow::anyhow!("{}", e))
+                                },
+                            ).await;
+
+                            let (vpci_unit, _vpci_bus) = match vpci_unit_result {
+                                Ok(result) => result,
+                                Err(e) => {
+                                    // Clean up the PCI device unit on failure.
+                                    pci_unit.remove().await;
+                                    return Err(e);
+                                }
+                            };
+
+                            self.inner.vpci_hotplug_devices.push(VpciHotplugEntry {
+                                instance_id,
+                                pci_unit,
+                                vpci_unit,
+                            });
+
+                            self.state_units.start_stopped_units().await;
+                            anyhow::Ok(())
+                        })
+                        .await
+                    }
+                    VmRpc::RemoveVpciDevice(rpc) => {
+                        rpc.handle_failable(async |instance_id: guid::Guid| {
+                            let idx = self.inner.vpci_hotplug_devices.iter()
+                                .position(|entry| entry.instance_id == instance_id)
+                                .ok_or_else(|| anyhow::anyhow!(
+                                    "no hot-added VPCI device with instance ID '{}' \
+                                     (only dynamically added devices can be removed)",
+                                    instance_id
+                                ))?;
+
+                            let entry = self.inner.vpci_hotplug_devices.remove(idx);
+                            // Remove the VpciBus first, then the underlying PCI device.
+                            entry.vpci_unit.remove().await;
+                            entry.pci_unit.remove().await;
                             anyhow::Ok(())
                         })
                         .await

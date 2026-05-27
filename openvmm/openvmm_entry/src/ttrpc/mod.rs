@@ -985,6 +985,44 @@ impl VmService {
             Resource::Processor(_) | Resource::ProcessorConfig(_) | Resource::Memory(_) => {
                 anyhow::bail!("processor and memory resources not supported")
             }
+            Resource::Virtiofs(virtiofs) => {
+                if request.r#type == vmservice::ModifyType::Add as i32 {
+                    if virtiofs.tag.is_empty() {
+                        anyhow::bail!("virtiofs tag must not be empty");
+                    }
+                    if virtiofs.root_path.is_empty() {
+                        anyhow::bail!("virtiofs root_path must not be empty");
+                    }
+
+                    let resource = virtio_resources::fs::VirtioFsHandle {
+                        tag: virtiofs.tag,
+                        fs: virtio_resources::fs::VirtioFsBackend::HostFs {
+                            root_path: virtiofs.root_path,
+                            mount_options: String::new(),
+                        },
+                    }
+                    .into_resource();
+
+                    // Virtiofs devices are exposed via VPCI, which requires
+                    // the hypervisor to support virtual devices. MMIO-based
+                    // virtio devices cannot be hot-added.
+                    let vpci_cfg = VpciDeviceConfig {
+                        vtl: DeviceVtl::Vtl0,
+                        instance_id: Guid::new_random(),
+                        resource: VirtioPciDeviceHandle(resource).into_resource(),
+                    };
+
+                    let recv = vm.worker_rpc.call_failable(VmRpc::AddVpciDevice, vpci_cfg);
+                    Ok(async move { recv.await.map_err(anyhow::Error::from) }.boxed())
+                } else if request.r#type == vmservice::ModifyType::Remove as i32 {
+                    anyhow::bail!(
+                        "removing virtiofs shares by tag is not yet supported; \
+                         use teardown to remove all shares"
+                    )
+                } else {
+                    anyhow::bail!("unsupported virtiofs modify type {}", request.r#type);
+                }
+            }
         }
     }
 }
