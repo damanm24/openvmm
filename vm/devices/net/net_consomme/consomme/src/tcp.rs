@@ -62,8 +62,10 @@ use thiserror::Error;
 pub(crate) struct Tcp {
     #[inspect(iter_by_key)]
     connections: HashMap<FourTuple, TcpConnection>,
-    #[inspect(iter_by_key)]
-    listeners: HashMap<u16, TcpListener>,
+    /// Listeners keyed by guest port. Each entry holds up to two listeners:
+    /// index 0 for IPv4 and index 1 for IPv6.
+    #[inspect(skip)]
+    listeners: HashMap<u16, [Option<TcpListener>; 2]>,
     #[inspect(mut)]
     connection_params: ConnectionParams,
 }
@@ -230,7 +232,10 @@ impl<T: Client> Access<'_, T> {
         self.inner
             .tcp
             .listeners
-            .retain(|port, listener| match listener.poll_listener(cx) {
+            .retain(|port, slots| {
+                for slot in slots.iter_mut() {
+                    let Some(listener) = slot else { continue };
+                    match listener.poll_listener(cx) {
                 Ok(result) => {
                     if let Some((socket, mut other_addr)) = result {
                         // If this packet was originally from the guest, update the port to match
@@ -248,7 +253,7 @@ impl<T: Client> Access<'_, T> {
                             }
                         }
                         let Some(ft) = self.inner.state.try_ft_from_remote_address(&other_addr, *port) else {
-                            return true;
+                            continue;
                         };
 
                         // TCP connections are stored with the source always as the guest. Switch the order.
@@ -278,7 +283,7 @@ impl<T: Client> Access<'_, T> {
                                             dst = %ft.dst,
                                             "Failed to create connection from newly accepted socket",
                                         );
-                                        return true;
+                                        continue;
                                     }
                                 };
                                 tracing::trace!(?ft, "TCP connection established");
@@ -293,9 +298,14 @@ impl<T: Client> Access<'_, T> {
                             }
                         }
                     }
-                    true
                 }
-                Err(_) => false,
+                Err(_) => {
+                    *slot = None;
+                }
+                    }
+                }
+                // Keep the entry as long as at least one slot is occupied.
+                slots.iter().any(|s| s.is_some())
             });
         // Check for any new incoming data
         self.inner.tcp.connections.retain(|ft, conn| {
@@ -421,8 +431,9 @@ impl<T: Client> Access<'_, T> {
                         // appropriate host port substitution.
                         let is_local_address = sender.state.params.is_local_address(&resolved_dst);
                         let ft = if is_local_address
-                            && let Some(listener) =
+                            && let Some(slots) =
                                 self.inner.tcp.listeners.get(&resolved_dst.port())
+                            && let Some(listener) = slots.iter().find_map(|s| s.as_ref())
                         {
                             FourTuple {
                                 src: sender.ft.src,
@@ -458,29 +469,43 @@ impl<T: Client> Access<'_, T> {
     }
 
     /// Binds to the specified host IP and port for listening for incoming
-    /// connections.
-    pub fn bind_tcp_port(&mut self, socket: Socket, guest_port: u16) -> Result<(), BindError> {
-        match self.inner.tcp.listeners.entry(guest_port) {
-            hash_map::Entry::Occupied(_) => {
-                return Err(BindError::PortAlreadyBound(guest_port));
-            }
-            hash_map::Entry::Vacant(e) => {
-                let listener = TcpListener::from_socket(self.client.driver(), socket)?;
-                e.insert(listener);
-            }
-        };
+    /// connections. The socket's address family determines which slot (IPv4=0,
+    /// IPv6=1) is used, allowing one listener per family per guest port.
+    pub fn bind_tcp_port(
+        &mut self,
+        socket: Socket,
+        guest_port: u16,
+    ) -> Result<(), BindError> {
+        let is_ipv6 = socket
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_socket())
+            .is_some_and(|a| a.is_ipv6());
+        let listener = TcpListener::from_socket(self.client.driver(), socket)?;
+        let slots = self.inner.tcp.listeners.entry(guest_port).or_insert([None, None]);
+        let idx = is_ipv6 as usize;
+        if slots[idx].is_some() {
+            return Err(BindError::PortAlreadyBound(guest_port));
+        }
+        slots[idx] = Some(listener);
         Ok(())
     }
 
-    /// Unbinds from the specified host port.
-    pub fn unbind_tcp_port(&mut self, port: u16) -> Result<(), BindError> {
-        match self.inner.tcp.listeners.entry(port) {
-            hash_map::Entry::Occupied(e) => {
-                e.remove();
-                Ok(())
-            }
-            hash_map::Entry::Vacant(_) => Err(BindError::PortNotBound),
+    /// Unbinds the listener for the specified guest port and address family.
+    /// If this was the last listener for that port, the entry is removed entirely.
+    pub fn unbind_tcp_port(&mut self, port: u16, is_ipv6: bool) -> Result<(), BindError> {
+        let hash_map::Entry::Occupied(mut entry) = self.inner.tcp.listeners.entry(port) else {
+            return Err(BindError::PortNotBound);
+        };
+        let idx = is_ipv6 as usize;
+        if entry.get()[idx].is_none() {
+            return Err(BindError::PortNotBound);
         }
+        entry.get_mut()[idx] = None;
+        if entry.get().iter().all(|s| s.is_none()) {
+            entry.remove();
+        }
+        Ok(())
     }
 }
 

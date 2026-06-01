@@ -270,11 +270,15 @@ impl net_backend::Endpoint for ConsommeEndpoint {
             std::mem::take(&mut queue.endpoint_state.as_mut().unwrap().port_forwards);
         let bind_result: Result<Vec<_>, _> = queue.with_consomme_no_pool(|c| {
             c.refresh_driver();
-            let mut bound: Vec<(IpProtocol, u16)> = Vec::new();
+            let mut bound: Vec<(IpProtocol, u16, bool)> = Vec::new();
             for fwd in &port_forwards {
                 let protocol: IpProtocol = fwd.protocol.clone().into();
                 let guest_port = fwd.guest_port;
                 let ip_addr = fwd.host_address.as_ref().map(|a| IpAddr::from(a.clone()));
+                let is_ipv6 = matches!(
+                    fwd.host_address,
+                    Some(net_backend_resources::consomme::HostIpAddress::Ipv6(_))
+                );
                 let socket =
                     create_bound_socket(&protocol, ip_addr, fwd.host_port).map_err(|e| {
                         anyhow::anyhow!(e).context("failed to create socket for port forward")
@@ -284,12 +288,12 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                     IpProtocol::Udp => c.bind_udp_port(socket, guest_port),
                 };
                 match result {
-                    Ok(()) => bound.push((protocol, guest_port)),
+                    Ok(()) => bound.push((protocol, guest_port, is_ipv6)),
                     Err(err) => {
                         // Roll back successful binds before returning error.
-                        for (prev_protocol, prev_guest_port) in &bound {
+                        for (prev_protocol, prev_guest_port, prev_ipv6) in &bound {
                             let _ = match prev_protocol {
-                                IpProtocol::Tcp => c.unbind_tcp_port(*prev_guest_port),
+                                IpProtocol::Tcp => c.unbind_tcp_port(*prev_guest_port, *prev_ipv6),
                                 IpProtocol::Udp => c.unbind_udp_port(*prev_guest_port),
                             };
                         }
@@ -461,8 +465,12 @@ fn execute_unbind(
     cfg: &HostPortConfig,
 ) -> anyhow::Result<()> {
     let protocol: IpProtocol = cfg.protocol.clone().into();
+    let is_ipv6 = matches!(
+        cfg.host_address,
+        Some(net_backend_resources::consomme::HostIpAddress::Ipv6(_))
+    );
     let result = match protocol {
-        IpProtocol::Tcp => consomme.unbind_tcp_port(cfg.guest_port),
+        IpProtocol::Tcp => consomme.unbind_tcp_port(cfg.guest_port, is_ipv6),
         IpProtocol::Udp => consomme.unbind_udp_port(cfg.guest_port),
     };
     result.map_err(|e| anyhow::anyhow!(e).context("failed to unbind port"))

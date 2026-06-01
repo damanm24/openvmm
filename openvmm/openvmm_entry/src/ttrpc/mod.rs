@@ -280,9 +280,9 @@ impl VmService {
                 controller.send(VmControllerRpc::Quit);
             }
         }
-        if let Some(task) = self.controller_task.take() {
-            task.await;
-        }
+        // if let Some(task) = self.controller_task.take() {
+        //     task.await;
+        // }
 
         // Complete any pending WaitVm with an error.
         if let Some((_, response)) = self.wait_vm_response.take() {
@@ -380,9 +380,6 @@ impl VmService {
                 // Shut down the controller (which stops and joins the worker).
                 if let Some(controller) = self.vm_controller.take() {
                     controller.send(VmControllerRpc::Quit);
-                }
-                if let Some(task) = self.controller_task.take() {
-                    task.await;
                 }
                 self.vm.take();
                 self.vm_controller_events.take();
@@ -669,7 +666,11 @@ impl VmService {
                     tag: virtiofs.tag,
                     fs: virtio_resources::fs::VirtioFsBackend::HostFs {
                         root_path: virtiofs.root_path,
-                        mount_options: String::new(),
+                        mount_options: if virtiofs.read_only {
+                            "ro".to_string()
+                        } else {
+                            String::new()
+                        },
                     },
                 }
                 .into_resource();
@@ -917,9 +918,10 @@ impl VmService {
                             } else {
                                 anyhow::bail!("invalid protocol {}", port.protocol);
                             };
+                            let host_address = parse_host_address(&port.host_address)?;
                             let cfg = HostPortConfig {
                                 protocol,
-                                host_address: None,
+                                host_address,
                                 host_port: port
                                     .host_port
                                     .try_into()
@@ -956,9 +958,10 @@ impl VmService {
                             } else {
                                 anyhow::bail!("invalid protocol {}", port.protocol);
                             };
+                            let host_address = parse_host_address(&port.host_address)?;
                             let cfg = HostPortConfig {
                                 protocol,
-                                host_address: None,
+                                host_address,
                                 host_port: port
                                     .host_port
                                     .try_into()
@@ -998,7 +1001,11 @@ impl VmService {
                         tag: virtiofs.tag,
                         fs: virtio_resources::fs::VirtioFsBackend::HostFs {
                             root_path: virtiofs.root_path,
-                            mount_options: String::new(),
+                            mount_options: if virtiofs.read_only {
+                                "ro".to_string()
+                            } else {
+                                String::new()
+                            },
                         },
                     }
                     .into_resource();
@@ -1041,6 +1048,18 @@ fn open_socket_backend(
     } else {
         (bind_serial, "bind")
     }
+}
+
+/// Parse a host address string from the proto into an optional `HostIpAddress`.
+/// Empty string returns `None` (which defaults to `0.0.0.0` in consomme).
+fn parse_host_address(
+    addr: &str,
+) -> anyhow::Result<Option<net_backend_resources::consomme::HostIpAddress>> {
+    if addr.is_empty() {
+        return Ok(None);
+    }
+    let ip: std::net::IpAddr = addr.parse().context("invalid host_address")?;
+    Ok(Some(net_backend_resources::consomme::HostIpAddress::from(ip)))
 }
 
 fn parse_nic_config(
