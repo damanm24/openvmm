@@ -45,8 +45,9 @@ pub enum VmRpc {
     /// The worker pauses the VM internally, collects state, and restores
     /// the prior running state afterward. The caller provides an open file
     /// handle to write to (typically a temporary file that gets renamed
-    /// into place on success).
-    DumpState(FailableRpc<File, ()>),
+    /// into place on success) and a flag selecting whether to XPRESS-compress
+    /// guest RAM blocks.
+    DumpState(FailableRpc<(File, bool), ()>),
 }
 
 #[derive(Debug, MeshPayload, thiserror::Error)]

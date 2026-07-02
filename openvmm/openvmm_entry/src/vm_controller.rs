@@ -58,7 +58,10 @@ pub enum VmControllerRpc {
     /// Save a VM snapshot to a directory.
     SaveSnapshot(Rpc<String, Result<(), mesh::error::RemoteError>>),
     /// Dump VM state (VP registers + memory) to a `.vmrs` file.
-    DumpState(Rpc<String, Result<(), mesh::error::RemoteError>>),
+    ///
+    /// The parameter is `(path, compress)`, where `compress` selects XPRESS
+    /// compression of guest RAM blocks.
+    DumpState(Rpc<(String, bool), Result<(), mesh::error::RemoteError>>),
     /// Service (update) the VTL2 firmware.
     ServiceVtl2(Rpc<ServiceVtl2Params, Result<u64, mesh::error::RemoteError>>),
     /// Stop the VM and quit.
@@ -383,8 +386,8 @@ impl VmController {
                 req.complete(result.map_err(mesh::error::RemoteError::new));
             }
             VmControllerRpc::DumpState(req) => {
-                let (path, req) = req.split();
-                let result = self.handle_dump_state(Path::new(&path)).await;
+                let ((path, compress), req) = req.split();
+                let result = self.handle_dump_state(Path::new(&path), compress).await;
                 req.complete(result.map_err(mesh::error::RemoteError::new));
             }
             VmControllerRpc::ServiceVtl2(req) => {
@@ -493,7 +496,7 @@ impl VmController {
         Ok(())
     }
 
-    async fn handle_dump_state(&self, path: &Path) -> anyhow::Result<()> {
+    async fn handle_dump_state(&self, path: &Path, compress: bool) -> anyhow::Result<()> {
         // Write to a temporary file in the same directory, then rename into
         // place so readers never see a partially-written dump.
         let parent = path.parent().unwrap_or(Path::new("."));
@@ -503,7 +506,10 @@ impl VmController {
         // Dump state to the temp file (worker pauses, collects VP state +
         // streams memory, then resumes).
         self.vm_rpc
-            .call_failable(VmRpc::DumpState, tmp_file.as_file().try_clone()?)
+            .call_failable(
+                VmRpc::DumpState,
+                (tmp_file.as_file().try_clone()?, compress),
+            )
             .await
             .context("failed to dump state")?;
 

@@ -690,6 +690,7 @@ impl VmService {
             rtc_delta_milliseconds: 0,
             automatic_guest_reset: true,
             crash_dump_path: None,
+            crash_dump_compress: false,
             efi_diagnostics_log_level: Default::default(),
         };
 

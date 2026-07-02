@@ -2004,6 +2004,7 @@ async fn vm_config_from_command_line(
             .crash_dump_path
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned()),
+        crash_dump_compress: opt.crash_dump_compress,
         efi_diagnostics_log_level: {
             match opt.efi_diagnostics_log_level.unwrap_or_default() {
                 EfiDiagnosticsLogLevelCli::Default => EfiDiagnosticsLogLevelType::Default,

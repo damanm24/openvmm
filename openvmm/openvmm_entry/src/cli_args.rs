@@ -982,6 +982,11 @@ flags:
     #[clap(long, value_name = "PATH")]
     pub crash_dump_path: Option<PathBuf>,
 
+    /// XPRESS-compress the guest RAM blocks of the automatic crash dump to
+    /// reduce its size. Requires `--crash-dump-path`.
+    #[clap(long, requires = "crash_dump_path")]
+    pub crash_dump_compress: bool,
+
     /// what to do when the guest watchdog fires (the guest stopped petting it):
     /// reset the VM (default), halt it for inspection, or exit the VMM process
     /// (use `exit:<code>` to set the exit status). Requires `--guest-watchdog`.

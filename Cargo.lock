@@ -3507,6 +3507,7 @@ dependencies = [
  "static_assertions",
  "tempfile",
  "virt",
+ "xpress",
  "zerocopy",
 ]
 
@@ -10504,6 +10505,7 @@ dependencies = [
  "vmgs_resources",
  "vmm_test_igvm_agent",
  "vmm_test_macros",
+ "xpress",
  "zerocopy",
 ]
 
@@ -11566,6 +11568,13 @@ dependencies = [
  "tracing",
  "x86defs",
  "zerocopy",
+]
+
+[[package]]
+name = "xpress"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.16",
 ]
 
 [[package]]

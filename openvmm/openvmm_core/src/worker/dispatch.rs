@@ -221,6 +221,7 @@ impl Manifest {
             rtc_delta_milliseconds: config.rtc_delta_milliseconds,
             automatic_guest_reset: config.automatic_guest_reset,
             crash_dump_path: config.crash_dump_path,
+            crash_dump_compress: config.crash_dump_compress,
             efi_diagnostics_log_level: match config.efi_diagnostics_log_level {
                 EfiDiagnosticsLogLevelType::Default => LogLevel::make_default(),
                 EfiDiagnosticsLogLevelType::Info => LogLevel::make_info(),
@@ -273,6 +274,7 @@ pub struct Manifest {
     rtc_delta_milliseconds: i64,
     automatic_guest_reset: bool,
     crash_dump_path: Option<String>,
+    crash_dump_compress: bool,
     efi_diagnostics_log_level: LogLevel,
 }
 
@@ -791,6 +793,8 @@ struct LoadedVmInner {
     automatic_guest_reset: bool,
     /// If set, write a `.vmrs` dump to this path when the guest triple-faults.
     crash_dump_path: Option<String>,
+    /// Whether to XPRESS-compress the automatic crash dump's RAM blocks.
+    crash_dump_compress: bool,
     chipset: Arc<vmotherboard::Chipset>,
     /// Instantiated IOMMU devices (ACPI configs + per-RC shared state),
     /// keyed by IOMMU type. `IommuDevices::None` when no IOMMU is configured.
@@ -2999,6 +3003,7 @@ impl InitializedVm {
                 client_notify_send,
                 automatic_guest_reset: cfg.automatic_guest_reset,
                 crash_dump_path: cfg.crash_dump_path,
+                crash_dump_compress: cfg.crash_dump_compress,
                 chipset: chipset.chipset.clone(),
                 iommu_devices,
                 #[cfg(guest_arch = "x86_64")]
@@ -3787,8 +3792,10 @@ impl LoadedVm {
                         .await
                     }
                     VmRpc::DumpState(rpc) => {
-                        rpc.handle_failable(async |file| self.dump_state(file).await)
-                            .await
+                        rpc.handle_failable(async |(file, compress)| {
+                            self.dump_state(file, compress).await
+                        })
+                        .await
                     }
                 },
                 Event::Halt(Err(_)) => break,
@@ -3804,8 +3811,12 @@ impl LoadedVm {
                         // the client (which decides the configured crash action).
                         if matches!(reason, HaltReason::TripleFault { .. }) {
                             if let Some(path) = self.inner.crash_dump_path.clone() {
+                                let compress = self.inner.crash_dump_compress;
                                 tracing::info!(%path, "dumping VM state on guest crash");
-                                match self.write_crash_dump(std::path::Path::new(&path)).await {
+                                match self
+                                    .write_crash_dump(std::path::Path::new(&path), compress)
+                                    .await
+                                {
                                     Ok(()) => tracing::info!(
                                         %path,
                                         "VM state dumped to VMRS file on guest crash"
@@ -3984,6 +3995,7 @@ impl LoadedVm {
             rtc_delta_milliseconds: 0, // TODO
             automatic_guest_reset: self.inner.automatic_guest_reset,
             crash_dump_path: self.inner.crash_dump_path.clone(),
+            crash_dump_compress: self.inner.crash_dump_compress,
             efi_diagnostics_log_level: Default::default(),
         };
         #[expect(unreachable_code, reason = "TODO")]

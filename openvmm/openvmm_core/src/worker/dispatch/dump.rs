@@ -16,10 +16,11 @@ impl LoadedVm {
     /// Dumps VM state (VP registers + memory) to a `.vmrs` file.
     ///
     /// Pauses the VM if running, collects VP state and streams memory,
-    /// then restores the prior running state.
-    pub(super) async fn dump_state(&mut self, file: File) -> anyhow::Result<()> {
+    /// then restores the prior running state. When `compress` is set, guest
+    /// RAM blocks are XPRESS-compressed.
+    pub(super) async fn dump_state(&mut self, file: File, compress: bool) -> anyhow::Result<()> {
         let was_running = self.pause().await;
-        let result = self.dump_state_inner(file).await;
+        let result = self.dump_state_inner(file, compress).await;
         if was_running {
             self.resume().await;
         }
@@ -32,14 +33,19 @@ impl LoadedVm {
     /// The VPs are already halted at that point, so this dumps directly
     /// without pausing/resuming. The dump is written to a sibling temporary
     /// file and renamed into place so readers never observe a partial dump.
-    pub(super) async fn write_crash_dump(&mut self, path: &Path) -> anyhow::Result<()> {
+    /// When `compress` is set, guest RAM blocks are XPRESS-compressed.
+    pub(super) async fn write_crash_dump(
+        &mut self,
+        path: &Path,
+        compress: bool,
+    ) -> anyhow::Result<()> {
         let mut tmp = OsString::from(path.as_os_str());
         tmp.push(".tmp");
         let tmp_path = Path::new(&tmp);
 
         let file = File::create(tmp_path)
             .with_context(|| format!("failed to create {}", tmp_path.display()))?;
-        if let Err(err) = self.dump_state_inner(file).await {
+        if let Err(err) = self.dump_state_inner(file, compress).await {
             let _ = std::fs::remove_file(tmp_path);
             return Err(err);
         }
@@ -48,8 +54,8 @@ impl LoadedVm {
         Ok(())
     }
 
-    async fn dump_state_inner(&mut self, file: File) -> anyhow::Result<()> {
-        tracing::info!("dumping VM state to VMRS");
+    async fn dump_state_inner(&mut self, file: File, compress: bool) -> anyhow::Result<()> {
+        tracing::info!(compress, "dumping VM state to VMRS");
 
         // Build the partition state blob (VP registers as HV chunks).
         let partition_state_blob = self
@@ -63,6 +69,7 @@ impl LoadedVm {
         // key table / header writes interspersed with large memory blocks.
         let file = std::io::BufWriter::with_capacity(256 * 1024, file);
         let mut vmrs = VmrsWriter::new(file).context("failed to initialize VMRS writer")?;
+        vmrs.set_compression(compress);
 
         // Add memory ranges from the VM topology.
         for ram_range in self.inner.mem_layout.ram() {

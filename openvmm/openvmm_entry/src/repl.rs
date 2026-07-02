@@ -121,6 +121,9 @@ enum InteractiveCommand {
     DumpState {
         /// Path for the output .vmrs file.
         path: PathBuf,
+        /// XPRESS-compress guest RAM blocks to reduce the file size.
+        #[clap(long, short)]
+        compress: bool,
     },
 
     /// Do a pulsed save restore (pause, save, reset, restore, resume) to the VM.
@@ -887,11 +890,11 @@ pub(crate) async fn run_repl(
                     }
                 }
             }
-            InteractiveCommand::DumpState { path } => {
+            InteractiveCommand::DumpState { path, compress } => {
                 match vm_controller
                     .call(
                         VmControllerRpc::DumpState,
-                        path.to_string_lossy().into_owned(),
+                        (path.to_string_lossy().into_owned(), compress),
                     )
                     .await
                     .map_err(anyhow::Error::from)

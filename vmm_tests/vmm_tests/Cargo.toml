@@ -46,8 +46,11 @@ virtio_resources.workspace = true
 vm_resource.workspace = true
 disk_vhd1.workspace = true
 
-guid.workspace = true
+# Used to parse and validate `.vmrs` dump files produced by `dump_state`.
 hvs_file.workspace = true
+xpress.workspace = true
+
+guid.workspace = true
 kmsg.workspace = true
 mesh.workspace = true
 pal.workspace = true

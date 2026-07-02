@@ -12,6 +12,7 @@ hvs_file.workspace = true
 memory_range.workspace = true
 static_assertions.workspace = true
 virt.workspace = true
+xpress.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]

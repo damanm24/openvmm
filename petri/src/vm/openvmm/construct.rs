@@ -630,6 +630,7 @@ impl PetriVmConfigOpenVmm {
 
             // No automatic crash dump unless a test opts in via with_custom_config
             crash_dump_path: None,
+            crash_dump_compress: false,
 
             // Disabled for VMM tests by default
             #[cfg(windows)]

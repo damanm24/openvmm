@@ -44,6 +44,7 @@ pub trait GuestMemoryReader {
 pub struct VmrsWriter<W: Write + Seek> {
     hvs: HvsFileWriter<W>,
     ranges: Vec<MemoryRange>,
+    compress: bool,
 }
 
 impl<W: Write + Seek> VmrsWriter<W> {
@@ -52,7 +53,19 @@ impl<W: Write + Seek> VmrsWriter<W> {
         Ok(Self {
             hvs: HvsFileWriter::new(writer)?,
             ranges: Vec::new(),
+            compress: false,
         })
+    }
+
+    /// Enables or disables XPRESS compression of guest RAM blocks.
+    ///
+    /// When enabled, each 1 MiB RAM block is compressed with the Xpress plain
+    /// LZ77 algorithm; blocks that do not shrink are written uncompressed.
+    /// The Hyper-V dump provider distinguishes the two cases by block size
+    /// (a full 1 MiB block is uncompressed; a shorter block is compressed),
+    /// so no extra metadata is required. Disabled by default.
+    pub fn set_compression(&mut self, compress: bool) {
+        self.compress = compress;
     }
 
     /// Declares a contiguous guest physical memory range to include.
@@ -123,7 +136,21 @@ impl<W: Write + Seek> VmrsWriter<W> {
 
                 key_buf.clear();
                 write!(key_buf, "/savedstate/RamBlock{data_block_idx}").unwrap();
-                self.hvs.add_array(&key_buf, &block_buf)?;
+
+                // Optionally compress the block. The reader treats any block
+                // shorter than DATA_BLOCK_SIZE as XPRESS-compressed, so only
+                // write the compressed form when it actually shrinks; an
+                // incompressible block is stored raw at its full 1 MiB size.
+                if self.compress {
+                    let compressed = xpress::compress(&block_buf);
+                    if compressed.len() < DATA_BLOCK_SIZE {
+                        self.hvs.add_array(&key_buf, &compressed)?;
+                    } else {
+                        self.hvs.add_array(&key_buf, &block_buf)?;
+                    }
+                } else {
+                    self.hvs.add_array(&key_buf, &block_buf)?;
+                }
                 data_block_idx += 1;
                 gpa += read_len as u64;
             }
@@ -306,5 +333,80 @@ mod tests {
         let mut mem = FillReader(0);
         let err = vmrs.finish(&blob, &mut mem).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Reader that stamps the first 8 bytes of each block with its GPA and
+    /// leaves the rest zero — highly compressible, so compressed blocks come
+    /// out well under 1 MiB.
+    struct StampReader;
+    impl GuestMemoryReader for StampReader {
+        fn read_gpa(&mut self, gpa: u64, buf: &mut [u8]) -> io::Result<()> {
+            buf.fill(0);
+            buf[..8].copy_from_slice(&gpa.to_le_bytes());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn compressed_blocks_round_trip() {
+        let blob = make_default_blob();
+
+        let buf = Cursor::new(Vec::new());
+        let mut vmrs = VmrsWriter::new(buf).unwrap();
+        vmrs.set_compression(true);
+        const BLOCKS: u64 = 3;
+        vmrs.add_memory_range(MemoryRange::new(0..BLOCKS * DATA_BLOCK_SIZE as u64));
+
+        let mut mem = StampReader;
+        let data = vmrs.finish(&blob, &mut mem).unwrap().into_inner();
+
+        let mut hvs_reader = HvsFileReader::open(Cursor::new(&data)).unwrap();
+        for i in 0..BLOCKS {
+            let stored = hvs_reader
+                .read_array(&format!("/savedstate/RamBlock{i}"))
+                .unwrap();
+            // A compressible block must have been stored compressed (shorter
+            // than a full block) and must decompress back to the original.
+            assert!(
+                stored.len() < DATA_BLOCK_SIZE,
+                "RamBlock{i} was not compressed ({} bytes)",
+                stored.len()
+            );
+            let restored = xpress::decompress(&stored, DATA_BLOCK_SIZE).unwrap();
+            let gpa = i * DATA_BLOCK_SIZE as u64;
+            assert_eq!(&restored[..8], &gpa.to_le_bytes());
+            assert!(restored[8..].iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn incompressible_block_stored_raw() {
+        let blob = make_default_blob();
+
+        // Pseudo-random, incompressible data via a simple LCG.
+        struct RandomReader;
+        impl GuestMemoryReader for RandomReader {
+            fn read_gpa(&mut self, gpa: u64, buf: &mut [u8]) -> io::Result<()> {
+                let mut state = gpa ^ 0x9E37_79B9_7F4A_7C15;
+                for b in buf.iter_mut() {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    *b = (state >> 33) as u8;
+                }
+                Ok(())
+            }
+        }
+
+        let buf = Cursor::new(Vec::new());
+        let mut vmrs = VmrsWriter::new(buf).unwrap();
+        vmrs.set_compression(true);
+        vmrs.add_memory_range(MemoryRange::new(0..DATA_BLOCK_SIZE as u64));
+
+        let mut mem = RandomReader;
+        let data = vmrs.finish(&blob, &mut mem).unwrap().into_inner();
+
+        let mut hvs_reader = HvsFileReader::open(Cursor::new(&data)).unwrap();
+        let stored = hvs_reader.read_array("/savedstate/RamBlock0").unwrap();
+        // Incompressible data must fall back to the raw 1 MiB representation.
+        assert_eq!(stored.len(), DATA_BLOCK_SIZE);
     }
 }

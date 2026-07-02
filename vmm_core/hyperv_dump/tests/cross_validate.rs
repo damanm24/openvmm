@@ -47,7 +47,6 @@ mod dll {
         ) -> i32;
     }}
 }
-
 /// Sets the DLL search path to the Windows SDK directory so that
 /// `VmSavedStateDumpProvider.dll` can be loaded.
 ///

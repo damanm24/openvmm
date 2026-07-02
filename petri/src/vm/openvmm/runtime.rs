@@ -311,6 +311,17 @@ impl PetriVmOpenVmm {
         ) -> anyhow::Result<()>
     );
     petri_vm_fn!(
+        /// Dump VM state (VP registers + guest memory) to an open `.vmrs` file
+        /// handle. The worker pauses the VM, collects state, and restores the
+        /// prior running state. When `compress` is set, guest RAM blocks are
+        /// XPRESS-compressed.
+        pub async fn dump_state(
+            &mut self,
+            file: std::fs::File,
+            compress: bool
+        ) -> anyhow::Result<()>
+    );
+    petri_vm_fn!(
         /// Resets the hardware state of the VM, simulating a power cycle.
         pub async fn reset(&mut self) -> anyhow::Result<()>
     );
@@ -515,6 +526,10 @@ impl PetriVmInner {
 
     async fn remove_pcie_device(&mut self, port_name: String) -> anyhow::Result<()> {
         self.worker.remove_pcie_device(port_name).await
+    }
+
+    async fn dump_state(&mut self, file: std::fs::File, compress: bool) -> anyhow::Result<()> {
+        self.worker.dump_state(file, compress).await
     }
 
     async fn restore_openhcl(&self) -> anyhow::Result<()> {

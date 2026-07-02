@@ -67,6 +67,9 @@ pub struct Config {
     /// If set, the worker writes a WinDbg-compatible `.vmrs` dump to this path
     /// when the guest triple-faults, before notifying the client of the halt.
     pub crash_dump_path: Option<String>,
+    /// Whether to XPRESS-compress the guest RAM blocks of the automatic crash
+    /// dump. Only meaningful when `crash_dump_path` is set.
+    pub crash_dump_compress: bool,
     pub efi_diagnostics_log_level: EfiDiagnosticsLogLevelType,
 }
 
