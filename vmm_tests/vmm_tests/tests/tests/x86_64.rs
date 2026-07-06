@@ -698,17 +698,72 @@ fn validate_vmrs_dump(path: &std::path::Path, expect_compressed: bool) -> anyhow
     Ok(file_len)
 }
 
-/// Dump a running guest's state to a `.vmrs` file in both uncompressed and
+/// Assert that two `.vmrs` dumps taken of the *same* (paused) guest memory
+/// have byte-identical guest RAM: every `RamBlock` in `compressed_path`
+/// (XPRESS-decoded when stored compressed) must equal the corresponding full
+/// block in `uncompressed_path`. This proves the compression path is lossless
+/// on real guest memory.
+fn assert_dumps_equivalent(
+    uncompressed_path: &std::path::Path,
+    compressed_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let mut uncompressed =
+        hvs_file::reader::HvsFileReader::open(std::fs::File::open(uncompressed_path)?)?;
+    let mut compressed =
+        hvs_file::reader::HvsFileReader::open(std::fs::File::open(compressed_path)?)?;
+
+    let mut block_idx = 0u64;
+    loop {
+        let key = format!("/savedstate/RamBlock{block_idx}");
+        let in_uncompressed = uncompressed.contains_key(&key);
+        assert_eq!(
+            in_uncompressed,
+            compressed.contains_key(&key),
+            "RAM block {block_idx} present in one dump but not the other"
+        );
+        if !in_uncompressed {
+            break;
+        }
+
+        let raw = uncompressed.read_array(&key)?;
+        assert_eq!(
+            raw.len(),
+            RAM_BLOCK_SIZE,
+            "uncompressed RAM block {block_idx} is not a full block"
+        );
+
+        let stored = compressed.read_array(&key)?;
+        let decoded = if stored.len() == RAM_BLOCK_SIZE {
+            stored
+        } else {
+            xpress::decompress(&stored, RAM_BLOCK_SIZE)
+                .with_context(|| format!("failed to decompress RAM block {block_idx}"))?
+        };
+
+        assert!(
+            decoded == raw,
+            "RAM block {block_idx} differs after an XPRESS round-trip"
+        );
+        block_idx += 1;
+    }
+    assert!(block_idx > 0, "dumps contained no RAM blocks");
+    Ok(())
+}
+
+/// Dump a booted guest's state to a `.vmrs` file in both uncompressed and
 /// XPRESS-compressed forms, then validate the results.
 ///
-/// This exercises the end-to-end `dump_state` path against a real booted guest
-/// (real VP registers and guest RAM), covering both compression modes, and
-/// verifies that:
+/// The two dumps are taken while the VM is paused so they capture identical
+/// guest memory. This exercises the end-to-end `dump_state` path against a real
+/// booted guest (real VP registers and guest RAM), covering both compression
+/// modes, and verifies that:
 /// - both dumps parse as HyperV Storage files with the required saved-state
 ///   keys,
 /// - uncompressed RAM blocks are stored at their full 1 MiB size,
-/// - compressed RAM blocks shrink and decode back to 1 MiB via XPRESS, and
-/// - the compressed dump is smaller than the uncompressed one.
+/// - compressed RAM blocks shrink and decode back to 1 MiB via XPRESS,
+/// - the compressed dump is smaller than the uncompressed one, and
+/// - compression is lossless: every compressed RAM block decodes to exactly
+///   the bytes in the uncompressed dump.
 #[openvmm_test(linux_direct_x64)]
 async fn dump_state_vmrs(config: PetriVmBuilder<OpenVmmPetriBackend>) -> Result<(), anyhow::Error> {
     let work_dir = tempfile::tempdir().context("failed to create temp dir")?;
@@ -720,8 +775,11 @@ async fn dump_state_vmrs(config: PetriVmBuilder<OpenVmmPetriBackend>) -> Result<
     // Confirm the guest is up so the dump captures real state.
     agent.ping().await?;
 
-    // `dump_state` pauses the VM internally, collects state, and restores the
-    // prior running state, so the guest keeps running after each call.
+    // Pause the VM so both dumps capture the *same* guest memory. This makes
+    // the size comparison fair and lets us assert byte-for-byte fidelity
+    // between the compressed and uncompressed dumps below.
+    vm.backend().pause().await.context("failed to pause VM")?;
+
     vm.backend()
         .dump_state(std::fs::File::create(&uncompressed_path)?, false)
         .await
@@ -730,6 +788,8 @@ async fn dump_state_vmrs(config: PetriVmBuilder<OpenVmmPetriBackend>) -> Result<
         .dump_state(std::fs::File::create(&compressed_path)?, true)
         .await
         .context("compressed dump_state failed")?;
+
+    vm.backend().resume().await.context("failed to resume VM")?;
 
     // The guest should still be alive after dumping.
     agent.ping().await?;
@@ -740,6 +800,10 @@ async fn dump_state_vmrs(config: PetriVmBuilder<OpenVmmPetriBackend>) -> Result<
         compressed_len < uncompressed_len,
         "compressed dump ({compressed_len} bytes) should be smaller than uncompressed ({uncompressed_len} bytes)"
     );
+
+    // Compression must be lossless: decompressing each RAM block of the
+    // compressed dump must reproduce the uncompressed dump exactly.
+    assert_dumps_equivalent(&uncompressed_path, &compressed_path)?;
 
     // Clean shutdown.
     agent.power_off().await?;
