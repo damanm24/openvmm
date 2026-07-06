@@ -190,6 +190,7 @@ struct VmResources {
     scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
     nvme_vtl2_rpc: Option<mesh::Sender<NvmeControllerRequest>>,
     consomme_rpc: Option<mesh::Sender<net_backend_resources::consomme::ConsommeRequest>>,
+    balloon_rpc: Option<mesh::Sender<virtio_resources::balloon::BalloonRequest>>,
     ged_rpc: Option<mesh::Sender<get_resources::ged::GuestEmulationRequest>>,
     vtl2_settings: Option<vtl2_settings_proto::Vtl2Settings>,
     /// Receives dirty rectangles from the synthetic video device for the VNC worker.
@@ -1785,6 +1786,18 @@ async fn vm_config_from_command_line(
         }
     }
 
+    if let Some(initial_target_bytes) = opt.virtio_balloon {
+        let (send, recv) = mesh::channel();
+        resources.balloon_rpc = Some(send);
+        let resource: Resource<VirtioDeviceHandle> =
+            virtio_resources::balloon::VirtioBalloonHandle {
+                initial_target_bytes,
+                recv: Some(recv),
+            }
+            .into_resource();
+        add_virtio_device(VirtioBusCli::Pci, resource);
+    }
+
     if let Some(backend) = virtio_console_backend {
         let resource: Resource<VirtioDeviceHandle> =
             virtio_resources::console::VirtioConsoleHandle { backend }.into_resource();
@@ -2758,6 +2771,7 @@ async fn run_control_inner(
             scsi_rpc: resources.scsi_rpc,
             nvme_vtl2_rpc: resources.nvme_vtl2_rpc,
             consomme_rpc: resources.consomme_rpc,
+            balloon_rpc: resources.balloon_rpc,
             shutdown_ic: resources.shutdown_ic,
             kvp_ic: resources.kvp_ic,
             console_in: resources.console_in,

@@ -207,6 +207,32 @@ impl PetriVmConfigOpenVmm {
         self
     }
 
+    /// Add a virtio memory balloon device on a PCIe root port.
+    ///
+    /// `initial_target_bytes` is the amount of guest memory the balloon
+    /// requests the guest to release at boot. Reclaiming memory requires the
+    /// guest RAM to be backed by private memory.
+    ///
+    /// A runtime control channel is wired so the target can be changed while
+    /// the VM is running via [`super::runtime::PetriVmOpenVmm::set_balloon_target`].
+    pub fn with_virtio_balloon(mut self, port_name: &str, initial_target_bytes: u64) -> Self {
+        let (send, recv) = mesh::channel();
+        self.config.pcie_devices.push(PcieDeviceConfig {
+            port_name: port_name.to_string(),
+            resource: virtio_resources::VirtioPciDeviceHandle(
+                virtio_resources::balloon::VirtioBalloonHandle {
+                    initial_target_bytes,
+                    recv: Some(recv),
+                }
+                .into_resource(),
+            )
+            .into_resource(),
+        });
+        self.resources.balloon_control = Some(send);
+
+        self
+    }
+
     /// Add a virtio-net NIC with consomme and TCP port forwarding for
     /// pipette. Used for Windows no-vmbus guests where virtio-vsock is
     /// unavailable.

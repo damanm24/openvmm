@@ -35,6 +35,8 @@ pub struct PciDeviceResolveContext<'a> {
     pub doorbell_registration: Option<Arc<dyn DoorbellRegistration>>,
     /// An object with which to register shared memory regions.
     pub shared_mem_mapper: Option<&'a dyn guestmem::MemoryMapper>,
+    /// Host memory reclaim interface (virtio-balloon), when available.
+    pub memory_reclaim: Option<Arc<dyn guestmem::MemoryReclaim>>,
 }
 
 /// Resolves a PCI device resource, builds the corresponding device, and builds
@@ -139,6 +141,7 @@ pub async fn resolve_and_add_pci_device(
                         driver_source: ctx.driver_source,
                         doorbell_registration: ctx.doorbell_registration,
                         shared_mem_mapper: ctx.shared_mem_mapper,
+                        memory_reclaim: ctx.memory_reclaim,
                     },
                 )
                 .await

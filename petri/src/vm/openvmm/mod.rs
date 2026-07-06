@@ -197,6 +197,11 @@ struct PetriVmResourcesOpenVmm {
     /// resolver has bound the socket.
     tcp_pipette_port: Option<mesh::OneshotReceiver<u16>>,
 
+    /// Runtime control channel for a virtio-balloon device, if one was
+    /// added via [`PetriVmConfigOpenVmm::with_virtio_balloon`]. Used to
+    /// change the balloon target size while the VM is running.
+    balloon_control: Option<Sender<virtio_resources::balloon::BalloonRequest>>,
+
     // Externally injected management stuff also needed at runtime.
     driver: DefaultDriver,
     openvmm_path: ResolvedArtifact,

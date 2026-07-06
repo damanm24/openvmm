@@ -531,12 +531,52 @@ impl VaMapper {
         self.process.as_ref()
     }
 
+    /// Returns true if this mapper has any private (reclaimable) RAM ranges.
+    pub fn has_private_ranges(&self) -> bool {
+        !self.private_ranges.is_empty()
+    }
+
+    /// Reclaims (decommits) a guest-physical range backed by private RAM,
+    /// releasing its physical pages to the host. The next guest access
+    /// faults in fresh zero pages.
+    ///
+    /// Unlike [`Self::decommit`], this validates the range against the
+    /// declared private ranges and returns an error rather than panicking.
+    /// It is safe to call with ranges derived from untrusted guest input
+    /// (e.g. virtio-balloon PFNs).
+    pub fn try_reclaim(&self, offset: u64, len: u64) -> Result<(), std::io::Error> {
+        const PAGE_SIZE: u64 = 4096;
+        if len == 0 {
+            return Ok(());
+        }
+        if offset % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reclaim range is not page-aligned",
+            ));
+        }
+        let end = offset.checked_add(len).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "reclaim range overflow")
+        })?;
+        if !self
+            .private_ranges
+            .iter()
+            .any(|r| offset >= r.start() && end <= r.end())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reclaim range is not backed by private RAM",
+            ));
+        }
+        self.decommit(offset as usize, len as usize)
+    }
+
     /// Decommits a range of private RAM, releasing physical pages back to the
     /// host.
     ///
     /// The caller must ensure this is only called on ranges backed by
-    /// private anonymous memory.
-    #[expect(dead_code)] // Will be used by ballooning / memory hot-remove.
+    /// private anonymous memory. Prefer [`Self::try_reclaim`] for ranges
+    /// that may come from untrusted input.
     pub fn decommit(&self, offset: usize, len: usize) -> Result<(), std::io::Error> {
         assert!(
             self.private_ranges

@@ -93,6 +93,7 @@ pub use memory_manager::DeviceMemoryMapper;
 pub use memory_manager::GuestMemoryBuilder;
 pub use memory_manager::GuestMemoryClient;
 pub use memory_manager::GuestMemoryManager;
+pub use memory_manager::GuestMemoryReclaim;
 pub use memory_manager::MemoryBuildError;
 pub use memory_manager::PartitionAttachError;
 pub use memory_manager::RamBackingRequest;

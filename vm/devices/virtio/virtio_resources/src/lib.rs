@@ -95,6 +95,36 @@ pub mod rng {
     }
 }
 
+pub mod balloon {
+    use mesh::MeshPayload;
+    use vm_resource::ResourceId;
+    use vm_resource::kind::VirtioDeviceHandle;
+
+    /// A runtime request to a running virtio-balloon device.
+    #[derive(MeshPayload)]
+    pub enum BalloonRequest {
+        /// Set the balloon target size, in bytes. The device converts this
+        /// to a page count, updates its config space, and signals the guest
+        /// to inflate or deflate toward the target.
+        SetTarget(mesh::rpc::FailableRpc<u64, ()>),
+    }
+
+    /// Handle for a virtio memory balloon device.
+    #[derive(MeshPayload)]
+    pub struct VirtioBalloonHandle {
+        /// Initial balloon target size in bytes (the amount of guest memory
+        /// to reclaim at start). Zero means the balloon starts empty.
+        pub initial_target_bytes: u64,
+        /// Optional channel for runtime target changes after the device
+        /// starts.
+        pub recv: Option<mesh::Receiver<BalloonRequest>>,
+    }
+
+    impl ResourceId<VirtioDeviceHandle> for VirtioBalloonHandle {
+        const ID: &'static str = "virtio-balloon";
+    }
+}
+
 pub mod blk {
     use mesh::MeshPayload;
     use vm_resource::Resource;

@@ -115,11 +115,41 @@ open_enum::open_enum! {
         BLK = 2,
         CONSOLE = 3,
         RNG = 4,
+        BALLOON = 5,
         P9 = 9,
         VSOCK = 19,
         FS = 26,
         PMEM = 27,
     }
+}
+
+/// Traditional memory balloon device constants (virtio spec §5.5).
+pub mod balloon {
+    /// Inflate virtqueue index — driver supplies pages to the balloon
+    /// (host reclaims them).
+    pub const INFLATE_QUEUE: u16 = 0;
+    /// Deflate virtqueue index — driver reclaims pages from the balloon.
+    pub const DEFLATE_QUEUE: u16 = 1;
+
+    /// Byte offset of the `num_pages` config field (device-owned target).
+    pub const CONFIG_OFFSET_NUM_PAGES: u16 = 0;
+    /// Byte offset of the `actual` config field (written by the driver).
+    pub const CONFIG_OFFSET_ACTUAL: u16 = 4;
+
+    /// Shift applied to page frame numbers in inflate/deflate queue
+    /// buffers. The balloon protocol always uses 4096-byte pages,
+    /// regardless of the guest's actual page size.
+    pub const VIRTIO_BALLOON_PFN_SHIFT: u32 = 12;
+    /// Balloon page size in bytes (always 4096 per the spec).
+    pub const VIRTIO_BALLOON_PAGE_SIZE: u64 = 1 << VIRTIO_BALLOON_PFN_SHIFT;
+
+    // Feature bits (device-specific, occupy the low feature bank).
+    /// Host has to be told before pages from the balloon are used.
+    pub const VIRTIO_BALLOON_F_MUST_TELL_HOST: u32 = 0;
+    /// A virtqueue for reporting guest memory statistics is present.
+    pub const VIRTIO_BALLOON_F_STATS_VQ: u32 = 1;
+    /// Deflate balloon on guest out of memory condition.
+    pub const VIRTIO_BALLOON_F_DEFLATE_ON_OOM: u32 = 2;
 }
 
 // ACPI interrupt status flags

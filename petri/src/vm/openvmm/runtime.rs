@@ -274,6 +274,12 @@ impl PetriVmOpenVmm {
         pub async fn wait_for_kvp(&mut self) -> anyhow::Result<mesh::Sender<hyperv_ic_resources::kvp::KvpRpc>>
     );
     petri_vm_fn!(
+        /// Set the virtio-balloon target size in bytes at runtime. The device
+        /// updates its config space and signals the guest to inflate or
+        /// deflate the balloon toward the new target.
+        pub async fn set_balloon_target(&mut self, target_bytes: u64) -> anyhow::Result<()>
+    );
+    petri_vm_fn!(
         /// Stages the new OpenHCL file and saves the existing state.
         pub async fn save_openhcl(
             &mut self,
@@ -482,6 +488,21 @@ impl PetriVmInner {
             .context("failed to connect to KVP IC")?;
 
         Ok(send)
+    }
+
+    async fn set_balloon_target(&mut self, target_bytes: u64) -> anyhow::Result<()> {
+        let send = self
+            .resources
+            .balloon_control
+            .as_ref()
+            .context("no virtio-balloon device configured")?;
+        send.call_failable(
+            virtio_resources::balloon::BalloonRequest::SetTarget,
+            target_bytes,
+        )
+        .await
+        .context("failed to set balloon target")?;
+        Ok(())
     }
 
     async fn save_openhcl(

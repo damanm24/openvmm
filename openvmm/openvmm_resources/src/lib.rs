@@ -95,6 +95,7 @@ vm_resource::register_static_resolvers! {
     scsidisk::resolver::SimpleScsiResolver,
 
     // Virtio devices
+    virtio_balloon::resolver::VirtioBalloonResolver,
     virtio_blk::resolver::VirtioBlkResolver,
     virtio_console::resolver::VirtioConsoleResolver,
     #[cfg(any(windows, target_os = "linux"))]

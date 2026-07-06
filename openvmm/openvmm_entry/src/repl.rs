@@ -339,6 +339,16 @@ enum InteractiveCommand {
         /// The guest port to unbind.
         guest_port: u16,
     },
+
+    /// Set the virtio memory balloon target size.
+    ///
+    /// The value is the amount of guest memory to reclaim (the inflated
+    /// balloon size). Accepts an optional K/M/G/T suffix (e.g. `512M`).
+    Balloon {
+        /// The balloon target (inflated) size.
+        #[clap(value_parser = crate::cli_args::parse_memory)]
+        size: u64,
+    },
 }
 
 /// Subcommands for managing VTL2 settings.
@@ -434,6 +444,7 @@ pub(crate) struct ReplResources {
     pub scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
     pub nvme_vtl2_rpc: Option<mesh::Sender<NvmeControllerRequest>>,
     pub consomme_rpc: Option<mesh::Sender<ConsommeRequest>>,
+    pub balloon_rpc: Option<mesh::Sender<virtio_resources::balloon::BalloonRequest>>,
     pub shutdown_ic: Option<mesh::Sender<hyperv_ic_resources::shutdown::ShutdownRpc>>,
     pub kvp_ic: Option<mesh::Sender<hyperv_ic_resources::kvp::KvpConnectRpc>>,
     pub console_in: Option<Box<dyn AsyncWrite + Send + Unpin>>,
@@ -452,6 +463,7 @@ pub(crate) async fn run_repl(
         mut scsi_rpc,
         mut nvme_vtl2_rpc,
         consomme_rpc,
+        balloon_rpc,
         shutdown_ic,
         kvp_ic,
         console_in,
@@ -1563,6 +1575,22 @@ pub(crate) async fn run_repl(
                     }
                     Err(error) => {
                         tracing::error!(error = error.as_error(), "error unbinding port");
+                    }
+                }
+            }
+            InteractiveCommand::Balloon { size } => {
+                let action = async {
+                    let rpc = balloon_rpc.as_ref().context("no balloon device")?;
+                    rpc.call_failable(virtio_resources::balloon::BalloonRequest::SetTarget, size)
+                        .await?;
+                    anyhow::Ok(())
+                };
+                match action.await {
+                    Ok(()) => {
+                        tracing::info!(size, "balloon target set");
+                    }
+                    Err(error) => {
+                        tracing::error!(error = error.as_error(), "error setting balloon target");
                     }
                 }
             }

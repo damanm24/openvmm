@@ -724,6 +724,17 @@ impl GuestMemoryManager {
         }
     }
 
+    /// Returns a handle for reclaiming physical memory backing guest RAM
+    /// (e.g. for virtio-balloon inflation).
+    ///
+    /// Reclaim is only supported for private (anonymous) RAM; use
+    /// [`GuestMemoryReclaim::is_supported`] to check.
+    pub fn memory_reclaim(&self) -> GuestMemoryReclaim {
+        GuestMemoryReclaim {
+            va_mapper: self.va_mapper.clone(),
+        }
+    }
+
     /// Returns the shared memory resources that can be used to reconstruct the
     /// memory backing.
     ///
@@ -801,6 +812,32 @@ pub struct RamVisibilityControl {
     regions: Arc<Vec<RamRegion>>,
 }
 
+/// A handle for reclaiming physical memory backing guest RAM.
+///
+/// Used by device-driven memory management (e.g. virtio-balloon) to release
+/// physical pages back to the host. Only private (anonymous) RAM can be
+/// reclaimed.
+#[derive(Clone)]
+pub struct GuestMemoryReclaim {
+    va_mapper: Arc<VaMapper>,
+}
+
+impl GuestMemoryReclaim {
+    /// Returns true if reclaim is supported (the VM has private RAM).
+    pub fn is_supported(&self) -> bool {
+        self.va_mapper.has_private_ranges()
+    }
+
+    /// Reclaims the physical memory backing guest-physical range
+    /// `[gpa, gpa + len)`.
+    ///
+    /// `gpa` and `len` must be page-aligned. Returns an error rather than
+    /// panicking if the range is not backed by reclaimable private RAM, so
+    /// it is safe to call with ranges derived from untrusted guest input.
+    pub fn reclaim(&self, gpa: u64, len: u64) -> Result<(), io::Error> {
+        self.va_mapper.try_reclaim(gpa, len)
+    }
+}
 /// The RAM visibility for use with [`RamVisibilityControl::set_ram_visibility`].
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum RamVisibility {

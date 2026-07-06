@@ -114,6 +114,21 @@ pub trait VirtioDevice: InspectMut + Send {
     fn supports_save_restore(&self) -> bool {
         false
     }
+
+    /// Take the device's config-change notification receiver, if any.
+    ///
+    /// Most devices are driver-driven and never change their config space
+    /// autonomously; they return `None` (the default). Device-driven
+    /// devices (e.g. virtio-balloon, whose host-set target lives in config
+    /// space) create a channel at construction, keep the sender, and return
+    /// the receiver here. The transport takes it once at construction and,
+    /// whenever the device signals, bumps `config_generation` and raises a
+    /// config-change interrupt (subject to the DRIVER_OK guard).
+    ///
+    /// Called at most once, during transport construction.
+    fn config_change_receiver(&mut self) -> Option<mesh::Receiver<()>> {
+        None
+    }
 }
 
 /// Object-safe wrapper for [`VirtioDevice`].
@@ -166,6 +181,9 @@ pub trait DynVirtioDevice: InspectMut + Send {
 
     /// Whether the device supports save/restore.
     fn supports_save_restore(&self) -> bool;
+
+    /// Take the device's config-change notification receiver, if any.
+    fn config_change_receiver(&mut self) -> Option<mesh::Receiver<()>>;
 }
 
 impl<T: VirtioDevice> DynVirtioDevice for T {
@@ -228,5 +246,9 @@ impl<T: VirtioDevice> DynVirtioDevice for T {
 
     fn supports_save_restore(&self) -> bool {
         VirtioDevice::supports_save_restore(self)
+    }
+
+    fn config_change_receiver(&mut self) -> Option<mesh::Receiver<()>> {
+        VirtioDevice::config_change_receiver(self)
     }
 }

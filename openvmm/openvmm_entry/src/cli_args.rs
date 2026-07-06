@@ -695,7 +695,6 @@ options:
     /// add a virtio entropy (RNG) device
     #[clap(long)]
     pub virtio_rng: bool,
-
     /// add a virtio-rng device under either the PCI or MMIO bus, or whatever the hypervisor supports (pci | mmio | vpci | auto)
     #[clap(long, value_name = "BUS", default_value = "auto")]
     pub virtio_rng_bus: VirtioBusCli,
@@ -703,6 +702,15 @@ options:
     /// attach the virtio-rng device to the specified PCIe port (overrides --virtio-rng-bus)
     #[clap(long, value_name = "PORT", requires("virtio_rng"))]
     pub virtio_rng_pcie_port: Option<String>,
+
+    /// add a virtio memory balloon device (PCI) with the given initial
+    /// inflated size, i.e. the amount of guest memory to reclaim at start.
+    ///
+    /// Accepts a size with an optional K/M/G/T suffix (e.g. `512M`). The
+    /// balloon target can be changed at runtime with the `balloon` console
+    /// command. Requires the VM to use private memory backing.
+    #[clap(long, value_name = "SIZE", value_parser = parse_memory)]
+    pub virtio_balloon: Option<u64>,
 
     /// virtio console device backed by a serial backend (/dev/hvc0 in guest)
     ///
@@ -1417,7 +1425,7 @@ pub enum SecureBootTemplateCli {
     UefiCa,
 }
 
-fn parse_memory(s: &str) -> anyhow::Result<u64> {
+pub(crate) fn parse_memory(s: &str) -> anyhow::Result<u64> {
     if s == "VMGS_DEFAULT" {
         Ok(vmgs_format::VMGS_DEFAULT_CAPACITY)
     } else {

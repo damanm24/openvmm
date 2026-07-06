@@ -93,12 +93,18 @@ pub(crate) struct VirtioTransportCore {
     pub pending_status_deferred: Option<DeferredWrite>,
     #[inspect(with = "Vec::len")]
     pub stalled_io: Vec<StalledIo>,
+    /// Device-driven config-change notifications. Devices that change their
+    /// config space autonomously (e.g. virtio-balloon) signal on the paired
+    /// sender; the transport drains this in `poll_device` and raises a
+    /// config-change interrupt.
+    #[inspect(skip)]
+    pub config_change_recv: Option<mesh::Receiver<()>>,
 }
 
 impl VirtioTransportCore {
     /// Create a new transport core, spawning the device task.
     pub fn new(
-        device: Box<dyn DynVirtioDevice>,
+        mut device: Box<dyn DynVirtioDevice>,
         driver: &impl Spawn,
         guest_memory: GuestMemory,
         doorbell_registration: Option<Arc<dyn DoorbellRegistration>>,
@@ -131,6 +137,7 @@ impl VirtioTransportCore {
         let supports_save_restore = device.supports_save_restore();
 
         let (sender, receiver) = mesh::channel();
+        let config_change_recv = device.config_change_receiver();
         let _device_task = driver.spawn("virtio-device-task", async move {
             run_device_task(device, receiver).await;
         });
@@ -153,6 +160,7 @@ impl VirtioTransportCore {
             guest_memory,
             pending_status_deferred: None,
             stalled_io: Vec::new(),
+            config_change_recv,
         })
     }
 
@@ -190,6 +198,8 @@ impl VirtioTransportCore {
             device_feature: _,
             supports_save_restore: _,
             guest_memory: _,
+            // Device-driven config-change channel — long-lived, not reset.
+            config_change_recv: _,
 
             // Async state machine — not owned by reset_status.
             state: _,
@@ -354,6 +364,29 @@ impl VirtioTransportCore {
                 deferred.complete();
             }
             self.apply_transport_result(ops, result);
+        }
+
+        // Drain any device-driven config-change notifications, coalescing
+        // multiple signals into a single interrupt.
+        if let Some(mut recv) = self.config_change_recv.take() {
+            let mut signaled = false;
+            let mut closed = false;
+            loop {
+                match recv.poll_recv(cx) {
+                    Poll::Ready(Ok(())) => signaled = true,
+                    Poll::Ready(Err(_)) => {
+                        closed = true;
+                        break;
+                    }
+                    Poll::Pending => break,
+                }
+            }
+            if !closed {
+                self.config_change_recv = Some(recv);
+            }
+            if signaled {
+                self.update_config_generation(ops);
+            }
         }
     }
 

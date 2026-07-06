@@ -51,6 +51,7 @@ use input_core::InputData;
 use input_core::MultiplexedInputHandle;
 use membacking::GuestMemoryBuilder;
 use membacking::GuestMemoryManager;
+use membacking::GuestMemoryReclaim;
 use membacking::SharedMemoryBacking;
 use memory_range::MemoryRange;
 use mesh::MeshPayload;
@@ -113,6 +114,7 @@ use virt::VpIndex;
 use virtio::PciInterruptModel;
 use virtio::VirtioMmioDevice;
 use virtio::VirtioPciDevice;
+use virtio::resolve::VirtioMemoryReclaim;
 use virtio::resolve::VirtioResolveInput;
 use vm_loader::initial_regs::initial_regs;
 use vm_resource::IntoResource;
@@ -178,6 +180,17 @@ use watchdog_core::resources::StaticWatchdogPlatformResolver;
 const PM_BASE: u16 = 0x400;
 #[cfg(guest_arch = "x86_64")]
 const SYSTEM_IRQ_ACPI: u32 = 9;
+
+/// Adapts the memory manager's [`GuestMemoryReclaim`] handle to the
+/// [`VirtioMemoryReclaim`] interface consumed by device resolvers
+/// (e.g. virtio-balloon).
+struct MemoryReclaimAdapter(GuestMemoryReclaim);
+
+impl VirtioMemoryReclaim for MemoryReclaimAdapter {
+    fn reclaim(&self, gpa: u64, len: u64) -> std::io::Result<()> {
+        self.0.reclaim(gpa, len)
+    }
+}
 
 /// Creates a thread to run low-performance devices on.
 pub fn new_device_thread() -> (JoinHandle<()>, DefaultDriver) {
@@ -1478,6 +1491,15 @@ impl InitializedVm {
 
         let mapper = memory_manager.device_memory_mapper();
 
+        // Build the host memory-reclaim interface for device-driven memory
+        // management (virtio-balloon). Only available when guest RAM is
+        // backed by reclaimable private memory.
+        let memory_reclaim: Option<Arc<dyn VirtioMemoryReclaim>> = {
+            let reclaim = memory_manager.memory_reclaim();
+            reclaim
+                .is_supported()
+                .then(|| Arc::new(MemoryReclaimAdapter(reclaim)) as Arc<dyn VirtioMemoryReclaim>)
+        };
         #[cfg_attr(not(guest_arch = "x86_64"), expect(unused_mut))]
         let mut deps_hyperv_firmware_pcat = None;
         match &cfg.load_mode {
@@ -2458,6 +2480,7 @@ impl InitializedVm {
             let port_info = &port_info;
             let processor_topology = &processor_topology;
             let iommu_devices = &iommu_devices;
+            let memory_reclaim = &memory_reclaim;
             async move {
                 let port_name: Arc<str> = dev_cfg.port_name.into();
                 let pi = port_info.get(&port_name).ok_or_else(|| {
@@ -2494,6 +2517,7 @@ impl InitializedVm {
                             .clone()
                             .into_doorbell_registration(Vtl::Vtl0),
                         shared_mem_mapper: Some(mapper),
+                        memory_reclaim: memory_reclaim.clone(),
                     },
                     chipset_builder,
                     port_name.clone(),
@@ -2701,6 +2725,7 @@ impl InitializedVm {
                                 .clone()
                                 .into_doorbell_registration(vtl),
                             shared_mem_mapper: Some(&mapper),
+                            memory_reclaim: memory_reclaim.clone(),
                         },
                         vmbus.control(),
                         &chipset_builder,
@@ -2836,6 +2861,7 @@ impl InitializedVm {
                     device,
                     VirtioResolveInput {
                         driver_source: &driver_source,
+                        memory_reclaim: memory_reclaim.clone(),
                     },
                 )
                 .await?;
@@ -3722,6 +3748,7 @@ impl LoadedVm {
                                                 driver_source: &self.inner.driver_source,
                                                 doorbell_registration: self.inner.partition.clone().into_doorbell_registration(Vtl::Vtl0),
                                                 shared_mem_mapper: None,
+                                                memory_reclaim: None,
                                             },
                                         )
                                         .await

@@ -2571,6 +2571,21 @@ pub trait DoorbellRegistration: Send + Sync {
     ) -> io::Result<Box<dyn Send + Sync>>;
 }
 
+/// Host-side reclaim of physical memory backing guest RAM.
+///
+/// Used by device-driven memory management (e.g. virtio-balloon inflation)
+/// to release physical pages back to the host. The next guest access to a
+/// reclaimed range faults in fresh zero pages.
+pub trait MemoryReclaim: Send + Sync {
+    /// Reclaim the physical memory backing guest-physical range
+    /// `[gpa, gpa + len)`. `gpa` and `len` must be page-aligned.
+    ///
+    /// Returns an error (rather than panicking) if the range is not backed
+    /// by reclaimable private RAM. The range may originate from untrusted
+    /// guest input, so implementations must validate it and never panic.
+    fn reclaim(&self, gpa: u64, len: u64) -> io::Result<()>;
+}
+
 /// Trait to map a ROM at one or more locations in guest memory.
 pub trait MapRom: Send + Sync {
     /// Maps the specified portion of the ROM into guest memory at `gpa`.

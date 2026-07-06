@@ -117,20 +117,33 @@ fn seg_reg(reg: SegmentRegister) -> kvm::kvm_segment {
 }
 
 fn seg_reg_from_kvm(reg: kvm::kvm_segment) -> SegmentRegister {
+    let mut attributes = SegmentAttributes::new()
+        .with_segment_type(reg.type_)
+        .with_non_system_segment(reg.s == 1)
+        .with_descriptor_privilege_level(reg.dpl)
+        .with_present(reg.present == 1)
+        .with_available(reg.avl == 1)
+        .with_long(reg.l == 1)
+        .with_default(reg.db == 1)
+        .with_granularity(reg.g == 1);
+
+    // KVM/VMX sets the segment "accessed" bit (bit 0 of the segment type) as
+    // part of loading a segment, even for segments that are not present (e.g.
+    // the null data segments a 64-bit guest leaves in DS/ES/FS/GS/SS). As a
+    // result, writing such a segment via `set_registers` and reading it back
+    // via `registers` is not idempotent: the accessed bit reappears. This
+    // trips the debug-only restore-state comparison performed during
+    // save/restore. Normalize by clearing the accessed bit for not-present
+    // segments, whose type field is architecturally meaningless.
+    if !attributes.present() {
+        attributes.set_segment_type(attributes.segment_type() & !1);
+    }
+
     SegmentRegister {
         base: reg.base,
         limit: reg.limit,
         selector: reg.selector,
-        attributes: SegmentAttributes::new()
-            .with_segment_type(reg.type_)
-            .with_non_system_segment(reg.s == 1)
-            .with_descriptor_privilege_level(reg.dpl)
-            .with_present(reg.present == 1)
-            .with_available(reg.avl == 1)
-            .with_long(reg.l == 1)
-            .with_default(reg.db == 1)
-            .with_granularity(reg.g == 1)
-            .into(),
+        attributes: attributes.into(),
     }
 }
 

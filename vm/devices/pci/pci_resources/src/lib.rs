@@ -10,6 +10,7 @@ use chipset_device_resources::ErasedChipsetDevice;
 use chipset_device_resources::ResolvedChipsetDevice;
 use guestmem::DoorbellRegistration;
 use guestmem::MemoryMapper;
+use guestmem::MemoryReclaim;
 use pci_core::dma::DmaTarget;
 use std::sync::Arc;
 use vm_resource::CanResolveTo;
@@ -41,4 +42,8 @@ pub struct ResolvePciDeviceHandleParams<'a> {
     pub doorbell_registration: Option<Arc<dyn DoorbellRegistration>>,
     /// An object with which to register shared memory regions.
     pub shared_mem_mapper: Option<&'a dyn MemoryMapper>,
+    /// Host memory reclaim interface, available when the VM's RAM is backed
+    /// by reclaimable private memory. Consumed by devices that return memory
+    /// to the host (virtio-balloon).
+    pub memory_reclaim: Option<Arc<dyn MemoryReclaim>>,
 }

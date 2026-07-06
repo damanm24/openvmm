@@ -5900,6 +5900,7 @@ dependencies = [
  "virt_mshv",
  "virt_whp",
  "virtio",
+ "virtio_balloon",
  "virtio_blk",
  "virtio_console",
  "virtio_net",
@@ -9597,6 +9598,27 @@ dependencies = [
  "vm_resource",
  "vmcore",
  "zerocopy",
+]
+
+[[package]]
+name = "virtio_balloon"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "guestmem",
+ "inspect",
+ "mesh",
+ "pal_async",
+ "pal_event",
+ "parking_lot",
+ "task_control",
+ "test_with_tracing",
+ "tracelimit",
+ "virtio",
+ "virtio_resources",
+ "vm_resource",
+ "vmcore",
 ]
 
 [[package]]

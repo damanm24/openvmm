@@ -692,6 +692,7 @@ impl PetriVmConfigOpenVmm {
                 vtl2_pipette_listener,
                 linux_direct_serial_agent,
                 tcp_pipette_port: None,
+                balloon_control: None,
                 driver: driver.clone(),
                 output_dir: log_source.output_dir().to_owned(),
                 openvmm_path: openvmm_path.clone(),

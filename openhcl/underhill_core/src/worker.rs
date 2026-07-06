@@ -3490,6 +3490,7 @@ async fn new_underhill_vm(
                     resource,
                     doorbell_registration: None,
                     shared_mem_mapper: None,
+                    memory_reclaim: None,
                 },
                 vmbus.control(),
                 &chipset_builder,

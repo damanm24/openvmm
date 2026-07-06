@@ -19,6 +19,7 @@ use petri_artifacts_common::tags::MachineArch;
 use petri_artifacts_common::tags::OsFlavor;
 #[cfg(target_os = "linux")]
 use petri_artifacts_vmm_test::artifacts::OPENVMM_VHOST_NATIVE;
+use pipette_client::PipetteClient;
 use vmm_test_macros::openvmm_test;
 use vmm_test_macros::vmm_test;
 use vmm_test_macros::vmm_test_with;
@@ -187,6 +188,129 @@ async fn boot_private_memory(config: PetriVmBuilder<OpenVmmPetriBackend>) -> any
     vm.wait_for_clean_teardown().await?;
 
     Ok(())
+}
+
+/// Verify that a virtio memory balloon can grow and shrink guest memory at
+/// runtime.
+///
+/// Boots Linux with an empty balloon over PCIe, then drives the balloon
+/// target from the host and confirms the guest's available memory shrinks
+/// when the balloon inflates and recovers when it deflates. This exercises
+/// the full end-to-end path: resource resolution, the PCI transport, config
+/// space, the device-driven config-change interrupt, the runtime control
+/// channel, and the memory-reclaim wiring. Guest RAM is backed by private
+/// memory so the host can reclaim the released pages.
+#[openvmm_test(
+    linux_direct_x64,
+    // TODO: add linux_direct_aarch64 (GH #1798)
+)]
+async fn virtio_balloon_grow_shrink(
+    config: PetriVmBuilder<OpenVmmPetriBackend>,
+    _: (),
+    driver: pal_async::DefaultDriver,
+) -> anyhow::Result<()> {
+    // Boot with 1 GiB of RAM and drive the balloon to reclaim 256 MiB. The
+    // target is small relative to guest RAM so inflation cannot push the
+    // guest into an OOM.
+    const RAM_BYTES: u64 = SIZE_1_GB;
+    const INFLATE_BYTES: u64 = 256 * 1024 * 1024;
+    // Require the guest to release at least half the target, allowing a
+    // generous margin for driver overhead and measurement noise.
+    const MIN_DELTA_KB: u64 = (INFLATE_BYTES / 1024) / 2;
+
+    let (mut vm, agent) = config
+        .with_memory(MemoryConfig {
+            startup_bytes: RAM_BYTES,
+            ..Default::default()
+        })
+        .modify_backend(|b| {
+            b.with_pcie_root_topology(1, 1, 1)
+                // Start with an empty balloon; the test drives inflation.
+                .with_virtio_balloon("s0rc0rp0", 0)
+                .with_custom_config(|c| {
+                    for node in &mut c.numa.nodes {
+                        if let Some(mem) = &mut node.mem {
+                            mem.private_memory = true;
+                        }
+                    }
+                })
+        })
+        .run()
+        .await?;
+
+    agent.ping().await?;
+
+    // Baseline available memory with an empty balloon.
+    let baseline_kb = read_mem_available_kb(&agent).await?;
+    tracing::info!(baseline_kb, "baseline MemAvailable");
+
+    // Inflate: ask the guest to release INFLATE_BYTES into the balloon.
+    vm.backend().set_balloon_target(INFLATE_BYTES).await?;
+    let inflated_kb = wait_for_mem_available(&agent, &driver, |kb| {
+        baseline_kb.saturating_sub(kb) >= MIN_DELTA_KB
+    })
+    .await
+    .with_context(|| {
+        format!("guest did not release memory after inflate (baseline {baseline_kb} kB)")
+    })?;
+    tracing::info!(inflated_kb, "MemAvailable after inflate");
+    assert!(
+        baseline_kb.saturating_sub(inflated_kb) >= MIN_DELTA_KB,
+        "expected available memory to drop by at least {MIN_DELTA_KB} kB \
+         (baseline {baseline_kb} kB, inflated {inflated_kb} kB)"
+    );
+
+    // Deflate: return all pages to the guest.
+    vm.backend().set_balloon_target(0).await?;
+    let deflated_kb = wait_for_mem_available(&agent, &driver, |kb| {
+        kb >= baseline_kb.saturating_sub(MIN_DELTA_KB)
+    })
+    .await
+    .with_context(|| {
+        format!("guest did not reclaim memory after deflate (inflated {inflated_kb} kB)")
+    })?;
+    tracing::info!(deflated_kb, "MemAvailable after deflate");
+    assert!(
+        deflated_kb > inflated_kb,
+        "expected available memory to recover after deflate \
+         (inflated {inflated_kb} kB, deflated {deflated_kb} kB)"
+    );
+
+    agent.power_off().await?;
+    vm.wait_for_clean_teardown().await?;
+
+    Ok(())
+}
+
+/// Read `MemAvailable` (in kB) from the guest's `/proc/meminfo`.
+async fn read_mem_available_kb(agent: &PipetteClient) -> anyhow::Result<u64> {
+    let meminfo = agent.unix_shell().read_file("/proc/meminfo").await?;
+    meminfo
+        .lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix("MemAvailable:")?;
+            rest.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .context("MemAvailable not found in /proc/meminfo")
+}
+
+/// Poll the guest's `MemAvailable` until `pred` holds, or fail after ~30s.
+async fn wait_for_mem_available(
+    agent: &PipetteClient,
+    driver: &pal_async::DefaultDriver,
+    pred: impl Fn(u64) -> bool,
+) -> anyhow::Result<u64> {
+    let mut timer = pal_async::timer::PolledTimer::new(driver);
+    for _ in 0..60 {
+        let kb = read_mem_available_kb(agent).await?;
+        if pred(kb) {
+            return Ok(kb);
+        }
+        timer.sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let kb = read_mem_available_kb(agent).await?;
+    anyhow::ensure!(pred(kb), "timed out; last MemAvailable {kb} kB");
+    Ok(kb)
 }
 
 /// Boot Linux with guest memory backed by explicit 2 MiB hugetlb pages.
