@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use super::Access;
-use super::Client;
 use super::DropReason;
+use super::SocketDriver;
 use crate::ChecksumState;
 use crate::MIN_MTU;
 use crate::is_same_ipv4_subnet;
@@ -14,7 +14,7 @@ use smoltcp::wire::EthernetFrame;
 use smoltcp::wire::EthernetProtocol;
 use smoltcp::wire::EthernetRepr;
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn handle_arp(
         &mut self,
         frame: &EthernetRepr,
@@ -66,7 +66,10 @@ impl<T: Client> Access<'_, T> {
         let mut arp_response = ArpPacket::new_unchecked(response.payload_mut());
         arp_repr.emit(&mut arp_response);
         let len = e_repr.buffer_len() + arp_repr.buffer_len();
-        self.client.recv(&buffer[..len], &ChecksumState::NONE);
+        self.inner
+            .shard
+            .egress
+            .push(&buffer[..len], ChecksumState::NONE);
         Ok(())
     }
 }

@@ -266,3 +266,11 @@ start time.
 |-------|------|---------|
 | `consomme` | `vm/devices/net/net_consomme/consomme/` | Core user-mode TCP/IP stack |
 | `net_consomme` | `vm/devices/net/net_consomme/` | [`net_backend::Endpoint`](https://openvmm.dev/rustdoc/linux/net_backend/trait.Endpoint.html) integration |
+
+The core separates endpoint-wide control state from transport flow state. The
+control plane owns configuration, listeners, DNS, ICMP, and learned address
+state. A transport shard owns TCP and UDP flows, protocol scratch space, and a
+bounded queue of guest-bound packets. The `net_consomme` adapter retains
+ownership of guest memory and queue identifiers and drains owned packets only
+after core processing releases the shard lock. Queue recreation therefore
+preserves transport and control state.

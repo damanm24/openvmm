@@ -10,8 +10,8 @@
 //! servers for clients that have autoconfigured their own addresses via SLAAC.
 
 use super::Access;
-use super::Client;
 use super::DropReason;
+use super::SocketDriver;
 use crate::ChecksumState;
 use crate::MIN_MTU;
 use smoltcp::phy::ChecksumCapabilities;
@@ -200,7 +200,7 @@ impl Message {
     }
 }
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn handle_dhcpv6(
         &mut self,
         payload: &[u8],
@@ -281,7 +281,10 @@ impl<T: Client> Access<'_, T> {
                     + resp_udp.header_len()
                     + dhcpv6_buffer.len();
 
-                self.client.recv(&buffer[..total_len], &ChecksumState::NONE);
+                self.inner
+                    .shard
+                    .egress
+                    .push(&buffer[..total_len], ChecksumState::NONE);
             }
             _ => return Err(DropReason::UnsupportedDhcpv6(msg.msg_type)),
         }

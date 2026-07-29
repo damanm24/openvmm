@@ -3,8 +3,9 @@
 
 use super::Access;
 use super::BindError;
-use super::Client;
 use super::DropReason;
+use super::EgressQueue;
+use super::SocketDriver;
 use super::dhcp::DHCP_SERVER;
 use super::dhcpv6::DHCPV6_ALL_AGENTS_MULTICAST;
 use super::dhcpv6::DHCPV6_SERVER;
@@ -68,21 +69,50 @@ use crate::windows as platform;
 
 pub(crate) struct Udp {
     connections: HashMap<SocketAddr, UdpConnection>,
-    listeners: HashMap<PortForwardKey, UdpListener>,
     timeout: Duration,
+}
+
+pub(crate) struct UdpFlows(HashMap<SocketAddr, UdpConnection>);
+
+pub(crate) struct UdpListeners {
+    listeners: HashMap<PortForwardKey, UdpListener>,
+}
+
+impl UdpListeners {
+    pub fn new() -> Self {
+        Self {
+            listeners: HashMap::new(),
+        }
+    }
+}
+
+impl InspectMut for UdpListeners {
+    fn inspect_mut(&mut self, req: inspect::Request<'_>) {
+        let mut resp = req.respond();
+        for (key, listener) in &mut self.listeners {
+            resp.field_mut(&key.to_string(), listener);
+        }
+    }
 }
 
 impl Udp {
     pub fn new(timeout: Duration) -> Self {
         Self {
             connections: HashMap::new(),
-            listeners: HashMap::new(),
             timeout,
         }
     }
 
     pub fn update_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    pub fn drain_flows(&mut self) -> UdpFlows {
+        UdpFlows(std::mem::take(&mut self.connections))
+    }
+
+    pub fn insert_flows(&mut self, flows: UdpFlows) {
+        self.connections.extend(flows.0);
     }
 }
 
@@ -92,9 +122,6 @@ impl InspectMut for Udp {
         for (addr, conn) in &mut self.connections {
             let key = addr.to_string();
             resp.field_mut(&key, conn);
-        }
-        for (key, listener) in &mut self.listeners {
-            resp.field_mut(&format!("listener:{key}"), listener);
         }
     }
 }
@@ -142,7 +169,7 @@ impl UdpConnection {
         config: &ConsommeConfig,
         runtime: &mut ConsommePrimaryRuntime,
         buffer: &mut [u8],
-        client: &mut impl Client,
+        egress: &mut EgressQueue,
     ) -> bool {
         if self.recycle {
             return false;
@@ -155,7 +182,7 @@ impl UdpConnection {
             // UDP packets if the kernel socket's receive buffer fills up. If this
             // results in latency problems, then we could try sizing this buffer
             // more carefully.
-            if client.rx_mtu() == 0 {
+            if egress.rx_mtu() == 0 {
                 break true;
             }
 
@@ -200,7 +227,7 @@ impl UdpConnection {
                         SocketAddr::V4(_) => ChecksumState::UDP4,
                         SocketAddr::V6(_) => ChecksumState::NONE,
                     };
-                    client.recv(&eth.as_ref()[..packet_len], &checksum_state);
+                    egress.push(&eth.as_ref()[..packet_len], checksum_state);
                     self.stats.rx_packets.increment();
                     self.last_activity = Instant::now();
                 }
@@ -225,7 +252,7 @@ impl UdpListener {
         config: &ConsommeConfig,
         runtime: &mut ConsommePrimaryRuntime,
         buffer: &mut [u8],
-        client: &mut impl Client,
+        egress: &mut EgressQueue,
         connections: &HashMap<SocketAddr, UdpConnection>,
     ) {
         let Some(socket) = self.socket.as_mut() else {
@@ -233,7 +260,7 @@ impl UdpListener {
         };
         let mut eth = EthernetFrame::new_unchecked(buffer);
         loop {
-            if client.rx_mtu() == 0 {
+            if egress.rx_mtu() == 0 {
                 break;
             }
 
@@ -281,7 +308,7 @@ impl UdpListener {
                         SocketAddr::V4(_) => ChecksumState::UDP4,
                         SocketAddr::V6(_) => ChecksumState::NONE,
                     };
-                    client.recv(&eth.as_ref()[..packet_len], &checksum_state);
+                    egress.push(&eth.as_ref()[..packet_len], checksum_state);
                     self.stats.rx_packets.increment();
                 }
                 Poll::Ready(Err(err)) => {
@@ -299,11 +326,12 @@ impl UdpListener {
     }
 }
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn poll_udp(&mut self, cx: &mut Context<'_>) {
         let timeout = self.inner.shard.udp.timeout;
         let now = Instant::now();
         let buffer = &mut self.inner.shard.buffer;
+        let egress = &mut self.inner.shard.egress;
 
         self.inner.shard.udp.connections.retain(|dst_addr, conn| {
             // Check if connection has timed out
@@ -318,20 +346,20 @@ impl<T: Client> Access<'_, T> {
             conn.poll_conn(
                 cx,
                 dst_addr,
-                &self.inner.primary.config.immutable,
+                &self.inner.shard.config.immutable,
                 &mut self.inner.primary.runtime,
                 buffer,
-                self.client,
+                egress,
             )
         });
 
-        for listener in self.inner.shard.udp.listeners.values_mut() {
+        for listener in self.inner.primary.udp_listeners.listeners.values_mut() {
             listener.poll_listener(
                 cx,
-                &self.inner.primary.config.immutable,
+                &self.inner.shard.config.immutable,
                 &mut self.inner.primary.runtime,
                 buffer,
-                self.client,
+                egress,
                 &self.inner.shard.udp.connections,
             );
         }
@@ -370,24 +398,28 @@ impl<T: Client> Access<'_, T> {
                 }
             }
         });
-        self.inner.shard.udp.listeners.retain(|key, listener| {
-            let socket = listener.socket.take().unwrap().into_inner();
-            match PolledSocket::new(self.client.driver(), socket) {
-                Ok(socket) => {
-                    listener.socket = Some(socket);
-                    true
+        self.inner
+            .primary
+            .udp_listeners
+            .listeners
+            .retain(|key, listener| {
+                let socket = listener.socket.take().unwrap().into_inner();
+                match PolledSocket::new(self.client.driver(), socket) {
+                    Ok(socket) => {
+                        listener.socket = Some(socket);
+                        true
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            guest_port = key.guest_port,
+                            family = %key.family,
+                            error = &err as &dyn std::error::Error,
+                            "failed to update driver for udp listener"
+                        );
+                        false
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(
-                        guest_port = key.guest_port,
-                        family = %key.family,
-                        error = &err as &dyn std::error::Error,
-                        "failed to update driver for udp listener"
-                    );
-                    false
-                }
-            }
-        });
+            });
     }
 
     pub(crate) fn handle_udp(
@@ -410,7 +442,7 @@ impl<T: Client> Access<'_, T> {
                 )?;
 
                 // Check for gateway-destined packets
-                if addrs.dst_addr == self.inner.primary.config.immutable.gateway_ip
+                if addrs.dst_addr == self.inner.shard.config.immutable.gateway_ip
                     || addrs.dst_addr.is_broadcast()
                 {
                     if self.handle_gateway_udp(frame, addrs, &udp_packet)? {
@@ -433,7 +465,7 @@ impl<T: Client> Access<'_, T> {
                 )?;
 
                 // Check for gateway-destined packets (IPv6 uses multicast instead of broadcast)
-                if addrs.dst_addr == self.inner.primary.config.immutable.gateway_link_local_ipv6
+                if addrs.dst_addr == self.inner.shard.config.immutable.gateway_link_local_ipv6
                     || addrs.dst_addr == DHCPV6_ALL_AGENTS_MULTICAST
                 {
                     if self.handle_gateway_udp_v6(frame, addrs, &udp_packet)? {
@@ -461,12 +493,12 @@ impl<T: Client> Access<'_, T> {
             .inner
             .primary
             .runtime
-            .is_local_address(&self.inner.primary.config.immutable, &dst_sock_addr)
+            .is_local_address(&self.inner.shard.config.immutable, &dst_sock_addr)
         {
             // This packet is destined for a local address. If the port matches a listener,
             // translate it so that the connection loops back to the expected destination.
             let key = PortForwardKey::from_socket_addr(dst_sock_addr, dst_sock_addr.port());
-            if let Some(listener) = self.inner.shard.udp.listeners.get(&key) {
+            if let Some(listener) = self.inner.primary.udp_listeners.listeners.get(&key) {
                 dst_sock_addr.set_port(listener.host_addr.port());
             }
         }
@@ -521,7 +553,7 @@ impl<T: Client> Access<'_, T> {
                 let conn = UdpConnection {
                     socket: Some(socket),
                     host_port,
-                    guest_mac: guest_mac.unwrap_or(self.inner.primary.config.immutable.client_mac),
+                    guest_mac: guest_mac.unwrap_or(self.inner.shard.config.immutable.client_mac),
                     stats: Default::default(),
                     recycle: false,
                     last_activity: Instant::now(),
@@ -582,10 +614,16 @@ impl<T: Client> Access<'_, T> {
         let socket = PolledSocket::new(self.client.driver(), socket).map_err(BindError::Io)?;
         let host_addr = socket.get().local_addr().map_err(BindError::Io)?;
         let key = PortForwardKey::from_socket_addr(host_addr, guest_port);
-        if self.inner.shard.udp.listeners.contains_key(&key) {
+        if self
+            .inner
+            .primary
+            .udp_listeners
+            .listeners
+            .contains_key(&key)
+        {
             return Err(BindError::PortAlreadyBound(guest_port));
         }
-        self.inner.shard.udp.listeners.insert(
+        self.inner.primary.udp_listeners.listeners.insert(
             key,
             UdpListener {
                 socket: Some(socket),
@@ -601,8 +639,8 @@ impl<T: Client> Access<'_, T> {
     pub fn unbind_udp_port(&mut self, family: IpVersion, port: u16) -> Result<(), BindError> {
         if self
             .inner
-            .shard
-            .udp
+            .primary
+            .udp_listeners
             .listeners
             .remove(&PortForwardKey::new(family, port))
             .is_some()
@@ -628,7 +666,7 @@ impl<T: Client> Access<'_, T> {
             flow: DnsFlow {
                 src: SocketAddr::new(src_addr.into(), udp.src_port()),
                 dst: SocketAddr::new(dst_addr.into(), udp.dst_port()),
-                gateway_mac: self.inner.primary.config.immutable.gateway_mac,
+                gateway_mac: self.inner.shard.config.immutable.gateway_mac,
                 client_mac: frame.src_addr,
                 transport: crate::dns_resolver::DnsTransport::Udp,
             },
@@ -690,7 +728,10 @@ impl<T: Client> Access<'_, T> {
             response.flow.client_mac,
         );
 
-        self.client.recv(&buffer[..frame_len], &checksum_state);
+        self.inner
+            .shard
+            .egress
+            .push(&buffer[..frame_len], checksum_state);
 
         Ok(())
     }
@@ -794,7 +835,6 @@ mod tests {
     struct TestClient {
         driver: Arc<DefaultDriver>,
         received_packets: Arc<Mutex<Vec<Vec<u8>>>>,
-        rx_mtu: usize,
     }
 
     impl TestClient {
@@ -802,22 +842,17 @@ mod tests {
             Self {
                 driver,
                 received_packets: Arc::new(Mutex::new(Vec::new())),
-                rx_mtu: 1514, // Standard Ethernet MTU
             }
         }
     }
 
-    impl Client for TestClient {
+    impl SocketDriver for TestClient {
         fn driver(&self) -> &dyn pal_async::driver::Driver {
             &*self.driver
         }
 
-        fn recv(&mut self, data: &[u8], _checksum: &ChecksumState) {
+        fn capture_egress(&mut self, data: &[u8], _checksum: ChecksumState) {
             self.received_packets.lock().push(data.to_vec());
-        }
-
-        fn rx_mtu(&mut self) -> usize {
-            self.rx_mtu
         }
     }
 

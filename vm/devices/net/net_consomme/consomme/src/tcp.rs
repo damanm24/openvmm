@@ -6,8 +6,9 @@ mod ring;
 
 use super::Access;
 use super::BindError;
-use super::Client;
 use super::DropReason;
+use super::EgressQueue;
+use super::SocketDriver;
 use crate::ChecksumState;
 use crate::ConsommeConfig;
 use crate::ConsommePrimaryRuntime;
@@ -67,10 +68,24 @@ use thiserror::Error;
 pub(crate) struct Tcp {
     #[inspect(iter_by_key)]
     connections: HashMap<FourTuple, TcpConnection>,
-    #[inspect(iter_by_key)]
-    listeners: HashMap<PortForwardKey, TcpListener>,
     connection_params: ConnectionParams,
     aggregate_stats: TcpAggregateStats,
+}
+
+pub(crate) struct TcpFlows(HashMap<FourTuple, TcpConnection>);
+
+#[derive(InspectMut)]
+pub(crate) struct TcpListeners {
+    #[inspect(iter_by_key)]
+    listeners: HashMap<PortForwardKey, TcpListener>,
+}
+
+impl TcpListeners {
+    pub fn new() -> Self {
+        Self {
+            listeners: HashMap::new(),
+        }
+    }
 }
 
 /// Aggregate statistics across all TCP connections for inspect/diagnostics.
@@ -138,7 +153,6 @@ impl Tcp {
     pub fn new(rx_buffer: crate::TcpBufferBounds, tx_buffer: crate::TcpBufferBounds) -> Self {
         Self {
             connections: HashMap::new(),
-            listeners: HashMap::new(),
             connection_params: ConnectionParams {
                 rx_buffer: NormalizedBufferBounds::from_bounds(rx_buffer),
                 tx_buffer: NormalizedBufferBounds::from_bounds(tx_buffer),
@@ -156,6 +170,14 @@ impl Tcp {
             rx_buffer: NormalizedBufferBounds::from_bounds(rx_buffer),
             tx_buffer: NormalizedBufferBounds::from_bounds(tx_buffer),
         };
+    }
+
+    pub fn drain_flows(&mut self) -> TcpFlows {
+        TcpFlows(std::mem::take(&mut self.connections))
+    }
+
+    pub fn insert_flows(&mut self, flows: TcpFlows) {
+        self.connections.extend(flows.0);
     }
 
     #[cfg(test)]
@@ -298,7 +320,7 @@ struct TcpConnStats {
     standalone_acks_tx: Counter,
     /// RSTs sent.
     rsts_tx: Counter,
-    /// Times send_data broke out because rx_mtu was 0 (no guest rx buffers).
+    /// Times send_data stopped because the bounded egress queue was full.
     tx_blocked_no_rx_mtu: Counter,
     /// Times send_data was limited by the peer's advertised window being full.
     tx_blocked_window_full: Counter,
@@ -372,12 +394,12 @@ impl TcpState {
     }
 }
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn poll_tcp(&mut self, cx: &mut Context<'_>) {
         // Check for any new incoming connections
         self.inner
-            .shard
-            .tcp
+            .primary
+            .tcp_listeners
             .listeners
             .retain(|key, listener| match listener.poll_listener(cx) {
                 Ok(result) => {
@@ -388,7 +410,7 @@ impl<T: Client> Access<'_, T> {
                             .inner
                             .primary
                             .runtime
-                            .is_local_address(&self.inner.primary.config.immutable, &other_addr)
+                            .is_local_address(&self.inner.shard.config.immutable, &other_addr)
                         {
                             for (other_ft, connection) in self.inner.shard.tcp.connections.iter() {
                                 if matches!(connection.inner.state, TcpState::Connecting | TcpState::SynReceived)
@@ -412,7 +434,7 @@ impl<T: Client> Access<'_, T> {
                             .primary
                             .runtime
                             .try_ft_from_remote_address(
-                                &self.inner.primary.config.immutable,
+                                &self.inner.shard.config.immutable,
                                 &other_addr,
                                 key.guest_port,
                             )
@@ -431,9 +453,10 @@ impl<T: Client> Access<'_, T> {
                                 let mut sender = Sender {
                                     ft: &ft,
                                     client: self.client,
-                                    config: &self.inner.primary.config.immutable,
+                                    config: &self.inner.shard.config.immutable,
                                     runtime: &mut self.inner.primary.runtime,
                                     buffer: &mut self.inner.shard.buffer,
+                                    egress: &mut self.inner.shard.egress,
                                 };
 
                                 let conn = match TcpConnection::new_from_accept(
@@ -478,10 +501,11 @@ impl<T: Client> Access<'_, T> {
         self.inner.shard.tcp.connections.retain(|ft, conn| {
             let mut sender = Sender {
                 ft,
-                config: &self.inner.primary.config.immutable,
+                config: &self.inner.shard.config.immutable,
                 runtime: &mut self.inner.primary.runtime,
                 buffer: &mut self.inner.shard.buffer,
                 client: self.client,
+                egress: &mut self.inner.shard.egress,
             };
             let keep = match &mut conn.backend {
                 TcpBackend::Dns(dns_handler) => match &mut self.inner.primary.dns {
@@ -564,16 +588,17 @@ impl<T: Client> Access<'_, T> {
 
         let is_dns_tcp = is_gateway_dns_tcp(
             &ft,
-            &self.inner.primary.config.immutable,
+            &self.inner.shard.config.immutable,
             self.inner.primary.dns.is_some(),
         );
 
         let mut sender = Sender {
             ft: &ft,
             client: self.client,
-            config: &self.inner.primary.config.immutable,
+            config: &self.inner.shard.config.immutable,
             runtime: &mut self.inner.primary.runtime,
             buffer: &mut self.inner.shard.buffer,
+            egress: &mut self.inner.shard.egress,
         };
 
         match self.inner.shard.tcp.connections.entry(ft) {
@@ -635,7 +660,8 @@ impl<T: Client> Access<'_, T> {
                         let key =
                             PortForwardKey::from_socket_addr(resolved_dst, resolved_dst.port());
                         let ft = if is_local_address
-                            && let Some(listener) = self.inner.shard.tcp.listeners.get(&key)
+                            && let Some(listener) =
+                                self.inner.primary.tcp_listeners.listeners.get(&key)
                         {
                             FourTuple {
                                 src: sender.ft.src,
@@ -655,6 +681,7 @@ impl<T: Client> Access<'_, T> {
                             config: sender.config,
                             runtime: sender.runtime,
                             buffer: sender.buffer,
+                            egress: &mut *sender.egress,
                         };
                         TcpConnection::new(
                             &mut sender,
@@ -683,7 +710,7 @@ impl<T: Client> Access<'_, T> {
     pub fn bind_tcp_port(&mut self, socket: Socket, guest_port: u16) -> Result<(), BindError> {
         let host_addr = Self::socket_local_addr(&socket)?;
         let key = PortForwardKey::from_socket_addr(host_addr, guest_port);
-        match self.inner.shard.tcp.listeners.entry(key) {
+        match self.inner.primary.tcp_listeners.listeners.entry(key) {
             hash_map::Entry::Occupied(_) => {
                 return Err(BindError::PortAlreadyBound(guest_port));
             }
@@ -699,8 +726,8 @@ impl<T: Client> Access<'_, T> {
     pub fn unbind_tcp_port(&mut self, family: IpVersion, port: u16) -> Result<(), BindError> {
         match self
             .inner
-            .shard
-            .tcp
+            .primary
+            .tcp_listeners
             .listeners
             .entry(PortForwardKey::new(family, port))
         {
@@ -727,9 +754,10 @@ struct Sender<'a, T> {
     config: &'a ConsommeConfig,
     runtime: &'a mut ConsommePrimaryRuntime,
     buffer: &'a mut [u8],
+    egress: &'a mut EgressQueue,
 }
 
-impl<T: Client> Sender<'_, T> {
+impl<T: SocketDriver> Sender<'_, T> {
     fn send_packet(&mut self, tcp: &TcpRepr<'_>, payload: Option<ring::View<'_>>) {
         let payload_len = payload.as_ref().map_or(0, |p| p.len());
         let buffer = &mut *self.buffer;
@@ -790,7 +818,7 @@ impl<T: Client> Sender<'_, T> {
             _ => {
                 tcp_packet.fill_checksum(&dst_ip_addr, &src_ip_addr);
                 let buffer = &*self.buffer;
-                self.client.recv(&buffer[..n], &checksum_state);
+                self.egress.push(&buffer[..n], checksum_state);
                 return;
             }
         };
@@ -827,9 +855,9 @@ impl<T: Client> Sender<'_, T> {
         let buffer = &*self.buffer;
         let header = &buffer[..header_len];
         if b.is_empty() {
-            self.client.recv_segments(&[header, a], &checksum_state);
+            self.egress.push_segments(&[header, a], checksum_state);
         } else {
-            self.client.recv_segments(&[header, a, b], &checksum_state);
+            self.egress.push_segments(&[header, a, b], checksum_state);
         }
     }
 
@@ -904,7 +932,7 @@ impl TcpConnection {
     }
 
     fn new(
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         tcp: &TcpRepr<'_>,
         params: &ConnectionParams,
         is_local_address: bool,
@@ -969,7 +997,7 @@ impl TcpConnection {
     }
 
     fn new_from_accept(
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         socket: Socket,
         params: &ConnectionParams,
     ) -> Result<Self, DropReason> {
@@ -994,7 +1022,7 @@ impl TcpConnection {
     /// The connection completes the TCP handshake with the guest and
     /// routes DNS queries through the provided resolver backend.
     fn new_dns(
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         tcp: &TcpRepr<'_>,
         params: &ConnectionParams,
     ) -> Result<Self, DropReason> {
@@ -1054,7 +1082,7 @@ impl TcpConnectionInner {
     fn poll_dns_backend(
         &mut self,
         cx: &mut Context<'_>,
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         dns_handler: &mut DnsTcpHandler,
         dns: &mut DnsResolver,
     ) -> bool {
@@ -1138,7 +1166,7 @@ impl TcpConnectionInner {
     fn poll_socket_backend(
         &mut self,
         cx: &mut Context<'_>,
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         opt_socket: &mut Option<PolledSocket<Socket>>,
     ) -> bool {
         // Wait for the outbound connection to complete.
@@ -1329,7 +1357,7 @@ impl TcpConnectionInner {
 
     fn handle_connect_error(
         &mut self,
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         socket: &mut PolledSocket<Socket>,
     ) {
         let err = take_socket_error(socket);
@@ -1385,7 +1413,7 @@ impl TcpConnectionInner {
             && self.rx_window_advertised() >= reopen_threshold
     }
 
-    fn send_next(&mut self, sender: &mut Sender<'_, impl Client>, ack_policy: AckPolicy) {
+    fn send_next(&mut self, sender: &mut Sender<'_, impl SocketDriver>, ack_policy: AckPolicy) {
         match self.state {
             TcpState::Connecting => {}
             TcpState::SynReceived => self.send_syn(sender, Some(self.rx_seq)),
@@ -1393,8 +1421,12 @@ impl TcpConnectionInner {
         }
     }
 
-    fn send_syn(&mut self, sender: &mut Sender<'_, impl Client>, ack_number: Option<TcpSeqNumber>) {
-        if self.tx_send != self.tx_acked || sender.client.rx_mtu() == 0 {
+    fn send_syn(
+        &mut self,
+        sender: &mut Sender<'_, impl SocketDriver>,
+        ack_number: Option<TcpSeqNumber>,
+    ) {
+        if self.tx_send != self.tx_acked || sender.egress.rx_mtu() == 0 {
             return;
         }
 
@@ -1437,7 +1469,7 @@ impl TcpConnectionInner {
         }
     }
 
-    fn send_data(&mut self, sender: &mut Sender<'_, impl Client>, ack_policy: AckPolicy) {
+    fn send_data(&mut self, sender: &mut Sender<'_, impl SocketDriver>, ack_policy: AckPolicy) {
         // RFC 1323 §2.2: the window field in SYN/SYN-ACK is unscaled. Only
         // apply the shift once the handshake is complete (first non-SYN window
         // update sets tx_window_scale_active). For the guest-initiated path
@@ -1458,7 +1490,7 @@ impl TcpConnectionInner {
         }
 
         while self.needs_ack || self.tx_send < tx_done {
-            let rx_mtu = sender.client.rx_mtu();
+            let rx_mtu = sender.egress.rx_mtu();
             if rx_mtu == 0 {
                 // Out of receive buffers.
                 self.stats.tx_blocked_no_rx_mtu.increment();
@@ -1588,7 +1620,7 @@ impl TcpConnectionInner {
     /// unacceptable packet (duplicate, out of order, etc.). These acks
     /// shouldn't be combined with data so that they are interpreted correctly
     /// by the peer.
-    fn ack(&mut self, sender: &mut Sender<'_, impl Client>) {
+    fn ack(&mut self, sender: &mut Sender<'_, impl SocketDriver>) {
         let window_len = self.rx_window_len();
         let tcp = TcpRepr {
             src_port: sender.ft.dst.port(),
@@ -1614,7 +1646,7 @@ impl TcpConnectionInner {
 
     fn handle_listen_syn(
         &mut self,
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         tcp: &TcpRepr<'_>,
     ) -> Result<bool, DropReason> {
         if tcp.control != TcpControl::Syn || tcp.segment_len() != 1 {
@@ -1643,7 +1675,7 @@ impl TcpConnectionInner {
 
     fn handle_packet(
         &mut self,
-        sender: &mut Sender<'_, impl Client>,
+        sender: &mut Sender<'_, impl SocketDriver>,
         tcp: &TcpRepr<'_>,
     ) -> Result<bool, DropReason> {
         if self.state == TcpState::Connecting {

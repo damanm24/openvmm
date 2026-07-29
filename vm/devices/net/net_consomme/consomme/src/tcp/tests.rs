@@ -4,11 +4,11 @@
 use super::*;
 use crate::BindError;
 use crate::ChecksumState;
-use crate::Client;
 use crate::Consomme;
 use crate::ConsommeParams;
 use crate::IpVersion;
 use crate::PortForwardKey;
+use crate::SocketDriver;
 use futures::AsyncRead;
 use futures::AsyncWrite;
 use pal_async::DefaultDriver;
@@ -41,17 +41,13 @@ impl TestClient {
     }
 }
 
-impl Client for TestClient {
+impl SocketDriver for TestClient {
     fn driver(&self) -> &dyn Driver {
         &self.driver
     }
 
-    fn recv(&mut self, data: &[u8], _checksum: &ChecksumState) {
+    fn capture_egress(&mut self, data: &[u8], _checksum: ChecksumState) {
         self.received_packets.lock().push(data.to_vec());
-    }
-
-    fn rx_mtu(&mut self) -> usize {
-        1514
     }
 }
 
@@ -850,8 +846,8 @@ async fn test_tcp_bind_port_forward(driver: DefaultDriver) {
         assert!(
             access
                 .inner
-                .shard
-                .tcp
+                .primary
+                .tcp_listeners
                 .listeners
                 .contains_key(&PortForwardKey::new(IpVersion::Ipv4, guest_port)),
             "listener should be registered"
@@ -1141,8 +1137,8 @@ async fn test_tcp_bind_same_port_different_families(driver: DefaultDriver) {
     assert!(
         access
             .inner
-            .shard
-            .tcp
+            .primary
+            .tcp_listeners
             .listeners
             .contains_key(&PortForwardKey::new(IpVersion::Ipv6, guest_port)),
         "IPv6 listener should remain registered"

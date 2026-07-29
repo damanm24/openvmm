@@ -37,6 +37,7 @@ use net_backend_resources::consomme::HostPortConfig;
 use net_backend_resources::consomme::HostPortProtocol;
 use pal_async::driver::Driver;
 use parking_lot::Mutex;
+use parking_lot::MutexGuard;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::IpAddr;
@@ -45,8 +46,11 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Waker;
 use thiserror::Error;
 
 /// Creates and binds a socket for the given protocol, address, and port.
@@ -95,7 +99,8 @@ fn socket_family(socket: &socket2::Socket) -> Result<IpVersion, consomme::BindEr
 }
 
 pub struct ConsommeEndpoint {
-    endpoint_state: Arc<Mutex<Option<EndpointState>>>,
+    endpoint_state: Arc<Mutex<EndpointState>>,
+    shard_wake: Arc<ShardWake>,
     /// Control requests originating within this process (see
     /// [`ConsommeControl`]).
     local_recv: Option<mesh::Receiver<ControlRequest>>,
@@ -219,6 +224,51 @@ pub struct PortForwardConfig {
 struct EndpointState {
     consomme: Consomme,
     port_forwards: Vec<PortForwardConfig>,
+    driver: Option<Arc<dyn Driver>>,
+    shard_stats: ShardStats,
+    steering_seed: u64,
+}
+
+#[derive(Inspect, Default)]
+struct ShardStats {
+    lock_acquisitions: Counter,
+    contended_acquisitions: Counter,
+    local_ingest: Counter,
+    foreign_ingest: Counter,
+    owner_wakes: Counter,
+    coalesced_wakes: Counter,
+    control_ingest: Counter,
+    malformed_ingest: Counter,
+}
+
+struct ShardWake {
+    pending: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl ShardWake {
+    fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            waker: Mutex::new(None),
+        }
+    }
+
+    fn register(&self, cx: &Context<'_>) {
+        *self.waker.lock() = Some(cx.waker().clone());
+        self.pending.store(false, Ordering::Release);
+    }
+
+    fn wake(&self, stats: &mut ShardStats) {
+        if self.pending.swap(true, Ordering::AcqRel) {
+            stats.coalesced_wakes.increment();
+            return;
+        }
+        stats.owner_wakes.increment();
+        if let Some(waker) = self.waker.lock().as_ref() {
+            waker.wake_by_ref();
+        }
+    }
 }
 
 impl ConsommeEndpoint {
@@ -264,10 +314,14 @@ impl ConsommeEndpoint {
         local_recv: Option<mesh::Receiver<ControlRequest>>,
     ) -> Self {
         ConsommeEndpoint {
-            endpoint_state: Arc::new(Mutex::new(Some(EndpointState {
+            endpoint_state: Arc::new(Mutex::new(EndpointState {
                 consomme: Consomme::new(config, params),
                 port_forwards: ports,
-            }))),
+                driver: None,
+                shard_stats: ShardStats::default(),
+                steering_seed: consomme::random_steering_seed(),
+            })),
+            shard_wake: Arc::new(ShardWake::new()),
             local_recv,
             remote_recv,
             pending: PendingRequests::default(),
@@ -298,11 +352,17 @@ impl ConsommeEndpoint {
 
 impl InspectMut for ConsommeEndpoint {
     fn inspect_mut(&mut self, req: inspect::Request<'_>) {
-        if let Some(consomme) = &mut *self.endpoint_state.lock() {
-            consomme.consomme.inspect_mut(req);
-        } else {
-            req.respond();
-        }
+        let mut state = self.endpoint_state.lock();
+        let EndpointState {
+            consomme,
+            shard_stats,
+            steering_seed,
+            ..
+        } = &mut *state;
+        req.respond()
+            .merge(consomme)
+            .field("shard_stats", &*shard_stats)
+            .field("steering_seed", *steering_seed);
     }
 }
 
@@ -434,9 +494,10 @@ impl net_backend::Endpoint for ConsommeEndpoint {
     ) -> anyhow::Result<()> {
         assert_eq!(config.len(), 1);
         let config = config.into_iter().next().unwrap();
+        let driver: Arc<dyn Driver> = Arc::from(config.driver);
         let mut queue = Box::new(ConsommeQueue {
-            slot: self.endpoint_state.clone(),
-            endpoint_state: self.endpoint_state.lock().take(),
+            endpoint_state: self.endpoint_state.clone(),
+            shard_wake: self.shard_wake.clone(),
             state: QueueState {
                 rx_avail: VecDeque::new(),
                 rx_ready: VecDeque::new(),
@@ -445,10 +506,13 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                 tx_scratch: Vec::new(),
             },
             stats: Default::default(),
-            driver: config.driver,
+            driver: driver.clone(),
         });
-        let port_forwards =
-            std::mem::take(&mut queue.endpoint_state.as_mut().unwrap().port_forwards);
+        let port_forwards = {
+            let mut state = self.endpoint_state.lock();
+            state.driver = Some(driver);
+            std::mem::take(&mut state.port_forwards)
+        };
         let bind_result: Result<Vec<_>, _> = queue.with_consomme_no_pool(|c| {
             c.refresh_driver();
             let mut bound: Vec<(IpProtocol, IpVersion, u16)> = Vec::new();
@@ -504,7 +568,7 @@ impl net_backend::Endpoint for ConsommeEndpoint {
     }
 
     async fn stop(&mut self) {
-        assert!(self.endpoint_state.lock().is_some());
+        self.endpoint_state.lock().driver = None;
     }
 
     fn is_ordered(&self) -> bool {
@@ -522,30 +586,43 @@ impl net_backend::Endpoint for ConsommeEndpoint {
     }
 
     async fn wait_for_endpoint_action(&mut self) -> EndpointAction {
-        std::future::poll_fn(|cx| {
-            if self.drain_channels(cx) && !self.pending.is_empty() {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
+        std::future::poll_fn(|cx| -> Poll<EndpointAction> {
+            self.drain_channels(cx);
+            if !self.pending.is_empty() {
+                let driver = self.endpoint_state.lock().driver.clone();
+                if let Some(driver) = driver {
+                    let pending = std::mem::take(&mut self.pending);
+                    let mut state = self.endpoint_state.lock();
+                    let mut client = ClientNoPool { driver: &*driver };
+                    let mut consomme = state.consomme.access(&mut client);
+                    for request in pending.ports.into_values() {
+                        process_port_request(&mut consomme, request);
+                    }
+                    for rpc in pending.state_updates {
+                        rpc.handle_sync(|f| consomme.get_mut().update_params(f));
+                    }
+                }
             }
+            Poll::Pending
         })
-        .await;
-        EndpointAction::RestartRequired
+        .await
     }
 }
 
 pub struct ConsommeQueue {
-    slot: Arc<Mutex<Option<EndpointState>>>,
-    endpoint_state: Option<EndpointState>,
+    endpoint_state: Arc<Mutex<EndpointState>>,
+    shard_wake: Arc<ShardWake>,
     state: QueueState,
     stats: Stats,
-    driver: Box<dyn Driver>,
+    driver: Arc<dyn Driver>,
 }
 
 impl InspectMut for ConsommeQueue {
     fn inspect_mut(&mut self, req: inspect::Request<'_>) {
+        let mut state = self.lock_state();
         req.respond()
-            .merge(&mut self.endpoint_state.as_mut().unwrap().consomme)
+            .merge(&mut state.consomme)
+            .field("shard_stats", &state.shard_stats)
             .field("rx_avail", self.state.rx_avail.len())
             .field("rx_ready", self.state.rx_ready.len())
             .field("tx_avail", self.state.tx_avail.len())
@@ -554,48 +631,125 @@ impl InspectMut for ConsommeQueue {
     }
 }
 
-impl Drop for ConsommeQueue {
-    fn drop(&mut self) {
-        *self.slot.lock() = self.endpoint_state.take();
-    }
-}
-
 impl ConsommeQueue {
+    fn lock_state(&self) -> MutexGuard<'_, EndpointState> {
+        if let Some(mut state) = self.endpoint_state.try_lock() {
+            state.shard_stats.lock_acquisitions.increment();
+            state
+        } else {
+            let mut state = self.endpoint_state.lock();
+            state.shard_stats.lock_acquisitions.increment();
+            state.shard_stats.contended_acquisitions.increment();
+            state
+        }
+    }
+
+    /// Ingests a frame that has already been copied out of guest memory.
+    ///
+    /// This acquires exactly one shard lock, never awaits while holding it,
+    /// and never accesses frontend buffers. Foreign work wakes the shard owner
+    /// only after protocol processing has buffered any resulting work.
+    fn ingest_frame(
+        &mut self,
+        data: &[u8],
+        checksum: &ChecksumState,
+        foreign: bool,
+    ) -> Result<(), consomme::DropReason> {
+        let mut state = self.lock_state();
+        if foreign {
+            state.shard_stats.foreign_ingest.increment();
+        } else {
+            state.shard_stats.local_ingest.increment();
+        }
+        match consomme::classify_frame(
+            data,
+            consomme::PacketDirection::GuestToRemote,
+            state.consomme.config(),
+        ) {
+            consomme::PacketClass::Flow(flow) => {
+                let _steering_hash = flow.stable_hash(state.steering_seed);
+            }
+            consomme::PacketClass::Control => state.shard_stats.control_ingest.increment(),
+            consomme::PacketClass::Drop => {
+                state.shard_stats.malformed_ingest.increment();
+                return Err(consomme::DropReason::MalformedPacket);
+            }
+        }
+        let result = state
+            .consomme
+            .access(&mut ClientNoPool {
+                driver: &*self.driver,
+            })
+            .send(data, checksum);
+        if foreign {
+            self.shard_wake.wake(&mut state.shard_stats);
+        }
+        result
+    }
+
     fn with_consomme_no_pool<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut consomme::Access<'_, ClientNoPool<'_>>) -> R,
     {
-        f(&mut self
-            .endpoint_state
-            .as_mut()
-            .unwrap()
-            .consomme
-            .access(&mut ClientNoPool {
-                driver: &self.driver,
-            }))
+        let mut state = self.lock_state();
+        f(&mut state.consomme.access(&mut ClientNoPool {
+            driver: &*self.driver,
+        }))
     }
 
-    fn with_consomme<F, R>(&mut self, pool: &mut dyn BufferAccess, f: F) -> R
-    where
-        F: FnOnce(&mut consomme::Access<'_, Client<'_>>) -> R,
-    {
-        f(&mut self
-            .endpoint_state
-            .as_mut()
-            .unwrap()
-            .consomme
-            .access(&mut Client {
-                state: &mut self.state,
-                stats: &mut self.stats,
-                driver: &self.driver,
-                pool,
-            }))
+    fn drain_egress(&mut self, pool: &mut dyn BufferAccess) {
+        while let Some(rx_id) = self.state.rx_avail.pop_front() {
+            let Some(packet) = self.lock_state().consomme.pop_egress() else {
+                self.state.rx_avail.push_front(rx_id);
+                break;
+            };
+            let checksum = packet.checksum();
+            let max = pool.capacity(rx_id) as usize;
+            if packet.data().len() <= max {
+                pool.write_packet_segments(
+                    rx_id,
+                    &RxMetadata {
+                        offset: 0,
+                        len: packet.data().len(),
+                        ip_checksum: if checksum.ipv4 {
+                            RxChecksumState::Good
+                        } else {
+                            RxChecksumState::Unknown
+                        },
+                        l4_checksum: if checksum.tcp || checksum.udp {
+                            RxChecksumState::Good
+                        } else {
+                            RxChecksumState::Unknown
+                        },
+                        l4_protocol: if checksum.tcp {
+                            L4Protocol::Tcp
+                        } else if checksum.udp {
+                            L4Protocol::Udp
+                        } else {
+                            L4Protocol::Unknown
+                        },
+                        vlan: None,
+                    },
+                    &[packet.data()],
+                );
+                self.state.rx_ready.push_back(rx_id);
+            } else {
+                tracing::warn!(
+                    len = packet.data().len(),
+                    max,
+                    "dropping rx packet: too large"
+                );
+                self.stats.rx_dropped.increment();
+                self.state.rx_avail.push_front(rx_id);
+            }
+            self.lock_state().consomme.recycle_egress(packet);
+        }
     }
 }
 
 /// Execute a port bind: create a socket and forward it to the consomme stack.
 fn execute_bind(
-    consomme: &mut consomme::Access<'_, impl consomme::Client>,
+    consomme: &mut consomme::Access<'_, impl consomme::SocketDriver>,
     cfg: HostPortConfig,
 ) -> anyhow::Result<()> {
     use net_backend_resources::consomme::HostPort;
@@ -638,7 +792,7 @@ fn execute_bind(
 
 /// Execute a port unbind.
 fn execute_unbind(
-    consomme: &mut consomme::Access<'_, impl consomme::Client>,
+    consomme: &mut consomme::Access<'_, impl consomme::SocketDriver>,
     cfg: &HostPortConfig,
 ) -> anyhow::Result<()> {
     use net_backend_resources::consomme::HostIpAddress;
@@ -669,7 +823,7 @@ fn into_rpc(request: ConsommeRequest) -> mesh::rpc::FailableRpc<HostPortConfig, 
 
 /// Handle a `ConsommeRequest` (shared by both in-proc and cross-proc paths).
 fn process_port_request(
-    consomme: &mut consomme::Access<'_, impl consomme::Client>,
+    consomme: &mut consomme::Access<'_, impl consomme::SocketDriver>,
     request: ConsommeRequest,
 ) {
     match request {
@@ -697,6 +851,7 @@ fn process_port_request(
 
 impl net_backend::Queue for ConsommeQueue {
     fn poll_ready(&mut self, cx: &mut Context<'_>, pool: &mut dyn BufferAccess) -> Poll<()> {
+        self.shard_wake.register(cx);
         while let Some(head) = self.state.tx_avail.front() {
             let TxSegmentType::Head(meta) = &head.ty else {
                 unreachable!()
@@ -742,7 +897,7 @@ impl net_backend::Queue for ConsommeQueue {
                 offset += segment.len as usize;
             }
 
-            if let Err(err) = self.with_consomme(pool, |c| c.send(&buf, &checksum)) {
+            if let Err(err) = self.ingest_frame(&buf, &checksum, false) {
                 tracing::debug!(error = &err as &dyn std::error::Error, "tx packet ignored");
                 match err {
                     consomme::DropReason::SendBufferFull
@@ -765,12 +920,14 @@ impl net_backend::Queue for ConsommeQueue {
                     | consomme::DropReason::MalformedPacket => self.stats.tx_errors.increment(),
                 }
             }
+            self.drain_egress(pool);
             self.state.tx_scratch = buf;
 
             self.state.tx_ready.push_back(tx_id);
         }
 
-        self.with_consomme(pool, |c| c.poll(cx));
+        self.with_consomme_no_pool(|c| c.poll(cx));
+        self.drain_egress(pool);
 
         if !self.state.tx_ready.is_empty() || !self.state.rx_ready.is_empty() {
             Poll::Ready(())
@@ -835,97 +992,25 @@ struct Stats {
     tx_unknown: Counter,
 }
 
-struct Client<'a> {
-    state: &'a mut QueueState,
-    stats: &'a mut Stats,
-    driver: &'a dyn Driver,
-    pool: &'a mut dyn BufferAccess,
-}
-
-/// Minimal client for consomme operations that don't need BufferAccess
-/// (e.g., refresh_driver, timer/socket management).
 struct ClientNoPool<'a> {
     driver: &'a dyn Driver,
 }
 
-impl consomme::Client for ClientNoPool<'_> {
+impl consomme::SocketDriver for ClientNoPool<'_> {
     fn driver(&self) -> &dyn Driver {
         self.driver
-    }
-
-    fn recv(&mut self, _data: &[u8], _checksum: &ChecksumState) {}
-
-    fn rx_mtu(&mut self) -> usize {
-        0
-    }
-}
-
-impl consomme::Client for Client<'_> {
-    fn driver(&self) -> &dyn Driver {
-        self.driver
-    }
-
-    fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
-        self.recv_segments(&[data], checksum);
-    }
-
-    fn recv_segments(&mut self, segments: &[&[u8]], checksum: &ChecksumState) {
-        let Some(rx_id) = self.state.rx_avail.pop_front() else {
-            // This should be rare, only affecting unbuffered protocols. TCP and
-            // UDP are buffered and they won't indicate packets unless rx_mtu()
-            // returns a non-zero value.
-            self.stats.rx_dropped.increment();
-            return;
-        };
-        let max = self.pool.capacity(rx_id) as usize;
-        let len: usize = segments.iter().map(|s| s.len()).sum();
-        if len <= max {
-            self.pool.write_packet_segments(
-                rx_id,
-                &RxMetadata {
-                    offset: 0,
-                    len,
-                    ip_checksum: if checksum.ipv4 {
-                        RxChecksumState::Good
-                    } else {
-                        RxChecksumState::Unknown
-                    },
-                    l4_checksum: if checksum.tcp || checksum.udp {
-                        RxChecksumState::Good
-                    } else {
-                        RxChecksumState::Unknown
-                    },
-                    l4_protocol: if checksum.tcp {
-                        L4Protocol::Tcp
-                    } else if checksum.udp {
-                        L4Protocol::Udp
-                    } else {
-                        L4Protocol::Unknown
-                    },
-                    vlan: None,
-                },
-                segments,
-            );
-            self.state.rx_ready.push_back(rx_id);
-        } else {
-            tracing::warn!(len, max, "dropping rx packet: too large");
-            self.state.rx_avail.push_front(rx_id);
-        }
-    }
-
-    fn rx_mtu(&mut self) -> usize {
-        if let Some(&rx_id) = self.state.rx_avail.front() {
-            self.pool.capacity(rx_id) as usize
-        } else {
-            0
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use net_backend::Endpoint as _;
     use net_backend_resources::consomme::HostPort;
+    use pal_async::DefaultDriver;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::Waker;
 
     fn cfg(guest_port: u16) -> HostPortConfig {
         HostPortConfig {
@@ -938,6 +1023,92 @@ mod tests {
 
     fn endpoint() -> ConsommeEndpoint {
         ConsommeEndpoint::new(ConsommeConfig::new(), ConsommeParams::new().unwrap())
+    }
+
+    fn queue(endpoint: &ConsommeEndpoint, driver: DefaultDriver) -> ConsommeQueue {
+        ConsommeQueue {
+            endpoint_state: endpoint.endpoint_state.clone(),
+            shard_wake: endpoint.shard_wake.clone(),
+            state: QueueState {
+                rx_avail: VecDeque::new(),
+                rx_ready: VecDeque::new(),
+                tx_avail: VecDeque::new(),
+                tx_ready: VecDeque::new(),
+                tx_scratch: Vec::new(),
+            },
+            stats: Stats::default(),
+            driver: Arc::new(driver),
+        }
+    }
+
+    #[test]
+    fn owner_wakes_are_coalesced() {
+        let wake = ShardWake::new();
+        let mut stats = ShardStats::default();
+        let cx = Context::from_waker(Waker::noop());
+        wake.register(&cx);
+        wake.wake(&mut stats);
+        wake.wake(&mut stats);
+        assert_eq!(stats.owner_wakes.get(), 1);
+        assert_eq!(stats.coalesced_wakes.get(), 1);
+    }
+
+    #[pal_async::async_test]
+    async fn local_and_foreign_ingest_share_one_shard(driver: DefaultDriver) {
+        let endpoint = endpoint();
+        let mut queue = queue(&endpoint, driver);
+        let malformed = [0u8; 1];
+        let checksum = ChecksumState::default();
+        let _ = queue.ingest_frame(&malformed, &checksum, false);
+        let _ = queue.ingest_frame(&malformed, &checksum, true);
+        let state = endpoint.endpoint_state.lock();
+        assert_eq!(state.shard_stats.local_ingest.get(), 1);
+        assert_eq!(state.shard_stats.foreign_ingest.get(), 1);
+    }
+
+    #[pal_async::async_test]
+    async fn queue_recreation_preserves_endpoint_state(driver: DefaultDriver) {
+        let endpoint = endpoint();
+        endpoint
+            .endpoint_state
+            .lock()
+            .consomme
+            .update_params(|params| params.allow_host_local_access = true);
+        drop(queue(&endpoint, driver.clone()));
+        let _replacement = queue(&endpoint, driver);
+        assert!(
+            endpoint
+                .endpoint_state
+                .lock()
+                .consomme
+                .params()
+                .allow_host_local_access
+        );
+    }
+
+    #[pal_async::async_test]
+    async fn control_update_completes_with_idle_queue(driver: DefaultDriver) {
+        let (mut endpoint, control) =
+            ConsommeEndpoint::new_dynamic(ConsommeConfig::new(), ConsommeParams::new().unwrap());
+        endpoint.endpoint_state.lock().driver = Some(Arc::new(driver));
+        let mut update = Box::pin(control.update_state(Box::new(|params| {
+            params.allow_host_local_access = true;
+        })));
+        let mut action = Box::pin(endpoint.wait_for_endpoint_action());
+        let mut cx = Context::from_waker(Waker::noop());
+
+        assert!(Pin::new(&mut update).poll(&mut cx).is_pending());
+        assert!(Pin::new(&mut action).poll(&mut cx).is_pending());
+        assert!(Pin::new(&mut update).poll(&mut cx).is_ready());
+        drop(action);
+        assert!(
+            endpoint
+                .endpoint_state
+                .lock()
+                .consomme
+                .params()
+                .allow_host_local_access
+        );
     }
 
     #[test]

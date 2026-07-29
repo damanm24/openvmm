@@ -10,8 +10,8 @@
 //! their own addresses using SLAAC.
 
 use super::Access;
-use super::Client;
 use super::DropReason;
+use super::SocketDriver;
 use crate::ChecksumState;
 use crate::MIN_MTU;
 use crate::is_same_ipv6_subnet;
@@ -73,7 +73,7 @@ pub enum NdpMessageType {
     Redirect,
 }
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     /// Handle NDP messages from the guest
     pub(crate) fn handle_ndp(
         &mut self,
@@ -265,7 +265,10 @@ impl<T: Client> Access<'_, T> {
 
         let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + icmpv6_len;
 
-        self.client.recv(&buffer[..total_len], &ChecksumState::NONE);
+        self.inner
+            .shard
+            .egress
+            .push(&buffer[..total_len], ChecksumState::NONE);
         Ok(())
     }
 
@@ -440,7 +443,10 @@ impl<T: Client> Access<'_, T> {
 
         let total_len = eth_repr.buffer_len() + ipv6_repr.buffer_len() + ndp_repr.buffer_len();
 
-        self.client.recv(&buffer[..total_len], &ChecksumState::NONE);
+        self.inner
+            .shard
+            .egress
+            .push(&buffer[..total_len], ChecksumState::NONE);
         Ok(())
     }
 

@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 use super::Access;
-use super::Client;
 use super::DropReason;
+use super::SocketDriver;
 use crate::ChecksumState;
 use crate::MIN_MTU;
 use heapless::Vec as HeaplessVec;
@@ -29,7 +29,7 @@ pub const DHCP_CLIENT: u16 = 68;
 // RFC 1542 section 2.1 requires every BOOTP message to be at least 300 octets.
 const BOOTP_MIN_MESSAGE_LEN: usize = 300;
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn handle_dhcp(&mut self, payload: &[u8]) -> Result<(), DropReason> {
         let dhcp_packet = DhcpPacket::new_checked(payload)?;
         let dhcp_req = DhcpRepr::parse(&dhcp_packet)?;
@@ -196,12 +196,12 @@ impl<T: Client> Access<'_, T> {
         );
         dhcp_emit_result?;
 
-        self.client.recv(
+        self.inner.shard.egress.push(
             &resp_buffer[..resp_eth.buffer_len()
                 + resp_ipv4.buffer_len()
                 + resp_udp.header_len()
                 + resp_dhcp_len],
-            &ChecksumState::UDP4,
+            ChecksumState::UDP4,
         );
         Ok(())
     }
@@ -226,17 +226,13 @@ mod tests {
         frames: Vec<(Vec<u8>, ChecksumState)>,
     }
 
-    impl Client for CaptureClient {
+    impl SocketDriver for CaptureClient {
         fn driver(&self) -> &dyn Driver {
             &self.driver
         }
 
-        fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
-            self.frames.push((data.to_vec(), *checksum));
-        }
-
-        fn rx_mtu(&mut self) -> usize {
-            MIN_MTU
+        fn capture_egress(&mut self, data: &[u8], checksum: ChecksumState) {
+            self.frames.push((data.to_vec(), checksum));
         }
     }
 
@@ -309,7 +305,11 @@ mod tests {
             driver,
             frames: Vec::new(),
         };
-        consomme.access(&mut client).handle_dhcp(request).unwrap();
+        {
+            let mut access = consomme.access(&mut client);
+            access.handle_dhcp(request).unwrap();
+            access.capture_test_egress();
+        }
         client.frames
     }
 

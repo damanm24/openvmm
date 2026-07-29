@@ -5,9 +5,10 @@
 #![expect(unsafe_code)]
 
 use super::Access;
-use super::Client;
 use super::ConsommeConfig;
 use super::DropReason;
+use super::EgressQueue;
+use super::SocketDriver;
 use crate::ChecksumState;
 use crate::Ipv4Addresses;
 use crate::MIN_MTU;
@@ -92,7 +93,7 @@ impl IcmpConnection {
         dst_addr: &SocketAddrV4,
         config: &ConsommeConfig,
         buffer: &mut [u8],
-        client: &mut impl Client,
+        egress: &mut EgressQueue,
     ) {
         let mut eth = EthernetFrame::new_unchecked(buffer);
         loop {
@@ -119,7 +120,7 @@ impl IcmpConnection {
                     ipv4.set_dst_addr(*dst_addr.ip());
                     ipv4.fill_checksum();
                     let len = ETHERNET_HEADER_LEN + n;
-                    client.recv(&eth.as_ref()[..len], &ChecksumState::IPV4_ONLY);
+                    egress.push(&eth.as_ref()[..len], ChecksumState::IPV4_ONLY);
                     self.stats.rx_packets.increment();
                 }
                 Poll::Ready(Err(err)) => {
@@ -158,16 +159,17 @@ impl IcmpConnection {
     }
 }
 
-impl<T: Client> Access<'_, T> {
+impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn poll_icmp(&mut self, cx: &mut Context<'_>) {
         let buffer = &mut self.inner.shard.buffer;
+        let egress = &mut self.inner.shard.egress;
         for (dst_addr, conn) in &mut self.inner.primary.icmp.connections {
             conn.poll_conn(
                 cx,
                 dst_addr,
                 &self.inner.primary.config.immutable,
                 buffer,
-                self.client,
+                egress,
             );
         }
     }
@@ -228,8 +230,10 @@ impl<T: Client> Access<'_, T> {
         icmp_reply.set_msg_type(Icmpv4Message::EchoReply);
         icmp_reply.fill_checksum();
 
-        self.client
-            .recv(&buffer[..eth_total_len], &ChecksumState::IPV4_ONLY);
+        self.inner
+            .shard
+            .egress
+            .push(&buffer[..eth_total_len], ChecksumState::IPV4_ONLY);
         Ok(())
     }
 

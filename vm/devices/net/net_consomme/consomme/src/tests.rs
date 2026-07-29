@@ -26,15 +26,9 @@ impl TestClient {
     }
 }
 
-impl Client for TestClient {
+impl SocketDriver for TestClient {
     fn driver(&self) -> &dyn Driver {
         &self.driver
-    }
-
-    fn recv(&mut self, _data: &[u8], _checksum: &ChecksumState) {}
-
-    fn rx_mtu(&mut self) -> usize {
-        1514
     }
 }
 
@@ -367,6 +361,20 @@ async fn live_parameter_update_preserves_existing_connection(driver: DefaultDriv
     assert_eq!(consomme.shard.tcp.connection_count(), 1);
 }
 
+#[cfg(not(windows))]
+#[pal_async::async_test]
+async fn drained_flows_can_be_reinserted(driver: DefaultDriver) {
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
+    let mut client = TestClient::new(driver);
+    create_ipv4_tcp_connection(&mut consomme, &mut client);
+    assert_eq!(consomme.shard.tcp.connection_count(), 1);
+
+    let flows = consomme.drain_flows();
+    assert_eq!(consomme.shard.tcp.connection_count(), 0);
+    consomme.insert_flows(flows);
+    assert_eq!(consomme.shard.tcp.connection_count(), 1);
+}
+
 #[test]
 fn test_is_same_ipv6_subnet_basic() {
     let a = Ipv6Address::new(0x2001, 0x0db8, 0x0001, 0, 0, 0, 0, 1);
@@ -458,15 +466,9 @@ fn infer_client_link_local_from_routable_does_not_overwrite_existing_address() {
 /// new connections and therefore never call `driver()`.
 struct NoDriverClient;
 
-impl Client for NoDriverClient {
+impl SocketDriver for NoDriverClient {
     fn driver(&self) -> &dyn Driver {
         unreachable!("IPv6 address learning tests do not use the client driver")
-    }
-
-    fn recv(&mut self, _data: &[u8], _checksum: &ChecksumState) {}
-
-    fn rx_mtu(&mut self) -> usize {
-        MIN_MTU
     }
 }
 
