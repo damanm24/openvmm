@@ -74,6 +74,23 @@ pub(crate) struct Tcp {
 
 pub(crate) struct TcpFlows(HashMap<FourTuple, TcpConnection>);
 
+/// A host TCP connection accepted by a port-forward listener but not yet
+/// assigned to a transport shard.
+pub struct AcceptedTcpConnection {
+    socket: Socket,
+    flow: FourTuple,
+}
+
+impl AcceptedTcpConnection {
+    /// Returns the normalized guest-visible flow used for shard selection.
+    pub fn flow_key(&self) -> crate::FlowKey {
+        crate::FlowKey::Tcp {
+            guest: self.flow.src,
+            remote: self.flow.dst,
+        }
+    }
+}
+
 #[derive(InspectMut)]
 pub(crate) struct TcpListeners {
     #[inspect(iter_by_key)]
@@ -417,7 +434,15 @@ impl TcpState {
 
 impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn poll_tcp(&mut self, cx: &mut Context<'_>) {
-        // Check for any new incoming connections
+        for accepted in self.poll_tcp_listeners(cx) {
+            self.insert_accepted_tcp(accepted);
+        }
+        self.poll_tcp_connections(cx);
+    }
+
+    /// Polls port-forward listeners for new host connections.
+    pub fn poll_tcp_listeners(&mut self, cx: &mut Context<'_>) -> Vec<AcceptedTcpConnection> {
+        let mut accepted = Vec::new();
         self.inner
             .primary
             .tcp_listeners
@@ -434,8 +459,13 @@ impl<T: SocketDriver> Access<'_, T> {
                             .is_local_address(&self.inner.shard.config.immutable, &other_addr)
                         {
                             for (other_ft, connection) in self.inner.shard.tcp.connections.iter() {
-                                if matches!(connection.inner.state, TcpState::Connecting | TcpState::SynReceived)
-                                    && PortForwardKey::from_socket_addr(other_ft.dst, other_ft.dst.port()) == *key
+                                if matches!(
+                                    connection.inner.state,
+                                    TcpState::Connecting | TcpState::SynReceived
+                                ) && PortForwardKey::from_socket_addr(
+                                    other_ft.dst,
+                                    other_ft.dst.port(),
+                                ) == *key
                                 {
                                     if let LoopbackPortInfo::ProxyForGuestPort {
                                         sending_port,
@@ -450,16 +480,11 @@ impl<T: SocketDriver> Access<'_, T> {
                                 }
                             }
                         }
-                        let Some(ft) = self
-                            .inner
-                            .primary
-                            .runtime
-                            .try_ft_from_remote_address(
-                                &self.inner.shard.config.immutable,
-                                &other_addr,
-                                key.guest_port,
-                            )
-                        else {
+                        let Some(ft) = self.inner.primary.runtime.try_ft_from_remote_address(
+                            &self.inner.shard.config.immutable,
+                            &other_addr,
+                            key.guest_port,
+                        ) else {
                             return true;
                         };
 
@@ -469,55 +494,66 @@ impl<T: SocketDriver> Access<'_, T> {
                             dst: ft.src,
                         };
 
-                        match self.inner.shard.tcp.connections.entry(ft) {
-                            hash_map::Entry::Vacant(e) => {
-                                let mut sender = Sender {
-                                    ft: &ft,
-                                    client: self.client,
-                                    config: &self.inner.shard.config.immutable,
-                                    runtime: &mut self.inner.primary.runtime,
-                                    buffer: &mut self.inner.shard.buffer,
-                                    egress: &mut self.inner.shard.egress,
-                                };
-
-                                let conn = match TcpConnection::new_from_accept(
-                                    &mut sender,
-                                    socket,
-                                    &self.inner.shard.tcp.connection_params,
-                                ) {
-                                    Ok(conn) => conn,
-                                    Err(err) => {
-                                        tracing::warn!(
-                                            error = &err as &dyn std::error::Error,
-                                            src = %ft.src,
-                                            dst = %ft.dst,
-                                            "Failed to create connection from newly accepted socket",
-                                        );
-                                        return true;
-                                    }
-                                };
-                                tracing::trace!(?ft, "TCP connection established");
-                                e.insert(conn);
-                                self.inner
-                                    .shard
-                                    .tcp
-                                    .aggregate_stats
-                                    .connections_accepted
-                                    .increment();
-                            }
-                            hash_map::Entry::Occupied(_) => {
-                                tracing::warn!(
-                                    src = %ft.src,
-                                    dst = %ft.dst,
-                                    "New client request ignored because it was already connected"
-                                );
-                            }
-                        }
+                        accepted.push(AcceptedTcpConnection { socket, flow: ft });
                     }
                     true
                 }
                 Err(_) => false,
             });
+        accepted
+    }
+
+    /// Constructs transport state for an accepted host connection in this
+    /// shard and emits the initial SYN toward the guest.
+    pub fn insert_accepted_tcp(&mut self, accepted: AcceptedTcpConnection) {
+        let AcceptedTcpConnection { socket, flow } = accepted;
+        match self.inner.shard.tcp.connections.entry(flow) {
+            hash_map::Entry::Vacant(entry) => {
+                let mut sender = Sender {
+                    ft: &flow,
+                    client: self.client,
+                    config: &self.inner.shard.config.immutable,
+                    runtime: &mut self.inner.primary.runtime,
+                    buffer: &mut self.inner.shard.buffer,
+                    egress: &mut self.inner.shard.egress,
+                };
+
+                let connection = match TcpConnection::new_from_accept(
+                    &mut sender,
+                    socket,
+                    &self.inner.shard.tcp.connection_params,
+                ) {
+                    Ok(connection) => connection,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = &err as &dyn std::error::Error,
+                            src = %flow.src,
+                            dst = %flow.dst,
+                            "Failed to create connection from newly accepted socket",
+                        );
+                        return;
+                    }
+                };
+                tracing::trace!(?flow, "TCP connection established");
+                entry.insert(connection);
+                self.inner
+                    .shard
+                    .tcp
+                    .aggregate_stats
+                    .connections_accepted
+                    .increment();
+            }
+            hash_map::Entry::Occupied(_) => {
+                tracing::warn!(
+                    src = %flow.src,
+                    dst = %flow.dst,
+                    "New client request ignored because it was already connected"
+                );
+            }
+        }
+    }
+
+    pub(crate) fn poll_tcp_connections(&mut self, cx: &mut Context<'_>) {
         // Divide the bounded egress capacity among current flows. Without a
         // quota, the first ready connection can fill the queue and starve
         // every later connection in the HashMap iteration.

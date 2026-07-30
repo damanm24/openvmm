@@ -455,11 +455,13 @@ impl crate::harness::WarmPerfTest for NetworkTest {
     }
 
     async fn teardown(&self, state: NetworkTestState) -> anyhow::Result<()> {
+        state.agent.power_off().await?;
+        state.vm.wait_for_clean_teardown().await?;
         state
             .iperf_requests
             .send(crate::iperf_helper::IperfRequest::Stop);
         state._helper_mesh.shutdown().await;
-        state.vm.teardown().await
+        Ok(())
     }
 }
 

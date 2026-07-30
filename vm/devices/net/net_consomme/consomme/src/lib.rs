@@ -28,6 +28,8 @@ mod ndp;
 mod tcp;
 mod udp;
 
+pub use tcp::AcceptedTcpConnection;
+
 pub use classifier::FlowKey;
 pub use classifier::PacketClass;
 pub use classifier::PacketDirection;
@@ -1135,6 +1137,19 @@ impl<T: SocketDriver> Access<'_, T> {
     pub fn poll(&mut self, cx: &mut Context<'_>) {
         self.poll_udp(cx);
         self.poll_tcp(cx);
+        self.poll_icmp(cx);
+        #[cfg(test)]
+        self.capture_test_egress();
+    }
+
+    /// Polls for work without accepting new TCP connections.
+    ///
+    /// Callers that distribute accepted connections across multiple transport
+    /// shards must first call [`Self::poll_tcp_listeners`] and insert each
+    /// result into its owning shard.
+    pub fn poll_without_tcp_listeners(&mut self, cx: &mut Context<'_>) {
+        self.poll_udp(cx);
+        self.poll_tcp_connections(cx);
         self.poll_icmp(cx);
         #[cfg(test)]
         self.capture_test_egress();

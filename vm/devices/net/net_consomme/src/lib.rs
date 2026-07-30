@@ -745,6 +745,10 @@ impl ConsommeQueue {
         }
     }
 
+    fn flow_target(&self, flow: consomme::FlowKey) -> usize {
+        flow.stable_hash(self.steering_seed) as usize % self.active_shards
+    }
+
     /// Ingests a frame that has already been copied out of guest memory.
     ///
     /// This acquires exactly one shard lock, never awaits while holding it,
@@ -759,9 +763,7 @@ impl ConsommeQueue {
         let packet_class =
             consomme::classify_frame(data, consomme::PacketDirection::GuestToRemote, &self.config);
         let target = match packet_class {
-            consomme::PacketClass::Flow(flow) => {
-                flow.stable_hash(self.steering_seed) as usize % self.active_shards
-            }
+            consomme::PacketClass::Flow(flow) => self.flow_target(flow),
             consomme::PacketClass::Control => 0,
             consomme::PacketClass::Drop => return Err(consomme::DropReason::MalformedPacket),
         };
@@ -782,6 +784,30 @@ impl ConsommeQueue {
             wake.wake(&mut state.shard_stats);
         }
         result
+    }
+
+    fn dispatch_accepted_tcp(&mut self, cx: &mut Context<'_>) {
+        if self.queue_index != 0 {
+            return;
+        }
+
+        let accepted = self.with_consomme_no_pool(|consomme| consomme.poll_tcp_listeners(cx));
+        for accepted in accepted {
+            let target = self.flow_target(accepted.flow_key());
+            let mut state = self.lock_shard(target);
+            let driver = state
+                .driver
+                .clone()
+                .expect("active Consomme shard must have a driver");
+            state
+                .consomme
+                .access(&mut ClientNoPool { driver: &*driver })
+                .insert_accepted_tcp(accepted);
+            if target != self.queue_index {
+                let wake = state.wake.clone();
+                wake.wake(&mut state.shard_stats);
+            }
+        }
     }
 
     fn with_consomme_no_pool<F, R>(&mut self, f: F) -> R
@@ -1025,7 +1051,8 @@ impl net_backend::Queue for ConsommeQueue {
             self.state.tx_ready.push_back(tx_id);
         }
 
-        self.with_consomme_no_pool(|c| c.poll(cx));
+        self.dispatch_accepted_tcp(cx);
+        self.with_consomme_no_pool(|c| c.poll_without_tcp_listeners(cx));
         self.drain_egress(pool);
 
         if !self.state.tx_ready.is_empty() || !self.state.rx_ready.is_empty() {
@@ -1166,6 +1193,82 @@ mod tests {
         let state = endpoint.shards[0].lock();
         assert_eq!(state.shard_stats.local_ingest.get(), 1);
         assert_eq!(state.shard_stats.foreign_ingest.get(), 1);
+    }
+
+    #[cfg(unix)]
+    #[pal_async::async_test]
+    async fn accepted_tcp_connections_are_distributed(driver: DefaultDriver) {
+        let endpoint = endpoint();
+        let shared_driver: Arc<dyn Driver> = Arc::new(driver.clone());
+        for shard in endpoint.shards.iter().take(2) {
+            shard.lock().driver = Some(shared_driver.clone());
+        }
+
+        let mut queue = queue(&endpoint, driver.clone());
+        queue.active_shards = 2;
+
+        let socket =
+            create_bound_socket(&IpProtocol::Tcp, Some(Ipv4Addr::LOCALHOST.into()), 0).unwrap();
+        let host_addr = socket_addr(&socket).unwrap();
+        {
+            let mut shard = endpoint.shards[0].lock();
+            let mut client = ClientNoPool { driver: &driver };
+            shard
+                .consomme
+                .access(&mut client)
+                .bind_tcp_port(socket, 7777)
+                .unwrap();
+        }
+
+        let mut clients = Vec::new();
+        let mut found_foreign_owner = false;
+        for _ in 0..32 {
+            clients.push(std::net::TcpStream::connect(host_addr).unwrap());
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            let owner = loop {
+                let mut cx = Context::from_waker(Waker::noop());
+                queue.dispatch_accepted_tcp(&mut cx);
+
+                let mut owner = None;
+                for (index, shard) in endpoint.shards.iter().take(2).enumerate() {
+                    let mut shard = shard.lock();
+                    if let Some(packet) = shard.consomme.pop_egress() {
+                        let class = consomme::classify_frame(
+                            packet.data(),
+                            consomme::PacketDirection::RemoteToGuest,
+                            &endpoint.config,
+                        );
+                        shard.consomme.recycle_egress(packet);
+                        let consomme::PacketClass::Flow(flow) = class else {
+                            panic!("accepted connection did not emit a TCP flow")
+                        };
+                        assert_eq!(index, queue.flow_target(flow));
+                        owner = Some(index);
+                    }
+                }
+                if let Some(owner) = owner {
+                    break owner;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for accepted connection"
+                );
+                pal_async::timer::PolledTimer::new(&driver)
+                    .sleep(std::time::Duration::from_millis(10))
+                    .await;
+            };
+
+            if owner == 1 {
+                found_foreign_owner = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_foreign_owner,
+            "accepted connections were not distributed beyond shard 0"
+        );
     }
 
     #[pal_async::async_test]
