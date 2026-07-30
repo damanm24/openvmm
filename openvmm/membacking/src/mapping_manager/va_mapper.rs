@@ -21,21 +21,14 @@
 //! In both modes, private memory ranges are committed up front (Windows) or
 //! handled transparently by the kernel (Linux).
 //!
-//! On Windows, the **primary** (local) mapper's writable THP-eligible guest RAM
-//! (private *and* shared/section) additionally uses a "deferred protect" scheme
-//! for soft large pages: the range is committed/mapped read-only, and the first
-//! write fault upgrades a full 2 MB window to read-write and prefetches it (via
-//! `page_fault` for host-side writes such as the loader, or `resolve` for guest
-//! writes). Faulting a uniform 2 MB region in one operation gives the OS the
-//! opportunity to back it with a large page (which the hypervisor can map as a
-//! 2 MB SLAT entry) instead of the fragmented small pages that result from
-//! dribbled per-page writes. Non-primary (device/DMA) mappers use plain 4 KB
-//! read-write pages.
-//!
-//! When such a range is also *prefetched*, it is populated eagerly at build
-//! time instead: it stays read-write (the build-time populate cannot access a
-//! read-only mapping) and its per-window first-fault bitmap starts fully set, so
-//! `resolve` treats every window as already attempted.
+//! On Windows, prefetched writable THP-eligible guest RAM in the **primary**
+//! (local) mapper additionally uses soft large pages. Eagerly populating a
+//! uniform 2 MB region gives the OS the opportunity to back it with a large
+//! page, which the hypervisor can map as a 2 MB SLAT entry. Lazy ranges stay
+//! read-write and use ordinary 4 KB backing: coordinating fault-time host
+//! promotion with WHP's SLAT population can leave guest writes repeatedly
+//! faulting without making progress. Non-primary (device/DMA) mappers also use
+//! plain 4 KB read-write pages.
 
 // UNSAFETY: Implementing the unsafe GuestMemoryAccess trait by calling unsafe
 // low level memory manipulation functions.
@@ -134,15 +127,8 @@ struct MappingProps {
     /// General per-mapping fault counters, always present. See [`FaultStats`].
     stats: FaultStats,
     /// Soft-large-page state for this range's 2 MB regions. `Some` only for
-    /// writable THP-eligible ranges on the **primary** (local) mapper on Windows
-    /// (soft large pages); `None` otherwise — non-primary (device/DMA) mappers,
-    /// non-THP ranges, and non-Windows hosts spend nothing. The fault paths
-    /// claim a region, materialize backing, and bump counters while holding the
-    /// mapping-index read lock.
-    ///
-    /// `Some` also marks the range (private or shared) as "deferred protect":
-    /// committed/mapped read-only and upgraded to read-write — then materialized
-    /// with a 2 MB prefetch — a window at a time on first write.
+    /// prefetched, writable THP-eligible ranges on the **primary** (local)
+    /// mapper on Windows; `None` otherwise.
     soft_lp: Option<SoftLp>,
 }
 
@@ -372,23 +358,12 @@ impl MapperTask {
 
     /// Establishes a mapping in the VA space, dispatching on how it is backed.
     fn map(&self, params: MappingParams) -> Result<(), MappingError> {
-        // Soft large pages are a Windows-only, THP-only feature that matters only
-        // on the **primary** mapper: the partition and the loader run against its
-        // VA, so that is the only place a large host backing yields a 2 MB SLAT
-        // entry. Non-primary (device/DMA) mappers, read-only mappings (e.g. ROM),
-        // non-THP ranges, and non-Windows hosts use plain read-write 4 KB pages.
-        let soft_lp = cfg!(windows)
-            && params.policy.transparent_hugepages
-            && params.writable
-            && self.inner.primary;
-
-        // Deferred protect (map read-only, populate lazily on the first write
-        // fault) drives the *lazy* soft-LP path. When the range is prefetched it
-        // is populated *eagerly* at build time instead, so it stays read-write
-        // (the build-time populate cannot access a read-only mapping) and its
-        // 2 MB windows start already-attempted.
-        let prefetch = soft_lp && params.policy.prefetch;
-        let deferred_protect = soft_lp && !prefetch;
+        // Soft large pages are limited to eagerly populated Windows mappings.
+        // Fault-time host promotion and WHP SLAT population cannot safely drive
+        // lazy promotion together.
+        let soft_lp = soft_large_pages_enabled(params.policy, params.writable, self.inner.primary);
+        let prefetch = soft_lp;
+        let deferred_protect = false;
 
         let private = match &params.backing {
             MappingBacking::File {
@@ -986,6 +961,10 @@ unsafe impl GuestMemoryAccess for VaMapper {
 /// entries and the per-region first-fault bitmap.
 const LARGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
 
+fn soft_large_pages_enabled(policy: MemoryPolicy, writable: bool, primary: bool) -> bool {
+    cfg!(windows) && policy.prefetch && policy.transparent_hugepages && writable && primary
+}
+
 impl ResolveMemoryFault for VaMapper {
     fn resolve(
         &self,
@@ -1173,8 +1152,28 @@ impl FirstFault {
 mod tests {
     use super::FirstFault;
     use super::large_region_count;
+    use super::soft_large_pages_enabled;
+    use crate::mapping_manager::MemoryPolicy;
     use memory_range::MemoryRange;
     use sparse_mmap::SparseMapping;
+
+    #[test]
+    fn soft_large_pages_require_prefetch() {
+        let lazy = MemoryPolicy {
+            numa_node: None,
+            transparent_hugepages: true,
+            prefetch: false,
+        };
+        assert!(!soft_large_pages_enabled(lazy, true, true));
+
+        let eager = MemoryPolicy {
+            prefetch: true,
+            ..lazy
+        };
+        assert_eq!(soft_large_pages_enabled(eager, true, true), cfg!(windows));
+        assert!(!soft_large_pages_enabled(eager, false, true));
+        assert!(!soft_large_pages_enabled(eager, true, false));
+    }
 
     /// Tests that private RAM pages can be allocated, written to, and read from.
     #[test]
