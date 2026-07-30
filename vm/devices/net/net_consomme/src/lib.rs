@@ -239,15 +239,10 @@ struct EndpointControl {
 
 #[derive(Inspect, Default)]
 struct ShardStats {
-    lock_acquisitions: Counter,
     contended_acquisitions: Counter,
     local_ingest: Counter,
     foreign_ingest: Counter,
     owner_wakes: Counter,
-    coalesced_wakes: Counter,
-    control_ingest: Counter,
-    malformed_ingest: Counter,
-    migration_egress_drops: Counter,
 }
 
 struct ShardWake {
@@ -270,7 +265,6 @@ impl ShardWake {
 
     fn wake(&self, stats: &mut ShardStats) {
         if self.pending.swap(true, Ordering::AcqRel) {
-            stats.coalesced_wakes.increment();
             return;
         }
         stats.owner_wakes.increment();
@@ -379,11 +373,7 @@ impl ConsommeEndpoint {
         for source in self.shards.iter() {
             let flows = {
                 let mut source = source.lock();
-                let dropped = source.consomme.discard_egress();
-                source
-                    .shard_stats
-                    .migration_egress_drops
-                    .add(dropped as u64);
+                source.consomme.discard_egress();
                 source.consomme.drain_flows()
             };
             for (target, flows) in flows
@@ -408,7 +398,12 @@ impl InspectMut for ConsommeEndpoint {
         let mut resp = req.respond();
         resp.field("active_shards", self.control.active_shards)
             .field("steering_seed", self.control.steering_seed);
-        for (index, shard) in self.shards.iter().enumerate() {
+        for (index, shard) in self
+            .shards
+            .iter()
+            .take(self.control.active_shards)
+            .enumerate()
+        {
             let mut shard = shard.lock();
             resp.field_mut(&index.to_string(), &mut shard.consomme);
         }
@@ -741,12 +736,10 @@ impl InspectMut for ConsommeQueue {
 
 impl ConsommeQueue {
     fn lock_shard(&self, index: usize) -> MutexGuard<'_, EndpointShard> {
-        if let Some(mut state) = self.shards[index].try_lock() {
-            state.shard_stats.lock_acquisitions.increment();
+        if let Some(state) = self.shards[index].try_lock() {
             state
         } else {
             let mut state = self.shards[index].lock();
-            state.shard_stats.lock_acquisitions.increment();
             state.shard_stats.contended_acquisitions.increment();
             state
         }
@@ -770,16 +763,7 @@ impl ConsommeQueue {
                 flow.stable_hash(self.steering_seed) as usize % self.active_shards
             }
             consomme::PacketClass::Control => 0,
-            consomme::PacketClass::Drop => {
-                let mut state = self.lock_shard(self.queue_index);
-                if foreign {
-                    state.shard_stats.foreign_ingest.increment();
-                } else {
-                    state.shard_stats.local_ingest.increment();
-                }
-                state.shard_stats.malformed_ingest.increment();
-                return Err(consomme::DropReason::MalformedPacket);
-            }
+            consomme::PacketClass::Drop => return Err(consomme::DropReason::MalformedPacket),
         };
         let foreign = foreign || target != self.queue_index;
         let mut state = self.lock_shard(target);
@@ -787,11 +771,6 @@ impl ConsommeQueue {
             state.shard_stats.foreign_ingest.increment();
         } else {
             state.shard_stats.local_ingest.increment();
-        }
-        match packet_class {
-            consomme::PacketClass::Flow(_) => {}
-            consomme::PacketClass::Control => state.shard_stats.control_ingest.increment(),
-            consomme::PacketClass::Drop => unreachable!(),
         }
         let driver = state.driver.clone().unwrap_or_else(|| self.driver.clone());
         let result = state
@@ -1173,17 +1152,17 @@ mod tests {
         wake.wake(&mut stats);
         wake.wake(&mut stats);
         assert_eq!(stats.owner_wakes.get(), 1);
-        assert_eq!(stats.coalesced_wakes.get(), 1);
     }
 
     #[pal_async::async_test]
     async fn local_and_foreign_ingest_share_one_shard(driver: DefaultDriver) {
         let endpoint = endpoint();
         let mut queue = queue(&endpoint, driver);
-        let malformed = [0u8; 1];
+        let mut arp = [0u8; 14];
+        arp[12..14].copy_from_slice(&[0x08, 0x06]);
         let checksum = ChecksumState::default();
-        let _ = queue.ingest_frame(&malformed, &checksum, false);
-        let _ = queue.ingest_frame(&malformed, &checksum, true);
+        let _ = queue.ingest_frame(&arp, &checksum, false);
+        let _ = queue.ingest_frame(&arp, &checksum, true);
         let state = endpoint.shards[0].lock();
         assert_eq!(state.shard_stats.local_ingest.get(), 1);
         assert_eq!(state.shard_stats.foreign_ingest.get(), 1);

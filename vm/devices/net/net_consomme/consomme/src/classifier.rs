@@ -76,7 +76,14 @@ impl FlowKey {
                 write_socket(&mut write, guest);
             }
         }
-        hash
+        // FNV's low bits have poor avalanche behavior, which matters when a
+        // power-of-two shard count selects a queue with modulo. Finalize the
+        // stable hash so patterned ephemeral ports use all available shards.
+        hash ^= hash >> 33;
+        hash = hash.wrapping_mul(0xff51afd7ed558ccd);
+        hash ^= hash >> 33;
+        hash = hash.wrapping_mul(0xc4ceb9fe1a85ec53);
+        hash ^ (hash >> 33)
     }
 }
 
@@ -254,6 +261,20 @@ mod tests {
             remote: "8.8.8.8:53".parse().unwrap(),
         };
         assert_eq!(first.stable_hash(7), second.stable_hash(7));
+    }
+
+    #[test]
+    fn sequential_even_tcp_ports_are_balanced_across_power_of_two_shards() {
+        let remote = "192.168.2.107:5201".parse().unwrap();
+        let mut counts = [0; 4];
+        for port in (40000..40128).step_by(2) {
+            let flow = FlowKey::Tcp {
+                guest: SocketAddr::new(Ipv4Addr::new(10, 0, 0, 2).into(), port),
+                remote,
+            };
+            counts[flow.stable_hash(7) as usize % counts.len()] += 1;
+        }
+        assert!(counts.into_iter().all(|count| (8..=24).contains(&count)));
     }
 
     #[test]

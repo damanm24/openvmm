@@ -22,6 +22,13 @@ use petri::pipette::cmd;
 
 use petri_artifacts_common::tags::MachineArch;
 
+const VCPU_COUNT: u32 = 2;
+const LONG_LIVED_CONNECTIONS_PER_VCPU: u32 = 8;
+const LONG_LIVED_CONNECTION_COUNT: u32 = VCPU_COUNT * LONG_LIVED_CONNECTIONS_PER_VCPU;
+const SHORT_LIVED_CONNECTION_COUNT: u32 = 64;
+const LONG_LIVED_DURATION_SECONDS: u32 = 10;
+const SHORT_LIVED_DURATION_SECONDS: u32 = 1;
+
 /// Which NIC frontend to use for the network test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum NicBackend {
@@ -209,7 +216,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
 
         let mut builder = petri::PetriVmBuilder::minimal(params, artifacts, driver)?
             .with_processor_topology(petri::ProcessorTopology {
-                vp_count: 2,
+                vp_count: VCPU_COUNT,
                 ..Default::default()
             })
             .with_memory(petri::MemoryConfig {
@@ -324,7 +331,15 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let name = format!("{prefix}_tcp_tx_gbps");
         recorder.start(&name)?;
         let m = self
-            .run_iperf3(state, host_ip, base_port, &name, IperfMode::TcpTx)
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port,
+                &name,
+                IperfMode::TcpTx,
+                1,
+                LONG_LIVED_DURATION_SECONDS,
+            )
             .await
             .context("TCP TX test failed")?;
         recorder.stop()?;
@@ -334,7 +349,15 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let name = format!("{prefix}_tcp_rx_gbps");
         recorder.start(&name)?;
         let m = self
-            .run_iperf3(state, host_ip, base_port + 1, &name, IperfMode::TcpRx)
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port + 1,
+                &name,
+                IperfMode::TcpRx,
+                1,
+                LONG_LIVED_DURATION_SECONDS,
+            )
             .await
             .context("TCP RX test failed")?;
         recorder.stop()?;
@@ -344,9 +367,87 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let name = format!("{prefix}_udp_tx_pps");
         recorder.start(&name)?;
         let m = self
-            .run_iperf3(state, host_ip, base_port + 2, &name, IperfMode::UdpTx)
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port + 2,
+                &name,
+                IperfMode::UdpTx,
+                1,
+                LONG_LIVED_DURATION_SECONDS,
+            )
             .await
             .context("UDP TX test failed")?;
+        recorder.stop()?;
+        metrics.push(m);
+
+        // Long-lived TCP connections, scaled to the VM's vCPU count.
+        let name = format!("{prefix}_tcp_tx_long_lived_gbps");
+        recorder.start(&name)?;
+        let m = self
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port + 3,
+                &name,
+                IperfMode::TcpTx,
+                LONG_LIVED_CONNECTION_COUNT,
+                LONG_LIVED_DURATION_SECONDS,
+            )
+            .await
+            .context("long-lived TCP TX test failed")?;
+        recorder.stop()?;
+        metrics.push(m);
+
+        let name = format!("{prefix}_tcp_rx_long_lived_gbps");
+        recorder.start(&name)?;
+        let m = self
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port + 4,
+                &name,
+                IperfMode::TcpRx,
+                LONG_LIVED_CONNECTION_COUNT,
+                LONG_LIVED_DURATION_SECONDS,
+            )
+            .await
+            .context("long-lived TCP RX test failed")?;
+        recorder.stop()?;
+        metrics.push(m);
+
+        // A larger burst of short-lived TCP connections.
+        let name = format!("{prefix}_tcp_tx_short_lived_gbps");
+        recorder.start(&name)?;
+        let m = self
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port + 5,
+                &name,
+                IperfMode::TcpTx,
+                SHORT_LIVED_CONNECTION_COUNT,
+                SHORT_LIVED_DURATION_SECONDS,
+            )
+            .await
+            .context("short-lived TCP TX test failed")?;
+        recorder.stop()?;
+        metrics.push(m);
+
+        let name = format!("{prefix}_tcp_rx_short_lived_gbps");
+        recorder.start(&name)?;
+        let m = self
+            .run_iperf3(
+                state,
+                host_ip,
+                base_port + 6,
+                &name,
+                IperfMode::TcpRx,
+                SHORT_LIVED_CONNECTION_COUNT,
+                SHORT_LIVED_DURATION_SECONDS,
+            )
+            .await
+            .context("short-lived TCP RX test failed")?;
         recorder.stop()?;
         metrics.push(m);
 
@@ -354,13 +455,11 @@ impl crate::harness::WarmPerfTest for NetworkTest {
     }
 
     async fn teardown(&self, state: NetworkTestState) -> anyhow::Result<()> {
-        state.agent.power_off().await?;
-        state.vm.wait_for_clean_teardown().await?;
         state
             .iperf_requests
             .send(crate::iperf_helper::IperfRequest::Stop);
         state._helper_mesh.shutdown().await;
-        Ok(())
+        state.vm.teardown().await
     }
 }
 
@@ -387,6 +486,8 @@ impl NetworkTest {
         port: u16,
         metric_name: &str,
         mode: IperfMode,
+        parallel_connections: u32,
+        duration_seconds: u32,
     ) -> anyhow::Result<MetricResult> {
         use mesh::rpc::RpcSend;
 
@@ -410,7 +511,16 @@ impl NetworkTest {
             .await;
 
         // Run guest iperf3 client.
-        run_guest_iperf3_client(&state.agent, host_ip, port, &mode, metric_name).await?;
+        run_guest_iperf3_client(
+            &state.agent,
+            host_ip,
+            port,
+            &mode,
+            parallel_connections,
+            duration_seconds,
+            metric_name,
+        )
+        .await?;
 
         // Collect JSON from the helper.
         let json = json_future.await.context("iperf3 helper RPC failed")?;
@@ -434,26 +544,30 @@ async fn run_guest_iperf3_client(
     host_ip: &str,
     port: u16,
     mode: &IperfMode,
+    parallel_connections: u32,
+    duration_seconds: u32,
     metric_name: &str,
 ) -> anyhow::Result<()> {
     let mut sh = agent.unix_shell();
     sh.chroot("/perf");
     let port_str = port.to_string();
+    let parallel_connections = parallel_connections.to_string();
+    let duration_seconds = duration_seconds.to_string();
     match mode {
         IperfMode::TcpTx => {
-            cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t 10 -J")
+            cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t {duration_seconds} -P {parallel_connections} -J")
                 .ignore_status()
                 .run()
                 .await
         }
         IperfMode::TcpRx => {
-            cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t 10 -R -J")
+            cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t {duration_seconds} -P {parallel_connections} -R -J")
                 .ignore_status()
                 .run()
                 .await
         }
         IperfMode::UdpTx => {
-            cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t 10 -u -b 0 -J")
+            cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t {duration_seconds} -P {parallel_connections} -u -b 0 -J")
                 .ignore_status()
                 .run()
                 .await

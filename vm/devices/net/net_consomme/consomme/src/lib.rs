@@ -196,16 +196,14 @@ impl EgressPacket {
 
 #[derive(Inspect, Default)]
 struct EgressStats {
-    queued: Counter,
     dropped: Counter,
-    recycled: Counter,
     high_water_packets: usize,
     high_water_bytes: usize,
 }
 
 #[derive(Inspect, Default)]
 struct EgressQueue {
-    #[inspect(skip)]
+    #[inspect(with = "VecDeque::len")]
     packets: VecDeque<EgressPacket>,
     #[inspect(skip)]
     recycled: Vec<Vec<u8>>,
@@ -214,6 +212,10 @@ struct EgressQueue {
 }
 
 impl EgressQueue {
+    fn remaining_packet_capacity(&self) -> usize {
+        MAX_EGRESS_PACKETS - self.packets.len()
+    }
+
     fn rx_mtu(&self) -> usize {
         if self.packets.len() == MAX_EGRESS_PACKETS || self.bytes + MIN_MTU > MAX_EGRESS_BYTES {
             0
@@ -241,7 +243,6 @@ impl EgressQueue {
         }
         self.bytes += data.len();
         self.packets.push_back(EgressPacket { data, checksum });
-        self.stats.queued.increment();
         self.stats.high_water_packets = self.stats.high_water_packets.max(self.packets.len());
         self.stats.high_water_bytes = self.stats.high_water_bytes.max(self.bytes);
     }
@@ -256,7 +257,6 @@ impl EgressQueue {
         packet.data.clear();
         if self.recycled.len() < MAX_EGRESS_PACKETS {
             self.recycled.push(packet.data);
-            self.stats.recycled.increment();
         }
     }
 }
@@ -1084,13 +1084,11 @@ impl Consomme {
         self.shard.egress.recycle(packet);
     }
 
-    /// Drops all transient guest-bound packets and returns the number dropped.
-    pub fn discard_egress(&mut self) -> usize {
-        let count = self.shard.egress.packets.len();
+    /// Drops all transient guest-bound packets.
+    pub fn discard_egress(&mut self) {
         while let Some(packet) = self.shard.egress.pop() {
             self.shard.egress.recycle(packet);
         }
-        count
     }
 
     /// Removes all movable TCP and UDP flow state from this shard.

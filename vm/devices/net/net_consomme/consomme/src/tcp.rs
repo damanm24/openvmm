@@ -317,6 +317,8 @@ enum AckPolicy {
     Flush,
 }
 
+const MAX_TCP_PACKETS_PER_INGEST: usize = 32;
+
 /// Per-connection TCP statistics for performance analysis.
 #[derive(Inspect, Default)]
 struct TcpConnStats {
@@ -349,6 +351,8 @@ struct TcpConnStats {
     rx_segment_size: Histogram<14>,
     /// Number of times the tx_buffer ring capacity was grown by autotune.
     tx_buffer_grows: Counter,
+    /// Number of times guest-bound transmission stopped at its per-flow poll budget.
+    tx_poll_budget_exhausted: Counter,
     /// Number of times the rx_buffer ring capacity was grown by autotune.
     rx_buffer_grows: Counter,
 }
@@ -514,6 +518,17 @@ impl<T: SocketDriver> Access<'_, T> {
                 }
                 Err(_) => false,
             });
+        // Divide the bounded egress capacity among current flows. Without a
+        // quota, the first ready connection can fill the queue and starve
+        // every later connection in the HashMap iteration.
+        let connection_count = self.inner.shard.tcp.connections.len();
+        let remaining_packets = self.inner.shard.egress.remaining_packet_capacity();
+        let per_connection_packet_budget = if connection_count == 0 || remaining_packets == 0 {
+            0
+        } else {
+            (remaining_packets / connection_count).clamp(1, MAX_TCP_PACKETS_PER_INGEST)
+        };
+
         // Check for any new incoming data
         self.inner.shard.tcp.connections.retain(|ft, conn| {
             let mut sender = Sender {
@@ -526,17 +541,24 @@ impl<T: SocketDriver> Access<'_, T> {
             };
             let keep = match &mut conn.backend {
                 TcpBackend::Dns(dns_handler) => match &mut self.inner.primary.dns {
-                    Some(dns) => conn
-                        .inner
-                        .poll_dns_backend(cx, &mut sender, dns_handler, dns),
+                    Some(dns) => conn.inner.poll_dns_backend(
+                        cx,
+                        &mut sender,
+                        dns_handler,
+                        dns,
+                        per_connection_packet_budget,
+                    ),
                     None => {
                         tracing::warn!("DNS TCP connection without DNS resolver, dropping");
                         false
                     }
                 },
-                TcpBackend::Socket(opt_socket) => {
-                    conn.inner.poll_socket_backend(cx, &mut sender, opt_socket)
-                }
+                TcpBackend::Socket(opt_socket) => conn.inner.poll_socket_backend(
+                    cx,
+                    &mut sender,
+                    opt_socket,
+                    per_connection_packet_budget,
+                ),
             };
             if !keep {
                 self.inner
@@ -633,7 +655,11 @@ impl<T: SocketDriver> Access<'_, T> {
                     // on outbound data if any becomes available. Without this,
                     // every guest packet would trigger a zero-payload ACK back,
                     // doubling packet rate and creating an ACK storm.
-                    e.get_mut().inner.send_next(&mut sender, AckPolicy::Defer);
+                    e.get_mut().inner.send_next(
+                        &mut sender,
+                        AckPolicy::Defer,
+                        MAX_TCP_PACKETS_PER_INGEST,
+                    );
                 } else {
                     self.inner
                         .shard
@@ -1102,6 +1128,7 @@ impl TcpConnectionInner {
         sender: &mut Sender<'_, impl SocketDriver>,
         dns_handler: &mut DnsTcpHandler,
         dns: &mut DnsResolver,
+        packet_budget: usize,
     ) -> bool {
         // Propagate guest FIN before the tx path so that poll_read can
         // detect EOF on the same iteration.
@@ -1166,7 +1193,7 @@ impl TcpConnectionInner {
         }
 
         // Flush any deferred pure-ACK from per-packet `handle_tcp` calls.
-        self.send_next(sender, AckPolicy::Flush);
+        self.send_next(sender, AckPolicy::Flush, packet_budget);
         let closing = self.state == TcpState::TimeWait
             || self.state == TcpState::LastAck
             || (self.state.tx_fin() && self.state.rx_fin() && self.tx_buffer.is_empty());
@@ -1185,6 +1212,7 @@ impl TcpConnectionInner {
         cx: &mut Context<'_>,
         sender: &mut Sender<'_, impl SocketDriver>,
         opt_socket: &mut Option<PolledSocket<Socket>>,
+        packet_budget: usize,
     ) -> bool {
         // Wait for the outbound connection to complete.
         if self.state == TcpState::Connecting {
@@ -1368,7 +1396,7 @@ impl TcpConnectionInner {
         // Send any pending data or ACKs. Always use Flush: if no data was
         // read from the socket and no ACK is pending, send_data will find
         // nothing to do anyway.
-        self.send_next(sender, AckPolicy::Flush);
+        self.send_next(sender, AckPolicy::Flush, packet_budget);
         true
     }
 
@@ -1430,11 +1458,16 @@ impl TcpConnectionInner {
             && self.rx_window_advertised() >= reopen_threshold
     }
 
-    fn send_next(&mut self, sender: &mut Sender<'_, impl SocketDriver>, ack_policy: AckPolicy) {
+    fn send_next(
+        &mut self,
+        sender: &mut Sender<'_, impl SocketDriver>,
+        ack_policy: AckPolicy,
+        packet_budget: usize,
+    ) {
         match self.state {
             TcpState::Connecting => {}
             TcpState::SynReceived => self.send_syn(sender, Some(self.rx_seq)),
-            _ => self.send_data(sender, ack_policy),
+            _ => self.send_data(sender, ack_policy, packet_budget),
         }
     }
 
@@ -1486,7 +1519,12 @@ impl TcpConnectionInner {
         }
     }
 
-    fn send_data(&mut self, sender: &mut Sender<'_, impl SocketDriver>, ack_policy: AckPolicy) {
+    fn send_data(
+        &mut self,
+        sender: &mut Sender<'_, impl SocketDriver>,
+        ack_policy: AckPolicy,
+        packet_budget: usize,
+    ) {
         // RFC 1323 §2.2: the window field in SYN/SYN-ACK is unscaled. Only
         // apply the shift once the handshake is complete (first non-SYN window
         // update sets tx_window_scale_active). For the guest-initiated path
@@ -1506,7 +1544,12 @@ impl TcpConnectionInner {
             self.stats.tx_blocked_window_full.increment();
         }
 
+        let mut packets_sent = 0;
         while self.needs_ack || self.tx_send < tx_done {
+            if packets_sent == packet_budget {
+                self.stats.tx_poll_budget_exhausted.increment();
+                break;
+            }
             let rx_mtu = sender.egress.rx_mtu();
             if rx_mtu == 0 {
                 // Out of receive buffers.
@@ -1601,6 +1644,7 @@ impl TcpConnectionInner {
                 .view(payload_start..payload_start + payload_len);
 
             sender.send_packet(&tcp, Some(payload));
+            packets_sent += 1;
             self.stats.pkts_tx_to_guest.increment();
             self.stats.bytes_tx_to_guest.add(payload_len as u64);
             self.stats.tx_segment_size.add_sample(payload_len as u64);
