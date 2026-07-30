@@ -19,11 +19,15 @@ use pal_async::driver::Driver;
 use pal_async::local::block_with_io;
 use std::borrow::Cow;
 use std::ffi::OsStr;
+#[cfg(windows)]
+use std::io as pipe_io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Command;
 use std::task::Context;
+#[cfg(windows)]
+use std::time::Duration;
 use term::raw_stdout;
 
 #[derive(Default)]
@@ -78,11 +82,7 @@ pub fn relay_console(path: &Path, console_title: &str) -> anyhow::Result<()> {
         };
         #[cfg(windows)]
         let (read, write) = {
-            let pipe = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .context("failed to connect to console pipe")?;
+            let pipe = open_console_pipe(path).context("failed to connect to console pipe")?;
             let pipe = pal_async::pipe::PolledPipe::new(&driver, pipe)
                 .context("failed to create polled pipe")?;
             AsyncReadExt::split(pipe)
@@ -90,6 +90,48 @@ pub fn relay_console(path: &Path, console_title: &str) -> anyhow::Result<()> {
 
         relay_stdio(read, write, console_title).await
     })
+}
+
+#[cfg(windows)]
+fn open_console_pipe(path: &Path) -> pipe_io::Result<std::fs::File> {
+    const ATTEMPTS: usize = 100;
+    const RETRY_DELAY: Duration = Duration::from_millis(100);
+
+    retry_pipe_connect(
+        || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+        },
+        ATTEMPTS,
+        || std::thread::sleep(RETRY_DELAY),
+    )
+}
+
+#[cfg(windows)]
+fn retry_pipe_connect<T>(
+    mut connect: impl FnMut() -> pipe_io::Result<T>,
+    attempts: usize,
+    mut wait: impl FnMut(),
+) -> pipe_io::Result<T> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+
+    assert!(attempts > 0);
+    for attempt in 0..attempts {
+        match connect() {
+            Ok(value) => return Ok(value),
+            Err(err)
+                if attempt + 1 < attempts
+                    && (err.kind() == pipe_io::ErrorKind::NotFound
+                        || err.raw_os_error() == Some(ERROR_PIPE_BUSY)) =>
+            {
+                wait();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!()
 }
 
 /// Synchronously relays stdio to an already-connected pipe.
@@ -143,10 +185,22 @@ fn choose_terminal_apps(app: Option<&Path>) -> Vec<App<'_>> {
         apps.push("xterm".into());
     }
 
-    // On Windows, use Windows Terminal or conhost.
+    // On Windows, launch a detached console through cmd's `start` builtin.
+    // Direct conhost children can be constrained by the parent's job object,
+    // while Windows Terminal reparses the child command line and can combine
+    // the executable and arguments into one path.
     if cfg!(windows) {
-        apps.push("wt.exe".into());
+        apps.push(App {
+            args: vec![
+                OsStr::new("/d").into(),
+                OsStr::new("/c").into(),
+                OsStr::new("start").into(),
+                OsStr::new("").into(),
+            ],
+            .."cmd.exe".into()
+        });
         apps.push("conhost.exe".into());
+        apps.push("wt.exe".into());
     }
 
     apps
@@ -205,11 +259,14 @@ pub fn launch_console(
 /// process to launch.
 fn add_argument_separator(command: &mut Command, app: &Path) {
     if let Some(file_name) = app.file_name().and_then(|s| s.to_str()) {
-        let arg = match file_name {
-            "xterm" | "rxvt" | "urxvt" | "x-terminal-emulator" => "-e",
-            _ => "--",
+        let arg = match file_name.to_ascii_lowercase().as_str() {
+            "cmd" | "cmd.exe" => None,
+            "xterm" | "rxvt" | "urxvt" | "x-terminal-emulator" => Some("-e"),
+            _ => Some("--"),
         };
-        command.arg(arg);
+        if let Some(arg) = arg {
+            command.arg(arg);
+        }
     };
 }
 
@@ -322,5 +379,81 @@ impl AsyncWrite for Console {
         cx: &mut Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
         Pin::new(&mut self.get_mut().sys).poll_close(cx)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::choose_terminal_apps;
+    use super::retry_pipe_connect;
+    use std::io;
+
+    #[test]
+    fn detached_console_is_the_default_windows_terminal() {
+        let apps = choose_terminal_apps(None);
+        let names = apps
+            .iter()
+            .map(|app| app.path.as_os_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.first().copied(), Some("cmd.exe".as_ref()));
+    }
+
+    #[test]
+    fn pipe_connect_retries_transient_errors() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let value = retry_pipe_connect(
+            || {
+                attempts += 1;
+                match attempts {
+                    1 => Err(io::Error::from(io::ErrorKind::NotFound)),
+                    2 => Err(io::Error::from_raw_os_error(231)),
+                    _ => Ok(42),
+                }
+            },
+            3,
+            || waits += 1,
+        )
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
+    }
+
+    #[test]
+    fn pipe_connect_does_not_retry_permanent_errors() {
+        let mut attempts = 0;
+        let err = retry_pipe_connect(
+            || {
+                attempts += 1;
+                Err::<(), _>(io::Error::from(io::ErrorKind::PermissionDenied))
+            },
+            3,
+            || unreachable!(),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn pipe_connect_returns_last_transient_error() {
+        let mut attempts = 0;
+        let mut waits = 0;
+        let err = retry_pipe_connect(
+            || {
+                attempts += 1;
+                Err::<(), _>(io::Error::from(io::ErrorKind::NotFound))
+            },
+            3,
+            || waits += 1,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(attempts, 3);
+        assert_eq!(waits, 2);
     }
 }
