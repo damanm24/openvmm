@@ -2805,6 +2805,7 @@ impl InitializedVm {
                     device,
                     VirtioResolveInput {
                         driver_source: &driver_source,
+                        vp_count: Some(processor_topology.vp_count()),
                     },
                 )
                 .await?;

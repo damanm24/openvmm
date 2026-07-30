@@ -136,6 +136,9 @@ pub fn classify_frame(
     if is_gateway_dns(remote, config) {
         return PacketClass::Control;
     }
+    if is_local_subnet(remote.ip(), config) {
+        return PacketClass::Control;
+    }
     if protocol == UDP && matches!((guest.port(), remote.port()), (68, 67) | (546, 547)) {
         return PacketClass::Control;
     }
@@ -143,6 +146,19 @@ pub fn classify_frame(
         PacketClass::Flow(FlowKey::Tcp { guest, remote })
     } else {
         PacketClass::Flow(FlowKey::Udp { guest, remote })
+    }
+}
+
+fn is_local_subnet(remote: IpAddr, config: &ConsommeConfig) -> bool {
+    match remote {
+        IpAddr::V4(remote) => {
+            crate::is_same_ipv4_subnet(remote.into(), config.gateway_ip, config.net_mask)
+        }
+        IpAddr::V6(remote) => crate::is_same_ipv6_subnet(
+            remote.into(),
+            config.gateway_link_local_ipv6,
+            config.prefix_len_ipv6,
+        ),
     }
 }
 

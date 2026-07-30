@@ -109,6 +109,7 @@ mod linux {
                             Resource::new(virtio_handle),
                             VirtioResolveInput {
                                 driver_source: &driver_source,
+                                vp_count: None,
                             },
                         )
                         .await

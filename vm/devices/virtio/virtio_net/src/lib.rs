@@ -4,9 +4,9 @@
 //! Virtio network device implementation.
 //!
 //! This crate implements a virtio-net device that connects a guest's virtual
-//! NIC to a pluggable [`net_backend::Endpoint`]. It currently operates with a
-//! single queue pair (one RX, one TX) and supports synchronous and asynchronous
-//! TX completion modes depending on the backend.
+//! NIC to a pluggable [`net_backend::Endpoint`]. It supports one or more queue
+//! pairs (one RX and one TX queue per pair) and synchronous or asynchronous TX
+//! completion modes depending on the backend.
 
 #![expect(missing_docs)]
 #![forbid(unsafe_code)]
@@ -26,6 +26,8 @@ use inspect::Inspect;
 use inspect::InspectMut;
 use inspect_counters::Counter;
 use inspect_counters::Histogram;
+use mesh::rpc::Rpc;
+use mesh::rpc::RpcSend;
 use net_backend::Endpoint;
 use net_backend::EndpointAction;
 use net_backend::QueueConfig;
@@ -38,8 +40,11 @@ use net_backend::TxSegment;
 use net_backend::TxSegmentType;
 use net_backend_resources::mac_address::MacAddress;
 use pal_async::wait::PolledWait;
+use std::future::Future;
 use std::future::pending;
+use std::future::poll_fn;
 use std::mem::offset_of;
+use std::pin::pin;
 use std::sync::Arc;
 use std::task::Poll;
 use task_control::AsyncRun;
@@ -141,8 +146,20 @@ struct NetStatus {
 
 const DEFAULT_MTU: u16 = 1514;
 
-#[expect(dead_code)]
 const VIRTIO_NET_MAX_QUEUES: u16 = 0x8000;
+
+const VIRTIO_NET_CTRL_MQ: u8 = 4;
+const VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET: u8 = 0;
+const VIRTIO_NET_OK: u8 = 0;
+const VIRTIO_NET_ERR: u8 = 1;
+
+fn parse_mq_pair_count(request: [u8; 4], max_queue_pairs: u16) -> Option<u16> {
+    if request[0] != VIRTIO_NET_CTRL_MQ || request[1] != VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET {
+        return None;
+    }
+    let pairs = u16::from_le_bytes([request[2], request[3]]);
+    (pairs > 0 && pairs <= max_queue_pairs).then_some(pairs)
+}
 
 #[repr(C)]
 struct NetConfig {
@@ -223,6 +240,8 @@ const fn header_size() -> usize {
 struct Adapter {
     driver: VmTaskDriver,
     max_queue_pairs: u16,
+    max_queues: u16,
+    vp_count: Option<u32>,
     tx_fast_completions: bool,
     mac_address: MacAddress,
     tx_offload_support: TxOffloadSupport,
@@ -235,6 +254,8 @@ pub struct Device {
     driver_source: VmTaskDriverSource,
     /// Per-pair state tracking.
     pairs: Vec<QueuePairState>,
+    control: TaskControl<ControlQueue, ControlWorker>,
+    pair_count_send: mesh::Sender<Rpc<u16, bool>>,
 }
 
 /// Tracks the state of a queue pair through the start_queue lifecycle.
@@ -273,7 +294,9 @@ impl VirtioDevice for Device {
             .with_csum(csum)
             .with_guest_csum(true)
             .with_host_tso4(host_tso)
-            .with_host_tso6(host_tso);
+            .with_host_tso6(host_tso)
+            .with_ctrl_vq(self.adapter.max_queue_pairs > 1)
+            .with_mq(self.adapter.max_queue_pairs > 1);
 
         let features_bank1 = NetworkFeaturesBank1::new().with_host_uso(host_uso);
 
@@ -289,7 +312,7 @@ impl VirtioDevice for Device {
                 // don't yet take advantage of the ability to do batched
                 // completions, but we may in the future.
                 .with_in_order(true),
-            max_queues: 2 * self.registers.max_virtqueue_pairs,
+            max_queues: self.adapter.max_queues,
             device_register_length: size_of::<NetConfig>() as u32,
             shared_memory: DeviceTraitsSharedMemory { id: 0, size: 0 },
         }
@@ -339,6 +362,33 @@ impl VirtioDevice for Device {
 
         let negotiated_features = NetworkFeaturesBank0::from(features.bank(0));
         let negotiated_features_bank1 = NetworkFeaturesBank1::from(features.bank(1));
+
+        if Some(idx) == self.control_queue_index() {
+            if !negotiated_features.ctrl_vq() || !negotiated_features.mq() {
+                anyhow::bail!("virtio-net control queue started without MQ negotiation");
+            }
+            if self.control.has_state() {
+                anyhow::bail!("virtio-net control queue already active");
+            }
+            self.ensure_coordinator();
+            self.control.insert(
+                &self.adapter.driver,
+                "virtio-net-control".to_string(),
+                ControlWorker {
+                    queue,
+                    guest_memory,
+                    pair_count_send: self.pair_count_send.clone(),
+                    max_queue_pairs: self.adapter.max_queue_pairs,
+                },
+            );
+            self.control.start();
+            self.coordinator.start();
+            return Ok(());
+        }
+
+        if idx >= self.adapter.max_queue_pairs * 2 {
+            anyhow::bail!("invalid virtio-net queue index {idx}");
+        }
         let pair_idx = (idx / 2) as usize;
         let is_rx = idx.is_multiple_of(2);
 
@@ -363,11 +413,6 @@ impl VirtioDevice for Device {
                 }
 
                 // Second queue — extract the first, form the pair.
-                let first_pair = !self
-                    .pairs
-                    .iter()
-                    .any(|p| matches!(p, QueuePairState::Active));
-
                 let prev = std::mem::replace(&mut self.pairs[pair_idx], QueuePairState::Active);
                 let QueuePairState::HalfOpen {
                     queue: pending_queue,
@@ -384,9 +429,8 @@ impl VirtioDevice for Device {
                     (queue, queue_size, pending_queue, pending_queue_size)
                 };
 
-                if first_pair {
-                    self.insert_coordinator(self.pairs.len() as u16);
-                }
+                self.ensure_coordinator();
+                self.coordinator.stop().await;
 
                 let virtio_state = VirtioState {
                     rx_queue,
@@ -403,10 +447,7 @@ impl VirtioDevice for Device {
                     negotiated_features,
                     negotiated_features_bank1,
                 );
-
-                if first_pair {
-                    self.coordinator.start();
-                }
+                self.coordinator.start();
             }
             QueuePairState::Active => {
                 anyhow::bail!("queue pair {pair_idx} already active");
@@ -416,6 +457,14 @@ impl VirtioDevice for Device {
     }
 
     async fn stop_queue(&mut self, idx: u16) -> Option<QueueState> {
+        if Some(idx) == self.control_queue_index() {
+            self.control.stop().await;
+            if self.control.has_state() {
+                let _ = self.control.remove();
+            }
+            return None;
+        }
+
         let pair_idx = (idx / 2) as usize;
 
         if pair_idx < self.pairs.len() {
@@ -429,15 +478,16 @@ impl VirtioDevice for Device {
                 // Drop the pending half-open queue.
                 self.pairs[pair_idx] = QueuePairState::Empty;
             } else if matches!(self.pairs[pair_idx], QueuePairState::Active) {
-                // Stop the coordinator (which stops all workers).
                 self.coordinator.stop().await;
                 if let Some(coordinator) = self.coordinator.state_mut() {
-                    for worker in &mut coordinator.workers {
-                        worker.stop().await;
+                    let worker = &mut coordinator.workers[pair_idx];
+                    worker.stop().await;
+                    if worker.has_state() {
+                        let _ = worker.remove();
                     }
                 }
-                let _ = self.coordinator.remove();
                 self.pairs[pair_idx] = QueuePairState::Empty;
+                self.coordinator.start();
             }
         }
 
@@ -446,6 +496,24 @@ impl VirtioDevice for Device {
     }
 
     async fn reset(&mut self) {
+        self.control.stop().await;
+        if self.control.has_state() {
+            let _ = self.control.remove();
+        }
+        self.coordinator.stop().await;
+        if let Some(coordinator) = self.coordinator.state_mut() {
+            for worker in &mut coordinator.workers {
+                worker.stop().await;
+                worker.task_mut().state = None;
+                if worker.has_state() {
+                    let _ = worker.remove();
+                }
+            }
+        }
+        self.coordinator.task_mut().endpoint.stop().await;
+        if self.coordinator.has_state() {
+            let _ = self.coordinator.remove();
+        }
         self.pairs.fill_with(|| QueuePairState::Empty);
     }
 
@@ -532,11 +600,17 @@ struct PendingTxPacket {
 
 pub struct NicBuilder {
     max_queue_pairs: u16,
+    vp_count: Option<u32>,
 }
 
 impl NicBuilder {
     pub fn max_queues(mut self, max_queue_pairs: u16) -> Self {
         self.max_queue_pairs = max_queue_pairs;
+        self
+    }
+
+    pub fn vp_count(mut self, vp_count: u32) -> Self {
+        self.vp_count = Some(vp_count);
         self
     }
 
@@ -563,24 +637,38 @@ impl NicBuilder {
             );
         }
 
-        // TODO: Implement VIRTIO_NET_F_MQ and VIRTIO_NET_F_RSS logic based on mulitqueue support.
-        // let multiqueue = endpoint.multiqueue_support();
-        // let max_queue_pairs = self.max_queue_pairs.clamp(1, multiqueue.max_queues.min(VIRTIO_NET_MAX_QUEUES));
-        let max_queue_pairs = 1;
+        let multiqueue = endpoint.multiqueue_support();
+        let max_queue_pairs = self
+            .max_queue_pairs
+            .max(1)
+            .min(multiqueue.max_queues.max(1))
+            .min(VIRTIO_NET_MAX_QUEUES);
+        let max_queues = if max_queue_pairs > 1 {
+            max_queue_pairs
+                .checked_mul(2)
+                .and_then(|queues| queues.checked_add(1))
+                .context("virtio-net queue count exceeds u16")?
+        } else {
+            2
+        };
 
         let driver = driver_source.simple();
         let tx_offload_support = endpoint.tx_offload_support();
         let adapter = Arc::new(Adapter {
             driver,
             max_queue_pairs,
+            max_queues,
+            vp_count: self.vp_count,
             tx_fast_completions: endpoint.tx_fast_completions(),
             mac_address,
             tx_offload_support,
         });
 
+        let (pair_count_send, pair_count_recv) = mesh::channel();
         let coordinator = TaskControl::new(CoordinatorState {
             endpoint,
             adapter: adapter.clone(),
+            pair_count_recv,
         });
 
         let registers = NetConfig {
@@ -603,6 +691,8 @@ impl NicBuilder {
             pairs: (0..max_queue_pairs)
                 .map(|_| QueuePairState::Empty)
                 .collect(),
+            control: TaskControl::new(ControlQueue),
+            pair_count_send,
         })
     }
 }
@@ -611,6 +701,7 @@ impl Device {
     pub fn builder() -> NicBuilder {
         NicBuilder {
             max_queue_pairs: !0,
+            vp_count: None,
         }
     }
 }
@@ -622,7 +713,14 @@ impl InspectMut for Device {
 }
 
 impl Device {
-    fn insert_coordinator(&mut self, num_queues: u16) {
+    fn control_queue_index(&self) -> Option<u16> {
+        (self.adapter.max_queue_pairs > 1).then_some(self.adapter.max_queues - 1)
+    }
+
+    fn ensure_coordinator(&mut self) {
+        if self.coordinator.has_state() {
+            return;
+        }
         self.coordinator.insert(
             &self.adapter.driver,
             "virtio-net-coordinator".to_string(),
@@ -630,8 +728,9 @@ impl Device {
                 workers: (0..self.adapter.max_queue_pairs)
                     .map(|_| TaskControl::new(NetQueue { state: None }))
                     .collect(),
-                num_queues,
+                active_queue_pairs: 1,
                 restart: true,
+                pending_pair_count: None,
             },
         );
     }
@@ -648,8 +747,7 @@ impl Device {
         negotiated_features_bank1: NetworkFeaturesBank1,
     ) {
         let mut builder = self.driver_source.builder();
-        // TODO: set this correctly
-        builder.target_vp(0);
+        builder.target_vp(queue_target_vp(idx, self.adapter.vp_count));
         // If tx completions arrive quickly, then just do tx processing
         // on whatever processor the guest happens to signal from.
         // Subsequent transmits will be pulled from the completion
@@ -671,19 +769,41 @@ impl Device {
         let coordinator = self.coordinator.state_mut().unwrap();
         let worker_task = &mut coordinator.workers[idx];
         worker_task.insert(&driver, "virtio-net".to_string(), worker);
-        worker_task.start();
+        Self::prepare_worker_queue(worker_task);
     }
+
+    fn prepare_worker_queue(worker_task: &mut TaskControl<NetQueue, Worker>) {
+        let (net_queue, worker) = worker_task.get_mut();
+        let (Some(endpoint_queue), Some(worker)) = (net_queue.state.as_mut(), worker) else {
+            return;
+        };
+        let state = &mut worker.active_state;
+        let n = state
+            .pending_rx_packets
+            .fill_ready(&mut state.data.rx_ready);
+        endpoint_queue
+            .queue
+            .rx_avail(&mut state.pending_rx_packets, &state.data.rx_ready[..n]);
+    }
+}
+
+fn queue_target_vp(queue_index: usize, vp_count: Option<u32>) -> u32 {
+    vp_count
+        .filter(|&count| count != 0)
+        .map_or(0, |count| queue_index as u32 % count)
 }
 
 struct Coordinator {
     workers: Vec<TaskControl<NetQueue, Worker>>,
-    num_queues: u16,
+    active_queue_pairs: u16,
     restart: bool,
+    pending_pair_count: Option<Rpc<u16, bool>>,
 }
 
 struct CoordinatorState {
     endpoint: Box<dyn Endpoint>,
     adapter: Arc<Adapter>,
+    pair_count_recv: mesh::Receiver<Rpc<u16, bool>>,
 }
 
 impl InspectTaskMut<Coordinator> for CoordinatorState {
@@ -704,7 +824,7 @@ impl InspectTaskMut<Coordinator> for CoordinatorState {
         if let Some(coordinator) = coordinator {
             resp.fields_mut(
                 "queues",
-                coordinator.workers[..coordinator.num_queues as usize]
+                coordinator.workers[..coordinator.active_queue_pairs as usize]
                     .iter_mut()
                     .enumerate(),
             );
@@ -733,7 +853,11 @@ impl Coordinator {
                 stop.until_stopped(self.stop_workers()).await?;
                 // The queue restart operation is not restartable, so do not
                 // poll on `stop` here.
-                if let Err(err) = self.restart_queues(state).await {
+                let result = self.restart_queues(state).await;
+                if let Some(request) = self.pending_pair_count.take() {
+                    request.complete(result.is_ok());
+                }
+                if let Err(err) = result {
                     tracing::error!(
                         error = &err as &dyn std::error::Error,
                         "failed to restart queues"
@@ -742,13 +866,40 @@ impl Coordinator {
                 self.restart = false;
             }
             self.start_workers();
-            match stop
-                .until_stopped(state.endpoint.wait_for_endpoint_action())
-                .await?
-            {
-                EndpointAction::RestartRequired => self.restart = true,
-                EndpointAction::LinkStatusNotify(_) => {
+            let CoordinatorState {
+                endpoint,
+                pair_count_recv,
+                ..
+            } = state;
+            let mut endpoint_action = pin!(endpoint.wait_for_endpoint_action());
+            let event = stop
+                .until_stopped(poll_fn(|cx| {
+                    if let Poll::Ready(request) = pair_count_recv.poll_recv(cx) {
+                        return Poll::Ready(CoordinatorEvent::PairCount(request.ok()));
+                    }
+                    endpoint_action
+                        .as_mut()
+                        .poll(cx)
+                        .map(CoordinatorEvent::Endpoint)
+                }))
+                .await?;
+            match event {
+                CoordinatorEvent::Endpoint(EndpointAction::RestartRequired) => self.restart = true,
+                CoordinatorEvent::Endpoint(EndpointAction::LinkStatusNotify(_)) => {
                     tracing::error!("unexpected link status notification")
+                }
+                CoordinatorEvent::PairCount(Some(request)) => {
+                    let active_queue_pairs = *request.input();
+                    if active_queue_pairs == self.active_queue_pairs {
+                        request.complete(true);
+                    } else {
+                        self.active_queue_pairs = active_queue_pairs;
+                        self.pending_pair_count = Some(request);
+                        self.restart = true;
+                    }
+                }
+                CoordinatorEvent::PairCount(None) => {
+                    tracing::error!("virtio-net control channel closed");
                 }
             }
         }
@@ -766,7 +917,7 @@ impl Coordinator {
             worker.task_mut().state = None;
         }
 
-        let queue_config = (0..self.workers.len())
+        let queue_config = (0..self.active_queue_pairs)
             .map(|_| QueueConfig {
                 driver: Box::new(c_state.adapter.driver.clone()),
             })
@@ -779,23 +930,134 @@ impl Coordinator {
             .await
             .map_err(WorkerError::Endpoint)?;
 
-        assert_eq!(queues.len(), self.workers.len());
+        if queues.len() != self.active_queue_pairs as usize {
+            return Err(WorkerError::Endpoint(anyhow::anyhow!(
+                "endpoint returned {} queues, expected {}",
+                queues.len(),
+                self.active_queue_pairs
+            )));
+        }
 
-        for (worker, mut queue) in self.workers.iter_mut().zip(queues) {
-            let state = &mut worker.state_mut().unwrap().active_state;
-            let n = state
-                .pending_rx_packets
-                .fill_ready(&mut state.data.rx_ready);
-            queue.rx_avail(&mut state.pending_rx_packets, &state.data.rx_ready[..n]);
+        for (worker, queue) in self.workers.iter_mut().zip(queues) {
             worker.task_mut().state = Some(EndpointQueueState { queue });
+            Device::prepare_worker_queue(worker);
         }
 
         Ok(())
     }
 
     fn start_workers(&mut self) {
-        for worker in &mut self.workers {
-            worker.start();
+        for worker in self
+            .workers
+            .iter_mut()
+            .take(self.active_queue_pairs as usize)
+        {
+            if worker.has_state() {
+                worker.start();
+            }
+        }
+    }
+}
+
+enum CoordinatorEvent {
+    Endpoint(EndpointAction),
+    PairCount(Option<Rpc<u16, bool>>),
+}
+
+struct ControlQueue;
+
+#[derive(InspectMut)]
+struct ControlWorker {
+    #[inspect(skip)]
+    queue: VirtioQueue,
+    #[inspect(skip)]
+    guest_memory: GuestMemory,
+    #[inspect(skip)]
+    pair_count_send: mesh::Sender<Rpc<u16, bool>>,
+    max_queue_pairs: u16,
+}
+
+impl InspectTaskMut<ControlWorker> for ControlQueue {
+    fn inspect_mut(&mut self, req: inspect::Request<'_>, worker: Option<&mut ControlWorker>) {
+        req.respond().merge(worker);
+    }
+}
+
+impl AsyncRun<ControlWorker> for ControlQueue {
+    async fn run(
+        &mut self,
+        stop: &mut StopTask<'_>,
+        worker: &mut ControlWorker,
+    ) -> Result<(), task_control::Cancelled> {
+        loop {
+            while let Some(work) = match worker.queue.try_next() {
+                Ok(work) => work,
+                Err(err) => {
+                    tracelimit::error_ratelimited!(
+                        error = &err as &dyn std::error::Error,
+                        "virtio-net control queue error"
+                    );
+                    return Ok(());
+                }
+            } {
+                let bytes_written = worker.process_request(stop, &work).await?;
+                worker.queue.complete(work, bytes_written);
+            }
+            stop.until_stopped(poll_fn(|cx| worker.queue.poll_kick(cx)))
+                .await?;
+        }
+    }
+}
+
+impl ControlWorker {
+    async fn process_request(
+        &mut self,
+        stop: &mut StopTask<'_>,
+        work: &VirtioQueueCallbackWork,
+    ) -> Result<u32, task_control::Cancelled> {
+        if work.get_payload_length(true) == 0 {
+            tracelimit::warn_ratelimited!("virtio-net control request has no status byte");
+            return Ok(0);
+        }
+
+        let mut request = [0u8; 4];
+        let status = match work.read(&self.guest_memory, &mut request) {
+            Ok(4) => {
+                if let Some(pairs) = parse_mq_pair_count(request, self.max_queue_pairs) {
+                    match stop
+                        .until_stopped(self.pair_count_send.call(|rpc| rpc, pairs))
+                        .await?
+                    {
+                        Ok(true) => VIRTIO_NET_OK,
+                        Ok(false) | Err(_) => VIRTIO_NET_ERR,
+                    }
+                } else {
+                    tracelimit::warn_ratelimited!("invalid virtio-net MQ control request");
+                    VIRTIO_NET_ERR
+                }
+            }
+            Ok(_) => {
+                tracelimit::warn_ratelimited!("malformed virtio-net control request");
+                VIRTIO_NET_ERR
+            }
+            Err(err) => {
+                tracelimit::warn_ratelimited!(
+                    error = &err as &dyn std::error::Error,
+                    "failed to read virtio-net control request"
+                );
+                VIRTIO_NET_ERR
+            }
+        };
+
+        match work.write(&self.guest_memory, &[status]) {
+            Ok(()) => Ok(1),
+            Err(err) => {
+                tracelimit::warn_ratelimited!(
+                    error = &err as &dyn std::error::Error,
+                    "failed to write virtio-net control status"
+                );
+                Ok(0)
+            }
         }
     }
 }
@@ -913,7 +1175,7 @@ impl Worker {
             let tx_segments = &self.active_state.data.tx_segments;
             let tx_queue = &mut self.virtio_state.tx_queue;
             let rx_queue = &mut self.virtio_state.rx_queue;
-            stop.until_stopped(std::future::poll_fn(|cx| {
+            stop.until_stopped(poll_fn(|cx| {
                 if let Poll::Ready(()) = epqueue_state.queue.poll_ready(cx, pending_rx_packets) {
                     return Poll::Ready(());
                 }

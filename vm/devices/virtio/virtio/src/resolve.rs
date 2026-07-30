@@ -26,4 +26,6 @@ impl<T: 'static + VirtioDevice> From<T> for ResolvedVirtioDevice {
 pub struct VirtioResolveInput<'a> {
     /// The VM driver source.
     pub driver_source: &'a VmTaskDriverSource,
+    /// The number of virtual processors in the VM, when available.
+    pub vp_count: Option<u32>,
 }

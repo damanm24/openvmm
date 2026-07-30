@@ -34,7 +34,14 @@ impl AsyncResolveResource<VirtioDeviceHandle, VirtioNetHandle> for VirtioNetReso
         input: VirtioResolveInput<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let mut builder = Device::builder();
-        if let Some(max_queues) = resource.max_queues {
+        if let Some(vp_count) = input.vp_count {
+            builder = builder.vp_count(vp_count);
+        }
+        if let Some(max_queues) = resource.max_queues.or_else(|| {
+            input
+                .vp_count
+                .map(|count| u16::try_from(count).unwrap_or(u16::MAX))
+        }) {
             builder = builder.max_queues(max_queues);
         }
 

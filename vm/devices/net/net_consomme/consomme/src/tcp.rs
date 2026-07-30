@@ -186,6 +186,23 @@ impl Tcp {
     }
 }
 
+impl TcpFlows {
+    pub fn repartition(self, shard_count: usize, seed: u64) -> Vec<Self> {
+        let mut shards = (0..shard_count)
+            .map(|_| Self(HashMap::new()))
+            .collect::<Vec<_>>();
+        for (flow, connection) in self.0 {
+            let key = crate::FlowKey::Tcp {
+                guest: flow.src,
+                remote: flow.dst,
+            };
+            let shard = key.stable_hash(seed) as usize % shard_count;
+            shards[shard].0.insert(flow, connection);
+        }
+        shards
+    }
+}
+
 #[derive(Inspect)]
 #[inspect(tag = "info")]
 enum LoopbackPortInfo {

@@ -49,6 +49,22 @@ flowchart TB
 The subnet is configurable via the `--net consomme:<cidr>` CLI option.
 The gateway is always `.1` and the guest is always `.2`.
 
+## Multiqueue
+
+Consomme supports up to 64 virtio-net queue pairs. The configured virtio-net
+limit may reduce the number advertised to the guest. Linux guests can change
+the active count with `ethtool -L <interface> combined <count>`.
+
+TCP flows are assigned to a queue with a stable hash of the guest-visible
+source and remote destination. UDP uses only the guest source socket so that
+datagrams sent to multiple destinations continue to share one host UDP port.
+DHCP, DNS, ARP, NDP, ICMP, and local-subnet traffic remain on queue zero.
+
+Changing the active queue count quiesces the backend, repartitions established
+TCP connections and UDP mappings, refreshes their async socket drivers, and
+then restarts the active workers. Transport sockets and connection state are
+preserved across the change.
+
 ## Port forwarding
 
 By default, Consomme only provides outbound connectivity from the guest.

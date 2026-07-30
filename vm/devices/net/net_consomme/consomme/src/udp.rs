@@ -116,6 +116,23 @@ impl Udp {
     }
 }
 
+impl UdpFlows {
+    pub fn repartition(self, shard_count: usize, seed: u64) -> Vec<Self> {
+        let mut shards = (0..shard_count)
+            .map(|_| Self(HashMap::new()))
+            .collect::<Vec<_>>();
+        for (guest, connection) in self.0 {
+            let key = crate::FlowKey::Udp {
+                guest,
+                remote: guest,
+            };
+            let shard = key.stable_hash(seed) as usize % shard_count;
+            shards[shard].0.insert(guest, connection);
+        }
+        shards
+    }
+}
+
 impl InspectMut for Udp {
     fn inspect_mut(&mut self, req: inspect::Request<'_>) {
         let mut resp = req.respond();

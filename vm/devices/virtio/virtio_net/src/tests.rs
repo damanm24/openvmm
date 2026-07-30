@@ -55,6 +55,8 @@ use crate::VirtioNetHeaderGso;
 use crate::VirtioNetHeaderGsoProtocol;
 use crate::Worker;
 use crate::header_size;
+use crate::parse_mq_pair_count;
+use crate::queue_target_vp;
 
 // --- Constants ---
 
@@ -362,6 +364,7 @@ fn new_mock_queue() -> (MockQueue, MockQueueHandle) {
 struct MockEndpoint {
     queue_tx: mesh::Sender<MockQueueHandle>,
     is_ordered: bool,
+    max_queues: u16,
 }
 
 impl InspectMut for MockEndpoint {
@@ -400,7 +403,7 @@ impl Endpoint for MockEndpoint {
 
     fn multiqueue_support(&self) -> MultiQueueSupport {
         MultiQueueSupport {
-            max_queues: 1,
+            max_queues: self.max_queues,
             indirection_table_size: 0,
         }
     }
@@ -486,6 +489,7 @@ impl TestHarness {
         let endpoint = MockEndpoint {
             queue_tx,
             is_ordered: true,
+            max_queues: 1,
         };
 
         let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver.clone()));
@@ -870,6 +874,7 @@ async fn unordered_backend_rejected(driver: DefaultDriver) {
     let endpoint = MockEndpoint {
         queue_tx,
         is_ordered: false,
+        max_queues: 1,
     };
 
     let err = Device::builder()
@@ -880,6 +885,46 @@ async fn unordered_backend_rejected(driver: DefaultDriver) {
         err.to_string().contains("ordered backend"),
         "unexpected error: {err}"
     );
+}
+
+#[async_test]
+async fn multiqueue_feature_layout(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
+    let (queue_tx, _queue_handle_rx) = mesh::channel();
+    let endpoint = MockEndpoint {
+        queue_tx,
+        is_ordered: true,
+        max_queues: 8,
+    };
+
+    let device = Device::builder()
+        .max_queues(4)
+        .build(&driver_source, Box::new(endpoint), mac)
+        .unwrap();
+    let traits = device.traits();
+    let bank0 = NetworkFeaturesBank0::from(traits.device_features.bank(0));
+    assert!(bank0.ctrl_vq());
+    assert!(bank0.mq());
+    assert_eq!(device.registers.max_virtqueue_pairs, 4);
+    assert_eq!(traits.max_queues, 9);
+}
+
+#[test]
+fn mq_pair_count_validation() {
+    assert_eq!(parse_mq_pair_count([4, 0, 2, 0], 4), Some(2));
+    assert_eq!(parse_mq_pair_count([4, 0, 0, 0], 4), None);
+    assert_eq!(parse_mq_pair_count([4, 0, 5, 0], 4), None);
+    assert_eq!(parse_mq_pair_count([3, 0, 2, 0], 4), None);
+    assert_eq!(parse_mq_pair_count([4, 1, 2, 0], 4), None);
+}
+
+#[test]
+fn queue_workers_are_distributed_across_vps() {
+    assert_eq!(queue_target_vp(0, Some(4)), 0);
+    assert_eq!(queue_target_vp(3, Some(4)), 3);
+    assert_eq!(queue_target_vp(4, Some(4)), 0);
+    assert_eq!(queue_target_vp(2, None), 0);
 }
 
 /// A backend that completes RX buffers out of order must still result in the

@@ -958,6 +958,48 @@ impl Consomme {
         }
     }
 
+    /// Creates a transport-only shard using this endpoint's current
+    /// configuration snapshot. Control protocols, DNS, and listeners remain
+    /// owned by the primary shard.
+    pub fn new_data_shard(&self) -> Self {
+        let config = self.primary.config.immutable.clone();
+        let params = self.primary.config.params.clone();
+        let ipv6_enabled = self.primary.config.ipv6_enabled;
+        let timeout = params.udp_timeout;
+        let tcp_rx_buffer = params.tcp_rx_buffer;
+        let tcp_tx_buffer = params.tcp_tx_buffer;
+        Self {
+            primary: ConsommePrimary {
+                config: ConsommePrimaryConfig {
+                    immutable: config.clone(),
+                    params: params.clone(),
+                    ipv6_enabled,
+                },
+                runtime: ConsommePrimaryRuntime {
+                    local_addr_map: local_addr_map::LocalAddrMap::new(),
+                    client_ip_ipv6: self.primary.runtime.client_ip_ipv6,
+                    client_ip_ipv6_routable: self.primary.runtime.client_ip_ipv6_routable,
+                },
+                dns: None,
+                icmp: icmp::Icmp::new(),
+                tcp_listeners: tcp::TcpListeners::new(),
+                udp_listeners: udp::UdpListeners::new(),
+            },
+            shard: ConsommeShard {
+                config: ShardConfigSnapshot {
+                    generation: self.shard.config.generation,
+                    immutable: config,
+                    params,
+                    ipv6_enabled,
+                },
+                buffer: Box::new([0; 65536]),
+                tcp: tcp::Tcp::new(tcp_rx_buffer, tcp_tx_buffer),
+                udp: udp::Udp::new(timeout),
+                egress: EgressQueue::default(),
+            },
+        }
+    }
+
     fn detect_ipv6_support(skip_ipv6_checks: bool) -> bool {
         if skip_ipv6_checks {
             true
@@ -1042,6 +1084,15 @@ impl Consomme {
         self.shard.egress.recycle(packet);
     }
 
+    /// Drops all transient guest-bound packets and returns the number dropped.
+    pub fn discard_egress(&mut self) -> usize {
+        let count = self.shard.egress.packets.len();
+        while let Some(packet) = self.shard.egress.pop() {
+            self.shard.egress.recycle(packet);
+        }
+        count
+    }
+
     /// Removes all movable TCP and UDP flow state from this shard.
     pub fn drain_flows(&mut self) -> FlowState {
         FlowState {
@@ -1054,6 +1105,20 @@ impl Consomme {
     pub fn insert_flows(&mut self, flows: FlowState) {
         self.shard.tcp.insert_flows(flows.tcp);
         self.shard.udp.insert_flows(flows.udp);
+    }
+}
+
+impl FlowState {
+    /// Repartitions transport flows using the same stable steering keys as the
+    /// packet classifier.
+    pub fn repartition(self, shard_count: usize, seed: u64) -> Vec<Self> {
+        assert!(shard_count > 0);
+        let tcp = self.tcp.repartition(shard_count, seed);
+        let udp = self.udp.repartition(shard_count, seed);
+        tcp.into_iter()
+            .zip(udp)
+            .map(|(tcp, udp)| Self { tcp, udp })
+            .collect()
     }
 }
 
