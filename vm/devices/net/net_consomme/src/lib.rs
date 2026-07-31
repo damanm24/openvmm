@@ -121,19 +121,29 @@ struct PendingRequests {
     /// Bind/unbind requests, keyed by port; a newer request for a port replaces
     /// (and completes) an older one.
     ports: HashMap<PortKey, ConsommeRequest>,
-    /// In-proc state updates, applied in order.
-    state_updates: Vec<Rpc<ConsommeParamsUpdateFn, ()>>,
+    /// In-proc primary-state operations, applied in order.
+    control: Vec<PendingControlRequest>,
+}
+
+enum PendingControlRequest {
+    UpdateState(Rpc<ConsommeParamsUpdateFn, ()>),
+    CreateVirtualAddress(Rpc<IpAddr, Option<IpAddr>>),
 }
 
 impl PendingRequests {
     fn is_empty(&self) -> bool {
-        self.ports.is_empty() && self.state_updates.is_empty()
+        self.ports.is_empty() && self.control.is_empty()
     }
 
     fn buffer_control(&mut self, request: ControlRequest) {
         match request {
             ControlRequest::Port(request) => self.buffer_request(request),
-            ControlRequest::UpdateState(rpc) => self.state_updates.push(rpc),
+            ControlRequest::UpdateState(rpc) => {
+                self.control.push(PendingControlRequest::UpdateState(rpc))
+            }
+            ControlRequest::CreateVirtualAddress(rpc) => self
+                .control
+                .push(PendingControlRequest::CreateVirtualAddress(rpc)),
         }
     }
 
@@ -427,6 +437,10 @@ pub enum ConsommeMessageError {
     /// Error from a remote operation on the endpoint.
     #[error(transparent)]
     Remote(mesh::error::RemoteError),
+    /// The subnet's virtual address pool is exhausted, so no virtual address
+    /// could be allocated.
+    #[error("virtual address pool exhausted")]
+    VirtualAddressPoolExhausted,
 }
 
 /// Callback to modify network state dynamically.
@@ -463,6 +477,7 @@ enum ControlRequest {
     Port(ConsommeRequest),
     /// Update dynamic network state (in-proc only).
     UpdateState(Rpc<ConsommeParamsUpdateFn, ()>),
+    CreateVirtualAddress(Rpc<IpAddr, Option<IpAddr>>),
 }
 
 impl ConsommeControl {
@@ -521,6 +536,22 @@ impl ConsommeControl {
             .call(ControlRequest::UpdateState, f)
             .await
             .map_err(ConsommeMessageError::Mesh)
+    }
+
+    /// Allocates a virtual IP address within the endpoint's subnet and routes
+    /// guest traffic sent to it to `destination` on the host.
+    ///
+    /// Returns [`ConsommeMessageError::VirtualAddressPoolExhausted`] if the
+    /// subnet's virtual address pool is exhausted.
+    pub async fn create_virtual_address(
+        &self,
+        destination: IpAddr,
+    ) -> Result<IpAddr, ConsommeMessageError> {
+        self.send
+            .call(ControlRequest::CreateVirtualAddress, destination)
+            .await
+            .map_err(ConsommeMessageError::Mesh)?
+            .ok_or(ConsommeMessageError::VirtualAddressPoolExhausted)
     }
 }
 
@@ -628,10 +659,7 @@ impl net_backend::Endpoint for ConsommeEndpoint {
         // always complete here instead of stalling until some unrelated future
         // request triggers the next restart.
         let pending = std::mem::take(&mut self.pending);
-        let PendingRequests {
-            ports,
-            state_updates,
-        } = pending;
+        let PendingRequests { ports, control } = pending;
         {
             let mut shard = self.shards[0].lock();
             let mut client = ClientNoPool {
@@ -642,8 +670,20 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                 process_port_request(&mut c, request);
             }
         }
-        for rpc in state_updates {
-            rpc.handle_sync(|f| self.update_all_shards(&f));
+        for request in control {
+            match request {
+                PendingControlRequest::UpdateState(rpc) => {
+                    rpc.handle_sync(|f| self.update_all_shards(&f));
+                }
+                PendingControlRequest::CreateVirtualAddress(rpc) => {
+                    rpc.handle_sync(|destination| {
+                        self.shards[0]
+                            .lock()
+                            .consomme
+                            .create_virtual_address(destination)
+                    });
+                }
+            }
         }
 
         bind_result?;
@@ -686,10 +726,7 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                 let driver = self.shards[0].lock().driver.clone();
                 if let Some(driver) = driver {
                     let pending = std::mem::take(&mut self.pending);
-                    let PendingRequests {
-                        ports,
-                        state_updates,
-                    } = pending;
+                    let PendingRequests { ports, control } = pending;
                     {
                         let mut state = self.shards[0].lock();
                         let mut client = ClientNoPool { driver: &*driver };
@@ -698,8 +735,20 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                             process_port_request(&mut consomme, request);
                         }
                     }
-                    for rpc in state_updates {
-                        rpc.handle_sync(|f| self.update_all_shards(&f));
+                    for request in control {
+                        match request {
+                            PendingControlRequest::UpdateState(rpc) => {
+                                rpc.handle_sync(|f| self.update_all_shards(&f));
+                            }
+                            PendingControlRequest::CreateVirtualAddress(rpc) => {
+                                rpc.handle_sync(|destination| {
+                                    self.shards[0]
+                                        .lock()
+                                        .consomme
+                                        .create_virtual_address(destination)
+                                });
+                            }
+                        }
                     }
                 }
             }

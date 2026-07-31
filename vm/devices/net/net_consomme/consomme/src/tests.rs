@@ -574,3 +574,43 @@ fn update_params_preserves_nameserver_update() {
 
     assert_eq!(consomme.primary.config.params.nameservers, [nameserver]);
 }
+
+#[test]
+fn create_virtual_address_allocates_subnet_address() {
+    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+
+    // Expect 10.0.0.254 since the default subnet is 10.0.0/24.
+    let addr = consomme
+        .create_virtual_address(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 254)));
+
+    // Requesting a virtual address for the same destination returns the same
+    // address.
+    let addr_again = consomme
+        .create_virtual_address(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    assert_eq!(addr, addr_again);
+
+    // Validate that a different destination gets a different address.
+    let other = consomme
+        .create_virtual_address(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)))
+        .unwrap();
+    assert_eq!(other, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 253)));
+}
+
+#[test]
+fn create_virtual_address_allocates_ipv6_link_local() {
+    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+
+    let addr = consomme
+        .create_virtual_address(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
+        .unwrap();
+    // IPv6 virtual addresses are allocated from the fe80::ff:fe00:NNNN:1 range.
+    assert_eq!(
+        addr,
+        IpAddr::V6(std::net::Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0x00ff, 0xfe00, 0x0001, 0x0001
+        ))
+    );
+}
