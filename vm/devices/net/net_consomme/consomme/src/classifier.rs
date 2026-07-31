@@ -143,7 +143,7 @@ pub fn classify_frame(
     if is_gateway_dns(remote, config) {
         return PacketClass::Control;
     }
-    if is_local_subnet(remote.ip(), config) {
+    if protocol == UDP && is_local_subnet(remote.ip(), config) {
         return PacketClass::Control;
     }
     if protocol == UDP && matches!((guest.port(), remote.port()), (68, 67) | (546, 547)) {
@@ -246,6 +246,74 @@ mod tests {
         assert_eq!(
             classify_frame(&outbound, PacketDirection::GuestToRemote, &config),
             classify_frame(&inbound, PacketDirection::RemoteToGuest, &config)
+        );
+    }
+
+    #[test]
+    fn translated_local_tcp_directions_normalize_to_same_key() {
+        let config = ConsommeConfig::new();
+        let guest_to_remote = ipv4_frame(
+            TCP,
+            [10, 0, 0, 2],
+            [10, 0, 0, 254],
+            [0x1f, 0x90, 0xaf, 0xc8],
+        );
+        let remote_to_guest = ipv4_frame(
+            TCP,
+            [10, 0, 0, 254],
+            [10, 0, 0, 2],
+            [0xaf, 0xc8, 0x1f, 0x90],
+        );
+        let expected = PacketClass::Flow(FlowKey::Tcp {
+            guest: "10.0.0.2:8080".parse().unwrap(),
+            remote: "10.0.0.254:45000".parse().unwrap(),
+        });
+
+        assert_eq!(
+            classify_frame(
+                &guest_to_remote,
+                PacketDirection::GuestToRemote,
+                &config
+            ),
+            expected
+        );
+        assert_eq!(
+            classify_frame(
+                &remote_to_guest,
+                PacketDirection::RemoteToGuest,
+                &config
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn local_subnet_udp_is_control() {
+        let config = ConsommeConfig::new();
+        let frame = ipv4_frame(
+            UDP,
+            [10, 0, 0, 2],
+            [10, 0, 0, 254],
+            [0x12, 0x34, 0x56, 0x78],
+        );
+        assert_eq!(
+            classify_frame(&frame, PacketDirection::GuestToRemote, &config),
+            PacketClass::Control
+        );
+    }
+
+    #[test]
+    fn gateway_tcp_dns_is_control() {
+        let config = ConsommeConfig::new();
+        let frame = ipv4_frame(
+            TCP,
+            [10, 0, 0, 2],
+            config.gateway_ip.octets(),
+            [0x12, 0x34, 0, 53],
+        );
+        assert_eq!(
+            classify_frame(&frame, PacketDirection::GuestToRemote, &config),
+            PacketClass::Control
         );
     }
 

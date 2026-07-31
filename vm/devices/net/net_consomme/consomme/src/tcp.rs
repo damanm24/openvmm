@@ -335,6 +335,8 @@ enum AckPolicy {
 }
 
 const MAX_TCP_PACKETS_PER_INGEST: usize = 32;
+const MAX_TCP_ACCEPTS_PER_POLL: usize = 64;
+const TCP_LISTEN_BACKLOG: i32 = 128;
 
 /// Per-connection TCP statistics for performance analysis.
 #[derive(Inspect, Default)]
@@ -447,58 +449,60 @@ impl<T: SocketDriver> Access<'_, T> {
             .primary
             .tcp_listeners
             .listeners
-            .retain(|key, listener| match listener.poll_listener(cx) {
-                Ok(result) => {
-                    if let Some((socket, mut other_addr)) = result {
-                        // If this packet was originally from the guest, update the port to match
-                        // the original guest port. This allows loopback to work as expected.
-                        if self
-                            .inner
-                            .primary
-                            .runtime
-                            .is_local_address(&self.inner.shard.config.immutable, &other_addr)
-                        {
-                            for (other_ft, connection) in self.inner.shard.tcp.connections.iter() {
-                                if matches!(
-                                    connection.inner.state,
-                                    TcpState::Connecting | TcpState::SynReceived
-                                ) && PortForwardKey::from_socket_addr(
-                                    other_ft.dst,
-                                    other_ft.dst.port(),
-                                ) == *key
+            .retain(|key, listener| {
+                for _ in 0..MAX_TCP_ACCEPTS_PER_POLL {
+                    let (socket, mut other_addr) = match listener.poll_listener(cx) {
+                        Ok(Some(accepted)) => accepted,
+                        Ok(None) => return true,
+                        Err(_) => return false,
+                    };
+                    // If this packet was originally from the guest, update the port to match
+                    // the original guest port. This allows loopback to work as expected.
+                    if self
+                        .inner
+                        .primary
+                        .runtime
+                        .is_local_address(&self.inner.shard.config.immutable, &other_addr)
+                    {
+                        for (other_ft, connection) in self.inner.shard.tcp.connections.iter() {
+                            if matches!(
+                                connection.inner.state,
+                                TcpState::Connecting | TcpState::SynReceived
+                            ) && PortForwardKey::from_socket_addr(
+                                other_ft.dst,
+                                other_ft.dst.port(),
+                            ) == *key
+                            {
+                                if let LoopbackPortInfo::ProxyForGuestPort {
+                                    sending_port,
+                                    guest_port,
+                                } = connection.inner.loopback_port
                                 {
-                                    if let LoopbackPortInfo::ProxyForGuestPort {
-                                        sending_port,
-                                        guest_port,
-                                    } = connection.inner.loopback_port
-                                    {
-                                        if sending_port == other_addr.port() {
-                                            other_addr.set_port(guest_port);
-                                            break;
-                                        }
+                                    if sending_port == other_addr.port() {
+                                        other_addr.set_port(guest_port);
+                                        break;
                                     }
                                 }
                             }
                         }
-                        let Some(ft) = self.inner.primary.runtime.try_ft_from_remote_address(
-                            &self.inner.shard.config.immutable,
-                            &other_addr,
-                            key.guest_port,
-                        ) else {
-                            return true;
-                        };
-
-                        // TCP connections are stored with the source always as the guest. Switch the order.
-                        let ft = FourTuple {
-                            src: ft.dst,
-                            dst: ft.src,
-                        };
-
-                        accepted.push(AcceptedTcpConnection { socket, flow: ft });
                     }
-                    true
+                    let Some(ft) = self.inner.primary.runtime.try_ft_from_remote_address(
+                        &self.inner.shard.config.immutable,
+                        &other_addr,
+                        key.guest_port,
+                    ) else {
+                        continue;
+                    };
+
+                    // TCP connections are stored with the source always as the guest. Switch the order.
+                    let ft = FourTuple {
+                        src: ft.dst,
+                        dst: ft.src,
+                    };
+
+                    accepted.push(AcceptedTcpConnection { socket, flow: ft });
                 }
-                Err(_) => false,
+                true
             });
         accepted
     }
@@ -2014,7 +2018,7 @@ impl TcpListener {
             )));
         };
         let socket = PolledSocket::new(driver, socket).map_err(BindError::Io)?;
-        if let Err(err) = socket.listen(10) {
+        if let Err(err) = socket.listen(TCP_LISTEN_BACKLOG) {
             tracing::warn!(
                 error = &err as &dyn std::error::Error,
                 "socket listen error"

@@ -897,6 +897,52 @@ async fn test_tcp_bind_port_forward(driver: DefaultDriver) {
     assert_eq!(tcp.control, TcpControl::Syn);
 }
 
+#[cfg(unix)]
+#[pal_async::async_test]
+async fn test_tcp_listener_drains_bounded_batch(driver: DefaultDriver) {
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
+    let mut client = TestClient::new(driver);
+    let guest_port = 7777;
+
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        .unwrap();
+    let host_addr = socket.local_addr().unwrap().as_socket().unwrap();
+    consomme
+        .access(&mut client)
+        .bind_tcp_port(socket, guest_port)
+        .unwrap();
+
+    let connectors = (0..=MAX_TCP_ACCEPTS_PER_POLL)
+        .map(|_| std::net::TcpStream::connect(host_addr).unwrap())
+        .collect::<Vec<_>>();
+
+    let accepted = std::future::poll_fn(|cx| {
+        let accepted = consomme.access(&mut client).poll_tcp_listeners(cx);
+        if accepted.is_empty() {
+            Poll::Pending
+        } else {
+            Poll::Ready(accepted)
+        }
+    })
+    .await;
+    assert_eq!(accepted.len(), MAX_TCP_ACCEPTS_PER_POLL);
+
+    let remaining = std::future::poll_fn(|cx| {
+        let accepted = consomme.access(&mut client).poll_tcp_listeners(cx);
+        if accepted.is_empty() {
+            Poll::Pending
+        } else {
+            Poll::Ready(accepted)
+        }
+    })
+    .await;
+    assert_eq!(remaining.len(), 1);
+
+    drop(connectors);
+}
+
 /// Test that when a loopback connection is forwarded to the guest, the source
 /// IP is rewritten from loopback to a virtual address within the subnet (not
 /// the raw 127.0.0.1), ensuring the guest routes its reply through the virtual

@@ -577,7 +577,7 @@ fn update_params_preserves_nameserver_update() {
 
 #[test]
 fn create_virtual_address_allocates_subnet_address() {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
 
     // Expect 10.0.0.254 since the default subnet is 10.0.0/24.
     let addr = consomme
@@ -601,7 +601,7 @@ fn create_virtual_address_allocates_subnet_address() {
 
 #[test]
 fn create_virtual_address_allocates_ipv6_link_local() {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
 
     let addr = consomme
         .create_virtual_address(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
