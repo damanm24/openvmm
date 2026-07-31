@@ -853,9 +853,25 @@ impl Coordinator {
                 stop.until_stopped(self.stop_workers()).await?;
                 // The queue restart operation is not restartable, so do not
                 // poll on `stop` here.
-                let result = self.restart_queues(state).await;
+                let requested_queue_pairs = self
+                    .pending_pair_count
+                    .as_ref()
+                    .map_or(self.active_queue_pairs, |request| *request.input());
+                let result = self.restart_queues(state, requested_queue_pairs).await;
+                let succeeded = result.is_ok();
+                if succeeded {
+                    self.active_queue_pairs = requested_queue_pairs;
+                } else if requested_queue_pairs != self.active_queue_pairs
+                    && let Err(err) = self.restart_queues(state, self.active_queue_pairs).await
+                {
+                    tracing::error!(
+                        error = &err as &dyn std::error::Error,
+                        queue_pairs = self.active_queue_pairs,
+                        "failed to restore queues after reconfiguration failure"
+                    );
+                }
                 if let Some(request) = self.pending_pair_count.take() {
-                    request.complete(result.is_ok());
+                    request.complete(succeeded);
                 }
                 if let Err(err) = result {
                     tracing::error!(
@@ -893,7 +909,6 @@ impl Coordinator {
                     if active_queue_pairs == self.active_queue_pairs {
                         request.complete(true);
                     } else {
-                        self.active_queue_pairs = active_queue_pairs;
                         self.pending_pair_count = Some(request);
                         self.restart = true;
                     }
@@ -911,13 +926,17 @@ impl Coordinator {
         }
     }
 
-    async fn restart_queues(&mut self, c_state: &mut CoordinatorState) -> Result<(), WorkerError> {
+    async fn restart_queues(
+        &mut self,
+        c_state: &mut CoordinatorState,
+        queue_pairs: u16,
+    ) -> Result<(), WorkerError> {
         // Drop all of the current queues.
         for worker in &mut self.workers {
             worker.task_mut().state = None;
         }
 
-        let queue_config = (0..self.active_queue_pairs)
+        let queue_config = (0..queue_pairs)
             .map(|_| QueueConfig {
                 driver: Box::new(c_state.adapter.driver.clone()),
             })
@@ -930,11 +949,11 @@ impl Coordinator {
             .await
             .map_err(WorkerError::Endpoint)?;
 
-        if queues.len() != self.active_queue_pairs as usize {
+        if queues.len() != queue_pairs as usize {
             return Err(WorkerError::Endpoint(anyhow::anyhow!(
                 "endpoint returned {} queues, expected {}",
                 queues.len(),
-                self.active_queue_pairs
+                queue_pairs
             )));
         }
 

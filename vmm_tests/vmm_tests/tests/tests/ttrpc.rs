@@ -1126,7 +1126,7 @@ fn test_ttrpc_consomme_port_forward(
         .spawn()?;
 
     DefaultPool::run_with(async |driver| {
-        let mut child = PolledChild::<std::process::Child>::new(&driver, child)?;
+        let mut child = OpenvmmChild(PolledChild::<std::process::Child>::new(&driver, child)?);
 
         let _stderr_task = driver.spawn(
             "stderr",
@@ -1241,6 +1241,7 @@ fn test_ttrpc_consomme_port_forward(
 
         const MAX_PORT_ATTEMPTS: u32 = 5;
         let mut bound = false;
+        let mut last_bind_error = None;
         for attempt in 0..MAX_PORT_ATTEMPTS {
             host_port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?
                 .local_addr()?
@@ -1260,6 +1261,7 @@ fn test_ttrpc_consomme_port_forward(
                     break;
                 }
                 Err(e) => {
+                    last_bind_error = Some(format!("{e:?}"));
                     tracing::warn!(
                         attempt,
                         host_port,
@@ -1270,20 +1272,10 @@ fn test_ttrpc_consomme_port_forward(
             }
         }
         if !bound {
-            tracing::warn!(
-                "could not bind any ephemeral port after {MAX_PORT_ATTEMPTS} attempts, \
-                 skipping test"
+            anyhow::bail!(
+                "could not bind any ephemeral port after {MAX_PORT_ATTEMPTS} attempts: {}",
+                last_bind_error.as_deref().unwrap_or("unknown error")
             );
-            // Tear down and exit early without failing — the port conflict is
-            // environmental, not a bug.
-            client
-                .call()
-                .start(vmservice::Vm::TeardownVm, ())
-                .await
-                .unwrap();
-            let _ = client.call().start(vmservice::Vm::Quit, ()).await;
-            let _ = child.wait().await;
-            return Ok(());
         }
 
         // From the host, connect to the forwarded port and confirm the guest's

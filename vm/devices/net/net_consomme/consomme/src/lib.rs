@@ -29,6 +29,7 @@ mod tcp;
 mod udp;
 
 pub use tcp::AcceptedTcpConnection;
+pub use tcp::TcpLoopbackPortMapping;
 
 pub use classifier::FlowKey;
 pub use classifier::PacketClass;
@@ -52,6 +53,7 @@ const DEFAULT_TCP_BUFFER_BOUNDS: TcpBufferBounds = TcpBufferBounds {
 use inspect::Inspect;
 use inspect::InspectMut;
 use inspect_counters::Counter;
+use parking_lot::Mutex;
 use pal_async::driver::Driver;
 use smoltcp::phy::Checksum;
 use smoltcp::phy::ChecksumCapabilities;
@@ -76,6 +78,7 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
+use std::sync::Arc;
 use std::task::Context;
 use std::time::Duration;
 use thiserror::Error;
@@ -273,7 +276,8 @@ struct ConsommePrimaryConfig {
 
 #[derive(Inspect)]
 struct ConsommePrimaryRuntime {
-    local_addr_map: local_addr_map::LocalAddrMap,
+    #[inspect(skip)]
+    local_addr_map: Arc<Mutex<local_addr_map::LocalAddrMap>>,
     #[inspect(with = "|x| x.map(inspect::AsDisplay)")]
     client_ip_ipv6: Option<Ipv6Address>,
     #[inspect(with = "|x| x.map(inspect::AsDisplay)")]
@@ -595,7 +599,7 @@ impl ConsommePrimaryRuntime {
             {
                 let subnet_base =
                     Ipv4Addr::from(u32::from(config.gateway_ip) & u32::from(config.net_mask));
-                let virtual_ip = self.local_addr_map.get_or_allocate_v4(
+                let virtual_ip = self.local_addr_map.lock().get_or_allocate_v4(
                     *v4.ip(),
                     subnet_base,
                     config.net_mask,
@@ -613,7 +617,7 @@ impl ConsommePrimaryRuntime {
             SocketAddr::V6(v6)
                 if self.is_local_address(config, remote_addr) && !is_loopback_adapter =>
             {
-                let virtual_ip = self.local_addr_map.get_or_allocate_v6(
+                let virtual_ip = self.local_addr_map.lock().get_or_allocate_v6(
                     *v6.ip(),
                     config.gateway_link_local_ipv6,
                     self.client_ip_ipv6,
@@ -647,7 +651,7 @@ impl ConsommePrimaryRuntime {
     /// the address unchanged.
     fn resolve_destination(&self, addr: &SocketAddr) -> SocketAddr {
         let ip = addr.ip();
-        if let Some(real_ip) = self.local_addr_map.resolve_virtual(&ip) {
+        if let Some(real_ip) = self.local_addr_map.lock().resolve_virtual(&ip) {
             SocketAddr::new(real_ip, addr.port())
         } else {
             *addr
@@ -942,7 +946,7 @@ impl Consomme {
                     ipv6_enabled,
                 },
                 runtime: ConsommePrimaryRuntime {
-                    local_addr_map: local_addr_map::LocalAddrMap::new(),
+                    local_addr_map: Arc::new(Mutex::new(local_addr_map::LocalAddrMap::new())),
                     client_ip_ipv6: initial_client_ip_ipv6,
                     client_ip_ipv6_routable: None,
                 },
@@ -979,7 +983,7 @@ impl Consomme {
                     ipv6_enabled,
                 },
                 runtime: ConsommePrimaryRuntime {
-                    local_addr_map: local_addr_map::LocalAddrMap::new(),
+                    local_addr_map: self.primary.runtime.local_addr_map.clone(),
                     client_ip_ipv6: self.primary.runtime.client_ip_ipv6,
                     client_ip_ipv6_routable: self.primary.runtime.client_ip_ipv6_routable,
                 },
@@ -1066,7 +1070,7 @@ impl Consomme {
     /// Some in-flight packets may be lost during the transition; this is
     /// acceptable.
     pub fn clear_local_addr_map(&mut self) {
-        self.primary.runtime.local_addr_map.clear();
+        self.primary.runtime.local_addr_map.lock().clear();
     }
 
     /// Allocates a virtual address within this endpoint's subnet and routes
@@ -1082,6 +1086,7 @@ impl Consomme {
                 self.primary
                     .runtime
                     .local_addr_map
+                    .lock()
                     .get_or_allocate_v4(destination, subnet_base, net_mask, gateway_ip, client_ip)
                     .map(IpAddr::V4)
             }
@@ -1092,6 +1097,7 @@ impl Consomme {
                 self.primary
                     .runtime
                     .local_addr_map
+                    .lock()
                     .get_or_allocate_v6(destination, gateway_ll, client_ll, client_routable)
                     .map(IpAddr::V6)
             }
@@ -1135,6 +1141,11 @@ impl Consomme {
     pub fn insert_flows(&mut self, flows: FlowState) {
         self.shard.tcp.insert_flows(flows.tcp);
         self.shard.udp.insert_flows(flows.udp);
+    }
+
+    /// Returns live loopback source-port mappings for accepted TCP connections.
+    pub fn tcp_loopback_port_mappings(&self) -> Vec<TcpLoopbackPortMapping> {
+        self.shard.tcp.loopback_port_mappings()
     }
 }
 

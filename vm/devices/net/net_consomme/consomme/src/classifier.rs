@@ -111,6 +111,7 @@ pub fn classify_frame(
     frame: &[u8],
     direction: PacketDirection,
     config: &ConsommeConfig,
+    segmentation_offload: bool,
 ) -> PacketClass {
     let Some(ethertype) = frame.get(12..14) else {
         return PacketClass::Drop;
@@ -120,8 +121,8 @@ pub fn classify_frame(
         None => return PacketClass::Drop,
     };
     let parsed = match ethertype {
-        [0x08, 0x00] => parse_ipv4(payload),
-        [0x86, 0xdd] => parse_ipv6(payload),
+        [0x08, 0x00] => parse_ipv4(payload, segmentation_offload),
+        [0x86, 0xdd] => parse_ipv6(payload, segmentation_offload),
         [0x08, 0x06] => return PacketClass::Control,
         _ => return PacketClass::Control,
     };
@@ -159,26 +160,37 @@ pub fn classify_frame(
 fn is_local_subnet(remote: IpAddr, config: &ConsommeConfig) -> bool {
     match remote {
         IpAddr::V4(remote) => {
-            crate::is_same_ipv4_subnet(remote.into(), config.gateway_ip, config.net_mask)
+            crate::is_same_ipv4_subnet(remote, config.gateway_ip, config.net_mask)
         }
         IpAddr::V6(remote) => crate::is_same_ipv6_subnet(
-            remote.into(),
+            remote,
             config.gateway_link_local_ipv6,
             config.prefix_len_ipv6,
         ),
     }
 }
 
-fn parse_ipv4(payload: &[u8]) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
+fn parse_ipv4(
+    payload: &[u8],
+    segmentation_offload: bool,
+) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
     let header = payload.get(..IPV4_MIN_HEADER_LEN)?;
     if header[0] >> 4 != 4 {
         return None;
     }
     let header_len = usize::from(header[0] & 0xf) * 4;
     let total_len = usize::from(u16::from_be_bytes([header[2], header[3]]));
-    if header_len < IPV4_MIN_HEADER_LEN || total_len < header_len || total_len > payload.len() {
+    if header_len < IPV4_MIN_HEADER_LEN || header_len > payload.len() {
         return None;
     }
+    let total_len = if segmentation_offload {
+        payload.len()
+    } else {
+        if total_len < header_len || total_len > payload.len() {
+            return None;
+        }
+        total_len
+    };
     let fragments = u16::from_be_bytes([header[6], header[7]]);
     if fragments & 0x3fff != 0 {
         return None;
@@ -192,15 +204,23 @@ fn parse_ipv4(payload: &[u8]) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
     Some((header[9], src, dst, payload.get(header_len..total_len)?))
 }
 
-fn parse_ipv6(payload: &[u8]) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
+fn parse_ipv6(
+    payload: &[u8],
+    segmentation_offload: bool,
+) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
     let header = payload.get(..IPV6_HEADER_LEN)?;
     if header[0] >> 4 != 6 {
         return None;
     }
-    let total_len = IPV6_HEADER_LEN + usize::from(u16::from_be_bytes([header[4], header[5]]));
-    if total_len > payload.len() {
-        return None;
-    }
+    let total_len = if segmentation_offload {
+        payload.len()
+    } else {
+        let total_len = IPV6_HEADER_LEN + usize::from(u16::from_be_bytes([header[4], header[5]]));
+        if total_len > payload.len() {
+            return None;
+        }
+        total_len
+    };
     let src = IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&header[8..24]).ok()?));
     let dst = IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&header[24..40]).ok()?));
     Some((
@@ -244,8 +264,13 @@ mod tests {
         let outbound = ipv4_frame(TCP, [10, 0, 0, 2], [1, 1, 1, 1], [0x12, 0x34, 0, 80]);
         let inbound = ipv4_frame(TCP, [1, 1, 1, 1], [10, 0, 0, 2], [0, 80, 0x12, 0x34]);
         assert_eq!(
-            classify_frame(&outbound, PacketDirection::GuestToRemote, &config),
-            classify_frame(&inbound, PacketDirection::RemoteToGuest, &config)
+            classify_frame(
+                &outbound,
+                PacketDirection::GuestToRemote,
+                &config,
+                false
+            ),
+            classify_frame(&inbound, PacketDirection::RemoteToGuest, &config, false)
         );
     }
 
@@ -273,7 +298,8 @@ mod tests {
             classify_frame(
                 &guest_to_remote,
                 PacketDirection::GuestToRemote,
-                &config
+                &config,
+                false
             ),
             expected
         );
@@ -281,7 +307,8 @@ mod tests {
             classify_frame(
                 &remote_to_guest,
                 PacketDirection::RemoteToGuest,
-                &config
+                &config,
+                false
             ),
             expected
         );
@@ -297,7 +324,12 @@ mod tests {
             [0x12, 0x34, 0x56, 0x78],
         );
         assert_eq!(
-            classify_frame(&frame, PacketDirection::GuestToRemote, &config),
+            classify_frame(
+                &frame,
+                PacketDirection::GuestToRemote,
+                &config,
+                false
+            ),
             PacketClass::Control
         );
     }
@@ -312,7 +344,12 @@ mod tests {
             [0x12, 0x34, 0, 53],
         );
         assert_eq!(
-            classify_frame(&frame, PacketDirection::GuestToRemote, &config),
+            classify_frame(
+                &frame,
+                PacketDirection::GuestToRemote,
+                &config,
+                false
+            ),
             PacketClass::Control
         );
     }
@@ -351,9 +388,30 @@ mod tests {
             classify_frame(
                 &[0; 13],
                 PacketDirection::GuestToRemote,
-                &ConsommeConfig::new()
+                &ConsommeConfig::new(),
+                false
             ),
             PacketClass::Drop
+        );
+    }
+
+    #[test]
+    fn segmentation_offload_ignores_ipv4_total_length() {
+        let config = ConsommeConfig::new();
+        let mut frame = ipv4_frame(TCP, [10, 0, 0, 2], [1, 1, 1, 1], [0x12, 0x34, 0, 80]);
+        frame[16..18].copy_from_slice(&0u16.to_be_bytes());
+
+        assert_eq!(
+            classify_frame(
+                &frame,
+                PacketDirection::GuestToRemote,
+                &config,
+                true
+            ),
+            PacketClass::Flow(FlowKey::Tcp {
+                guest: "10.0.0.2:4660".parse().unwrap(),
+                remote: "1.1.1.1:80".parse().unwrap(),
+            })
         );
     }
 }

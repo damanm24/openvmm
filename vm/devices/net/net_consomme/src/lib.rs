@@ -152,15 +152,6 @@ impl PendingRequests {
     fn buffer_request(&mut self, request: ConsommeRequest) {
         let key = PortKey::for_request(&request);
         if let Some(existing) = self.ports.remove(&key) {
-            let cancels = matches!(existing, ConsommeRequest::Bind(_))
-                && matches!(request, ConsommeRequest::Unbind(_));
-            if cancels {
-                // Unbind cancels a not-yet-applied bind; complete both as no-ops.
-                into_rpc(existing).complete(Ok(()));
-                into_rpc(request).complete(Ok(()));
-                tracing::debug!(guest_port = key.guest_port, "coalesced bind and unbind");
-                return;
-            }
             // Newer request wins; report the older one as superseded.
             into_rpc(existing).fail(PortRequestSuperseded);
         }
@@ -809,8 +800,12 @@ impl ConsommeQueue {
         checksum: &ChecksumState,
         foreign: bool,
     ) -> Result<(), consomme::DropReason> {
-        let packet_class =
-            consomme::classify_frame(data, consomme::PacketDirection::GuestToRemote, &self.config);
+        let packet_class = consomme::classify_frame(
+            data,
+            consomme::PacketDirection::GuestToRemote,
+            &self.config,
+            checksum.tso.is_some() || checksum.gso.is_some(),
+        );
         let target = match packet_class {
             consomme::PacketClass::Flow(flow) => self.flow_target(flow),
             consomme::PacketClass::Control => 0,
@@ -840,7 +835,15 @@ impl ConsommeQueue {
             return;
         }
 
-        let accepted = self.with_consomme_no_pool(|consomme| consomme.poll_tcp_listeners(cx));
+        let loopback_mappings = self
+            .shards
+            .iter()
+            .take(self.active_shards)
+            .flat_map(|shard| shard.lock().consomme.tcp_loopback_port_mappings())
+            .collect::<Vec<_>>();
+        let accepted = self.with_consomme_no_pool(|consomme| {
+            consomme.poll_tcp_listeners(cx, &loopback_mappings)
+        });
         for accepted in accepted {
             let target = self.flow_target(accepted.flow_key());
             let mut state = self.lock_shard(target);
@@ -1287,6 +1290,7 @@ mod tests {
                             packet.data(),
                             consomme::PacketDirection::RemoteToGuest,
                             &endpoint.config,
+                            false,
                         );
                         shard.consomme.recycle_egress(packet);
                         let consomme::PacketClass::Flow(flow) = class else {
@@ -1380,15 +1384,17 @@ mod tests {
     }
 
     #[test]
-    fn unbind_cancels_pending_bind() {
+    fn unbind_supersedes_pending_bind() {
         let mut ep = endpoint();
         ep.pending
             .buffer_request(ConsommeRequest::Bind(Rpc::detached(cfg(80))));
         assert_eq!(ep.pending.ports.len(), 1);
-        // An unbind for the same port annihilates the not-yet-applied bind.
         ep.pending
             .buffer_request(ConsommeRequest::Unbind(Rpc::detached(cfg(80))));
-        assert!(ep.pending.ports.is_empty());
+        assert!(matches!(
+            ep.pending.ports.values().next(),
+            Some(ConsommeRequest::Unbind(_))
+        ));
     }
 
     #[test]

@@ -422,7 +422,7 @@ fn test_runtime() -> (ConsommeConfig, ConsommePrimaryRuntime) {
     (
         ConsommeConfig::new(),
         ConsommePrimaryRuntime {
-            local_addr_map: local_addr_map::LocalAddrMap::new(),
+            local_addr_map: Arc::new(Mutex::new(local_addr_map::LocalAddrMap::new())),
             client_ip_ipv6: None,
             client_ip_ipv6_routable: None,
         },
@@ -539,6 +539,7 @@ fn update_params_preserves_runtime_state_for_unrelated_changes() {
         .primary
         .runtime
         .local_addr_map
+        .lock()
         .get_or_allocate_v4(
             Ipv4Addr::LOCALHOST,
             Ipv4Addr::new(10, 0, 0, 0),
@@ -560,8 +561,9 @@ fn update_params_preserves_runtime_state_for_unrelated_changes() {
             .primary
             .runtime
             .local_addr_map
-            .resolve_virtual(&std::net::IpAddr::V4(virtual_address)),
-        Some(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .lock()
+            .resolve_virtual(&IpAddr::V4(virtual_address)),
+        Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
     );
 }
 
@@ -597,6 +599,23 @@ fn create_virtual_address_allocates_subnet_address() {
         .create_virtual_address(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 5)))
         .unwrap();
     assert_eq!(other, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 253)));
+}
+
+#[test]
+fn data_shard_resolves_primary_virtual_address() {
+    let mut primary = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
+    let virtual_ip = primary
+        .create_virtual_address(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    let shard = primary.new_data_shard();
+
+    assert_eq!(
+        shard
+            .primary
+            .runtime
+            .resolve_destination(&SocketAddr::new(virtual_ip, 80)),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80)
+    );
 }
 
 #[test]

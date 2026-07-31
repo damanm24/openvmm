@@ -81,6 +81,15 @@ pub struct AcceptedTcpConnection {
     flow: FourTuple,
 }
 
+/// A live guest-initiated loopback connection whose host source port must be
+/// translated back to the guest's original source port when accepted by a
+/// port-forward listener.
+pub struct TcpLoopbackPortMapping {
+    listener: PortForwardKey,
+    sending_port: u16,
+    guest_port: u16,
+}
+
 impl AcceptedTcpConnection {
     /// Returns the normalized guest-visible flow used for shard selection.
     pub fn flow_key(&self) -> crate::FlowKey {
@@ -195,6 +204,32 @@ impl Tcp {
 
     pub fn insert_flows(&mut self, flows: TcpFlows) {
         self.connections.extend(flows.0);
+    }
+
+    pub fn loopback_port_mappings(&self) -> Vec<TcpLoopbackPortMapping> {
+        self.connections
+            .iter()
+            .filter_map(|(flow, connection)| {
+                if !matches!(
+                    connection.inner.state,
+                    TcpState::Connecting | TcpState::SynReceived
+                ) {
+                    return None;
+                }
+                let LoopbackPortInfo::ProxyForGuestPort {
+                    sending_port,
+                    guest_port,
+                } = connection.inner.loopback_port
+                else {
+                    return None;
+                };
+                Some(TcpLoopbackPortMapping {
+                    listener: PortForwardKey::from_socket_addr(flow.dst, flow.dst.port()),
+                    sending_port,
+                    guest_port,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -436,14 +471,19 @@ impl TcpState {
 
 impl<T: SocketDriver> Access<'_, T> {
     pub(crate) fn poll_tcp(&mut self, cx: &mut Context<'_>) {
-        for accepted in self.poll_tcp_listeners(cx) {
+        let loopback_mappings = self.inner.shard.tcp.loopback_port_mappings();
+        for accepted in self.poll_tcp_listeners(cx, &loopback_mappings) {
             self.insert_accepted_tcp(accepted);
         }
         self.poll_tcp_connections(cx);
     }
 
     /// Polls port-forward listeners for new host connections.
-    pub fn poll_tcp_listeners(&mut self, cx: &mut Context<'_>) -> Vec<AcceptedTcpConnection> {
+    pub fn poll_tcp_listeners(
+        &mut self,
+        cx: &mut Context<'_>,
+        loopback_mappings: &[TcpLoopbackPortMapping],
+    ) -> Vec<AcceptedTcpConnection> {
         let mut accepted = Vec::new();
         self.inner
             .primary
@@ -464,26 +504,10 @@ impl<T: SocketDriver> Access<'_, T> {
                         .runtime
                         .is_local_address(&self.inner.shard.config.immutable, &other_addr)
                     {
-                        for (other_ft, connection) in self.inner.shard.tcp.connections.iter() {
-                            if matches!(
-                                connection.inner.state,
-                                TcpState::Connecting | TcpState::SynReceived
-                            ) && PortForwardKey::from_socket_addr(
-                                other_ft.dst,
-                                other_ft.dst.port(),
-                            ) == *key
-                            {
-                                if let LoopbackPortInfo::ProxyForGuestPort {
-                                    sending_port,
-                                    guest_port,
-                                } = connection.inner.loopback_port
-                                {
-                                    if sending_port == other_addr.port() {
-                                        other_addr.set_port(guest_port);
-                                        break;
-                                    }
-                                }
-                            }
+                        if let Some(mapping) = loopback_mappings.iter().find(|mapping| {
+                            mapping.listener == *key && mapping.sending_port == other_addr.port()
+                        }) {
+                            other_addr.set_port(mapping.guest_port);
                         }
                     }
                     let Some(ft) = self.inner.primary.runtime.try_ft_from_remote_address(
