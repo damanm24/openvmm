@@ -47,18 +47,32 @@ object — such as snapshots or a paravisor — and `shared=off` (private)
 otherwise, for the lighter-weight anonymous backing.
 ```
 
+## Deferred commit
+
+On Windows with WHP, `deferred_commit=on` reserves private guest RAM without
+initially charging Windows commit for the complete range. The first host or
+guest access commits the containing 64 KiB cluster. A VM can therefore expose
+more guest RAM than it has touched without consuming the same amount of the
+system commit limit at startup.
+
+Deferred commit requires `shared=off` and a hypervisor that forwards guest
+memory faults to OpenVMM. It is incompatible with prefetch, transparent huge
+pages, host NUMA binding, and pinned mappings. Other host platforms reject the
+option; their anonymous-memory behavior is governed by the host kernel.
+
 ## Prefetch
 
-`prefetch=on|off` asks OpenVMM to commit guest RAM and program it into the
-hypervisor's second-stage page tables (the SLAT) up front, instead of faulting
-each page in lazily on first guest access.
+`prefetch=on|off` asks OpenVMM to materialize guest RAM and program it into the
+hypervisor's second-stage page tables (the SLAT) up front, instead of populating
+each page lazily on first guest access.
 
 This is a tradeoff. Prefetching forces the whole guest RAM range to be
 allocated in advance and inserted into the SLAT before the guest runs, which
 raises initial memory use and lengthens startup. In exchange, the guest does
 not take a fault/exit the first time it touches each page. With prefetch off
 (the default), startup is fast and only the memory the guest actually touches
-is committed, but each first touch costs a fault.
+needs to become resident and enter the SLAT, but each first touch costs a
+fault. Without `deferred_commit=on`, this does not defer Windows commit charge.
 
 Prefetch applies to both **shared** (file-backed) and **private** (anonymous)
 guest RAM.

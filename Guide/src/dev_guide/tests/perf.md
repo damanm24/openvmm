@@ -67,12 +67,13 @@ burette run --test network --nic virtio-net -o network.json
 
 Reported metrics:
 
-- `memory_rss_kib` — total RSS across process tree
-- `memory_private_kib` — private (non-shared) pages
-- `memory_vmm_overhead_kib` — VMM runtime overhead excluding guest
-  RAM (Linux only; on Windows this equals `private_kib`)
-- `memory_pss_kib` — proportional set size (Linux only)
-- `memory_process_count` — processes in the tree
+- `net_{nic}_tcp_tx_gbps` — single-connection guest-to-host TCP throughput
+- `net_{nic}_tcp_rx_gbps` — single-connection host-to-guest TCP throughput
+- `net_{nic}_udp_tx_pps` — single-stream guest-to-host UDP packet rate
+- `net_{nic}_tcp_{tx,rx}_long_lived_gbps` — aggregate throughput from 16
+  parallel connections (8 per vCPU) running for 10 seconds
+- `net_{nic}_tcp_{tx,rx}_short_lived_gbps` — aggregate throughput from 64
+  parallel connections running for 1 second
 
 Compare shared vs. private memory overhead:
 

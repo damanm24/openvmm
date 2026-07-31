@@ -496,6 +496,7 @@ impl PetriVmConfigOpenVmm {
             let make_mem = |size: u64| openvmm_defs::config::MemoryConfig {
                 mem_size: size,
                 prefetch_memory: false,
+                deferred_commit: false,
                 private_memory,
                 transparent_hugepages,
                 hugepages: false,

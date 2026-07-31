@@ -71,6 +71,8 @@ struct RamBacking {
     ranges: Vec<MemoryRange>,
     /// Prefetch pages at build time.
     prefetch: bool,
+    /// Commit private pages when first accessed.
+    deferred_commit: bool,
     /// THP is enabled for this backing.
     transparent_hugepages: bool,
     /// Host NUMA node for this backing. `None` means OS default placement.
@@ -151,6 +153,27 @@ pub enum MemoryBuildError {
     /// Private memory is incompatible with an existing memory backing.
     #[error("private memory is incompatible with an existing memory backing")]
     PrivateMemoryWithExistingBacking,
+    /// Deferred commit is currently implemented only on Windows.
+    #[error("deferred commit is only supported on Windows")]
+    DeferredCommitUnsupportedPlatform,
+    /// Deferred commit requires private anonymous RAM.
+    #[error("deferred commit requires private memory")]
+    DeferredCommitWithoutPrivateMemory,
+    /// Prefetching would immediately commit the complete deferred range.
+    #[error("deferred commit is incompatible with prefetch")]
+    DeferredCommitWithPrefetch,
+    /// The hypervisor must forward guest memory faults to the VMM.
+    #[error("deferred commit requires hypervisor memory-fault resolution")]
+    DeferredCommitWithoutFaultResolution,
+    /// Pinned mappings cannot be committed on demand.
+    #[error("deferred commit is incompatible with pinned mappings")]
+    DeferredCommitWithPinnedMappings,
+    /// Fault-time NUMA placement is not implemented yet.
+    #[error("deferred commit is incompatible with host NUMA binding")]
+    DeferredCommitWithHostNumaNode,
+    /// Soft large pages commit a wider range than deferred commit intends.
+    #[error("deferred commit is incompatible with transparent huge pages")]
+    DeferredCommitWithTransparentHugepages,
     /// Hugepage size is too large.
     #[error("hugepage size {0} is too large")]
     HugepageSizeTooLarge(MemorySize),
@@ -207,6 +230,7 @@ const DEFAULT_HUGEPAGE_SIZE: u64 = 2 * 1024 * 1024;
 pub struct RamBackingRequest {
     ranges: Vec<MemoryRange>,
     prefetch: bool,
+    deferred_commit: bool,
     private_memory: bool,
     transparent_hugepages: bool,
     hugepages: bool,
@@ -224,6 +248,7 @@ impl RamBackingRequest {
         Self {
             ranges,
             prefetch: false,
+            deferred_commit: false,
             private_memory: false,
             transparent_hugepages: false,
             hugepages: false,
@@ -236,6 +261,12 @@ impl RamBackingRequest {
     /// Prefetch (pre-fault) all pages at build time.
     pub fn prefetch(mut self, enable: bool) -> Self {
         self.prefetch = enable;
+        self
+    }
+
+    /// Commit private RAM on first access instead of at VM construction.
+    pub fn deferred_commit(mut self, enable: bool) -> Self {
+        self.deferred_commit = enable;
         self
     }
 
@@ -422,6 +453,29 @@ impl GuestMemoryBuilder {
 
         // Validate per-request constraints.
         for req in &backing_requests {
+            if req.deferred_commit {
+                if !cfg!(windows) {
+                    return Err(MemoryBuildError::DeferredCommitUnsupportedPlatform);
+                }
+                if !req.private_memory {
+                    return Err(MemoryBuildError::DeferredCommitWithoutPrivateMemory);
+                }
+                if req.prefetch {
+                    return Err(MemoryBuildError::DeferredCommitWithPrefetch);
+                }
+                if !self.supports_memory_fault_resolution {
+                    return Err(MemoryBuildError::DeferredCommitWithoutFaultResolution);
+                }
+                if self.pin_mappings {
+                    return Err(MemoryBuildError::DeferredCommitWithPinnedMappings);
+                }
+                if req.host_numa_node.is_some() {
+                    return Err(MemoryBuildError::DeferredCommitWithHostNumaNode);
+                }
+                if req.transparent_hugepages {
+                    return Err(MemoryBuildError::DeferredCommitWithTransparentHugepages);
+                }
+            }
             if req.private_memory && self.x86_legacy_support {
                 return Err(MemoryBuildError::PrivateMemoryWithLegacy);
             }
@@ -487,6 +541,7 @@ impl GuestMemoryBuilder {
                     mappable: None,
                     ranges: req.ranges,
                     prefetch: req.prefetch,
+                    deferred_commit: req.deferred_commit,
                     transparent_hugepages: req.transparent_hugepages,
                     host_numa_node: req.host_numa_node,
                 });
@@ -546,6 +601,7 @@ impl GuestMemoryBuilder {
                 // force it on for hugepage-backed RAM. (Linux hugetlb faults the
                 // whole large page on first touch, so this is not needed there.)
                 prefetch: req.prefetch || (cfg!(windows) && req.hugepages),
+                deferred_commit: false,
                 // Transparent huge pages are advisory and best-effort; they
                 // apply to shmem (memfd) mappings on Linux. Explicit hugetlb
                 // backings are already huge, so suppress THP there.
@@ -636,6 +692,7 @@ impl GuestMemoryBuilder {
                                 numa_node: backing.host_numa_node,
                                 transparent_hugepages: backing.transparent_hugepages,
                                 prefetch: backing.prefetch,
+                                deferred_commit: backing.deferred_commit,
                             },
                         )
                         .await
@@ -911,6 +968,11 @@ mod tests {
     use pal_async::async_test;
     use std::error::Error as _;
 
+    #[cfg(windows)]
+    fn is_committed(manager: &GuestMemoryManager, offset: usize) -> bool {
+        manager.va_mapper.is_committed(offset).unwrap()
+    }
+
     /// Build a GuestMemoryManager with the given backing range groups,
     /// and return a GuestMemory handle for read/write testing.
     async fn build_and_get_memory(
@@ -930,6 +992,48 @@ mod tests {
         let mgr = builder.build(max_addr).await.unwrap();
         let gm = mgr.client().guest_memory().await.unwrap();
         (mgr, gm)
+    }
+
+    #[cfg(windows)]
+    #[async_test]
+    async fn deferred_commit_commits_one_cluster_on_access() {
+        const CLUSTER_SIZE: usize = 64 * 1024;
+        let range = MemoryRange::new(0..2 * CLUSTER_SIZE as u64);
+        let backing = RamBackingRequest::new(vec![range])
+            .private_memory(true)
+            .deferred_commit(true);
+        let manager = GuestMemoryBuilder::new()
+            .supports_memory_fault_resolution(true)
+            .add_backing(backing)
+            .build(range.end())
+            .await
+            .unwrap();
+        let memory = manager.client().guest_memory().await.unwrap();
+
+        assert!(!is_committed(&manager, 0));
+        assert!(!is_committed(&manager, CLUSTER_SIZE));
+
+        memory.write_at(0x1000, &[0x5a; 32]).unwrap();
+
+        assert!(is_committed(&manager, 0));
+        assert!(!is_committed(&manager, CLUSTER_SIZE));
+    }
+
+    #[cfg(windows)]
+    #[async_test]
+    async fn deferred_commit_requires_private_memory() {
+        let range = MemoryRange::new(0..64 * 1024);
+        let error = GuestMemoryBuilder::new()
+            .supports_memory_fault_resolution(true)
+            .add_backing(RamBackingRequest::new(vec![range]).deferred_commit(true))
+            .build(range.end())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            MemoryBuildError::DeferredCommitWithoutPrivateMemory
+        ));
     }
 
     #[async_test]

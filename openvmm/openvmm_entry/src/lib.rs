@@ -1921,11 +1921,14 @@ async fn vm_config_from_command_line(
                                         .expect("NUMA memory size was validated")
                                         .0,
                                     prefetch_memory: n.memory.prefetch,
+                                    deferred_commit: n.memory.deferred_commit,
                                     private_memory: n.memory.shared == Some(false),
                                     transparent_hugepages: n
                                         .memory
                                         .transparent_hugepages
-                                        .unwrap_or(!n.memory.hugepages),
+                                        .unwrap_or(
+                                            !n.memory.hugepages && !n.memory.deferred_commit,
+                                        ),
                                     hugepages: n.memory.hugepages,
                                     hugepage_size: n.memory.hugepage_size.map(|m| m.0),
                                     host_numa_node: n.host_numa_node,
@@ -1953,6 +1956,7 @@ async fn vm_config_from_command_line(
                         mem: Some(MemoryConfig {
                             mem_size: opt.memory_size(),
                             prefetch_memory: opt.prefetch_memory(),
+                            deferred_commit: opt.deferred_commit(),
                             private_memory: opt.private_memory(),
                             transparent_hugepages: opt.transparent_hugepages(),
                             hugepages: opt.memory.hugepages,

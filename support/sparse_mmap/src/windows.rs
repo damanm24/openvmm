@@ -31,6 +31,7 @@ use Memory::UnmapViewOfFile2;
 use Memory::VirtualAlloc2;
 use Memory::VirtualFreeEx;
 use Memory::VirtualProtectEx;
+use Memory::VirtualQueryEx;
 use Memory::WIN32_MEMORY_RANGE_ENTRY;
 use pal::windows::BorrowedHandleExt;
 use pal::windows::Process;
@@ -504,6 +505,24 @@ impl SparseMapping {
     /// mapping.
     pub fn alloc(&self, offset: usize, len: usize) -> Result<(), Error> {
         self.virtual_alloc(offset, len, PAGE_READWRITE, None)
+    }
+
+    /// Reserves private memory without charging commit for it.
+    ///
+    /// The range can later be committed incrementally with
+    /// [`commit()`](Self::commit).
+    pub fn reserve(&self, offset: usize, len: usize) -> Result<(), Error> {
+        self.map(offset, len, |addr| unsafe {
+            virtual_alloc(
+                self.process.as_ref(),
+                addr,
+                len,
+                MEM_RESERVE | MEM_REPLACE_PLACEHOLDER,
+                PAGE_NOACCESS,
+                &mut [],
+            )?;
+            Ok(MappingInfo::Anonymous)
+        })
     }
 
     /// Allocates private, writable memory at the given offset, optionally
@@ -988,6 +1007,29 @@ impl SparseMapping {
         Ok(())
     }
 
+    /// Returns whether the page containing `offset` is committed.
+    pub fn is_committed(&self, offset: usize) -> io::Result<bool> {
+        if offset >= self.len {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+
+        let mut info = Memory::MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: `offset` is within this mapping's reservation and `info` is
+        // valid for the duration of the query.
+        let result = unsafe {
+            VirtualQueryEx(
+                self.process.as_ref().handle(),
+                self.address.wrapping_add(offset),
+                &mut info,
+                size_of_val(&info),
+            )
+        };
+        if result == 0 {
+            return Err(Error::last_os_error());
+        }
+        Ok(info.State == MEM_COMMIT)
+    }
+
     /// Names a mapping range for debugging. No-op on Windows.
     pub fn set_name(&self, _offset: usize, _len: usize, _name: &str) {}
 
@@ -1214,6 +1256,20 @@ mod tests {
     use std::io;
     use trycopy::try_copy;
     use windows_sys::Win32::System::Memory::PAGE_READWRITE;
+
+    #[test]
+    fn reserve_then_commit() {
+        let mapping = SparseMapping::new(2 * PAGE_SIZE).unwrap();
+
+        mapping.reserve(0, 2 * PAGE_SIZE).unwrap();
+        mapping.commit(0, PAGE_SIZE).unwrap();
+
+        let data = [0x5a; 32];
+        mapping.write_at(0, &data).unwrap();
+        let mut actual = [0; 32];
+        mapping.read_at(0, &mut actual).unwrap();
+        assert_eq!(actual, data);
+    }
 
     #[test]
     fn test_shared_mem_split() {

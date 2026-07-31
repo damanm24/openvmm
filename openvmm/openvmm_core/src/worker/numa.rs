@@ -130,6 +130,7 @@ mod tests {
         Some(MemoryConfig {
             mem_size: size,
             prefetch_memory: false,
+            deferred_commit: false,
             private_memory: false,
             transparent_hugepages: false,
             hugepages: false,

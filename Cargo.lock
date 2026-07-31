@@ -11018,6 +11018,7 @@ dependencies = [
  "criterion",
  "guid",
  "pal",
+ "sparse_mmap",
  "windows-sys 0.61.0",
 ]
 

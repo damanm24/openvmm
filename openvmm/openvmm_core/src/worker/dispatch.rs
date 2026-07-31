@@ -1236,6 +1236,7 @@ impl InitializedVm {
 
             let mut backing = membacking::RamBackingRequest::new(ranges)
                 .prefetch(mem.prefetch_memory)
+                .deferred_commit(mem.deferred_commit)
                 .private_memory(mem.private_memory)
                 .transparent_hugepages(mem.transparent_hugepages)
                 .host_numa_node(mem.host_numa_node);

@@ -84,6 +84,9 @@ pub struct MemoryCli {
     /// Whether to prefetch guest RAM.
     #[kv(flag)]
     pub prefetch: bool,
+    /// Whether to commit private RAM on first access.
+    #[kv(flag)]
+    pub deferred_commit: bool,
     /// Whether to use transparent huge pages. When unset, defaults to enabled
     /// unless `hugepages` is set.
     #[kv(flag, key = "thp")]
@@ -100,6 +103,24 @@ pub struct MemoryCli {
 impl MemoryCli {
     /// Validate cross-field constraints shared by `--memory` and `--numa`.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.deferred_commit {
+            anyhow::ensure!(
+                cfg!(windows),
+                "deferred_commit is only supported on Windows"
+            );
+            anyhow::ensure!(
+                self.shared == Some(false),
+                "deferred_commit=on requires shared=off"
+            );
+            anyhow::ensure!(
+                !self.prefetch,
+                "deferred_commit=on conflicts with prefetch=on"
+            );
+            anyhow::ensure!(
+                self.transparent_hugepages != Some(true),
+                "deferred_commit=on conflicts with thp=on"
+            );
+        }
         if self.hugepage_size.is_some() && !self.hugepages {
             anyhow::bail!("hugepage_size requires hugepages=on");
         }
@@ -372,6 +393,7 @@ options:
     `pcie_port=<name>`             present the disk using pcie under the specified port, incompatible with `dvd`, `vtl2`, `uh`, and `uh-nvme`
     `on=<name>`                    attach to a named controller (NVMe or SCSI), incompatible with `pcie_port` and `vtl2`
     `nsid=<N>`                     NVMe namespace ID (1-based), requires `on`; auto-assigned if omitted
+    deferred_commit[=on|off] commit private RAM on first access (Windows only)
     `lun=<N>`                      SCSI LUN (0-based), requires `on`; auto-assigned if omitted
     `relay=<ctrl>[:<loc>]`         relay through OpenHCL to the named OpenHCL controller, with optional location (LUN or NSID)
 "#)]
@@ -1308,6 +1330,11 @@ impl Options {
         self.memory.prefetch || self.deprecated_prefetch
     }
 
+    /// Returns whether guest RAM should be committed on first access.
+    pub fn deferred_commit(&self) -> bool {
+        self.memory.deferred_commit
+    }
+
     /// Returns whether guest RAM should use private anonymous backing.
     pub fn private_memory(&self) -> bool {
         self.memory.shared == Some(false) || self.deprecated_private_memory
@@ -1317,7 +1344,7 @@ impl Options {
     pub fn transparent_hugepages(&self) -> bool {
         self.memory
             .transparent_hugepages
-            .unwrap_or(!self.memory.hugepages)
+            .unwrap_or(!self.memory.hugepages && !self.memory.deferred_commit)
             || self.deprecated_thp
     }
 
@@ -1560,6 +1587,10 @@ fn parse_numa_node(s: &str) -> anyhow::Result<NumaNodeCli> {
     anyhow::ensure!(
         node.memory.file.is_none(),
         "'file' is not supported in --numa"
+    );
+    anyhow::ensure!(
+        !(node.memory.deferred_commit && node.host_numa_node.is_some()),
+        "deferred_commit=on conflicts with host_numa_node"
     );
     node.memory.validate()?;
     Ok(node)
@@ -4720,6 +4751,17 @@ mod tests {
                 ..Default::default()
             }
         );
+
+        #[cfg(windows)]
+        assert_eq!(
+            parse_memory_config("size=8G,shared=off,deferred_commit=on").unwrap(),
+            MemoryCli {
+                size: Some(vmm_cli::MemorySize(8 * 1024 * 1024 * 1024)),
+                shared: Some(false),
+                deferred_commit: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -4728,6 +4770,9 @@ mod tests {
         assert!(parse_memory_config("hugepage_size=2M").is_err());
         assert!(parse_memory_config("hugepages=on,shared=off").is_err());
         assert!(parse_memory_config("hugepages=on,file=/tmp/memory.bin").is_err());
+        assert!(parse_memory_config("deferred_commit=on").is_err());
+        assert!(parse_memory_config("shared=off,deferred_commit=on,prefetch=on").is_err());
+        assert!(parse_memory_config("shared=off,deferred_commit=on,thp=on").is_err());
 
         // Semantic validation of the hugepage size happens in the memory
         // builder, not in CLI parsing.

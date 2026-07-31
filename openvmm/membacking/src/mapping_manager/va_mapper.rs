@@ -96,6 +96,9 @@ struct UnexpectedPageFault;
 #[cfg(windows)]
 #[derive(Debug, Error)]
 enum FaultError {
+    /// Committing a deferred private-memory cluster failed.
+    #[error("failed to commit deferred range {0}")]
+    Commit(MemoryRange, #[source] std::io::Error),
     /// Raising a window to read-write failed (deferred protect / soft large
     /// pages).
     #[error("failed to raise window {0} to read-write")]
@@ -131,6 +134,8 @@ struct MappingProps {
     /// Backed by private anonymous memory (committed up front) rather than a
     /// shared file/section mapping.
     private: bool,
+    /// Private memory is committed in clusters on first access.
+    deferred_commit: bool,
     /// General per-mapping fault counters, always present. See [`FaultStats`].
     stats: FaultStats,
     /// Soft-large-page state for this range's 2 MB regions. `Some` only for
@@ -185,6 +190,8 @@ struct SoftLpStats {
 /// (`SharedCounter`), bumped in place under the mapping-index read lock.
 #[derive(Debug, Default, Inspect)]
 struct FaultStats {
+    /// Faults that committed a deferred private-memory cluster.
+    deferred_commit_faults: SharedCounter,
     /// Host write faults that raised a soft-large-page deferred-protect window
     /// to read-write (e.g. the loader's first write to a window). Nonzero only
     /// for soft-large-page mappings (Windows, primary mapper, THP-eligible).
@@ -380,7 +387,8 @@ impl MapperTask {
         let soft_lp = cfg!(windows)
             && params.policy.transparent_hugepages
             && params.writable
-            && self.inner.primary;
+            && self.inner.primary
+            && !params.policy.deferred_commit;
 
         // Deferred protect (map read-only, populate lazily on the first write
         // fault) drives the *lazy* soft-LP path. When the range is prefetched it
@@ -407,6 +415,7 @@ impl MapperTask {
             params.range,
             MappingProps {
                 private,
+                deferred_commit: private && params.policy.deferred_commit && cfg!(windows),
                 stats: FaultStats::default(),
                 soft_lp: soft_lp.then(|| {
                     let regions = large_region_count(params.range);
@@ -446,6 +455,7 @@ impl MapperTask {
                     numa_node,
                     transparent_hugepages,
                     prefetch: _,
+                    deferred_commit: _,
                 },
         } = params;
         // A deferred-protect range is mapped read-write (so the view has write
@@ -583,6 +593,7 @@ impl MapperTask {
                     numa_node,
                     transparent_hugepages,
                     prefetch: _,
+                    deferred_commit,
                 },
         } = params;
         let offset = range.start() as usize;
@@ -592,7 +603,10 @@ impl MapperTask {
         // write faults and a full 2 MB window can be raised to read-write and
         // materialized at once, giving the loader (and guest) large pages.
         // Elsewhere this flag is ignored.
-        if let Err(e) = self.inner.alloc(offset, len, numa_node, deferred_protect) {
+        if let Err(e) = self
+            .inner
+            .alloc(offset, len, numa_node, deferred_protect, deferred_commit)
+        {
             return Err(MappingError::new(range, e));
         }
 
@@ -723,9 +737,13 @@ impl MapperInner {
         len: usize,
         numa_node: Option<u32>,
         deferred_protect: bool,
+        deferred_commit: bool,
     ) -> Result<(), std::io::Error> {
         cfg_select! {
             windows => {
+                if deferred_commit {
+                    return self.mapping.reserve(offset, len);
+                }
                 // Deferred protect (soft large pages): commit read-only so the
                 // first write faults and the 2 MB window can be raised +
                 // materialized as a large page; otherwise commit read-write.
@@ -737,7 +755,7 @@ impl MapperInner {
                 self.mapping.virtual_alloc(offset, len, protect, numa_node)
             }
             target_os = "linux" => {
-                let _ = deferred_protect;
+                let _ = (deferred_protect, deferred_commit);
                 self.mapping.alloc(offset, len)?;
                 if let Some(node) = numa_node {
                     self.mapping.mbind_at(offset, len, node)?;
@@ -745,7 +763,7 @@ impl MapperInner {
                 Ok(())
             }
             _ => {
-                let _ = deferred_protect;
+                let _ = (deferred_protect, deferred_commit);
                 assert!(numa_node.is_none(), "NUMA not supported on this platform; should have been rejected at build time");
                 self.mapping.alloc(offset, len)
             }
@@ -865,6 +883,13 @@ impl VaMapper {
     pub fn process(&self) -> Option<&RemoteProcess> {
         self.process.as_ref()
     }
+
+    /// Returns whether the page containing `offset` is committed.
+    #[cfg(windows)]
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by deferred-commit tests"))]
+    pub fn is_committed(&self, offset: usize) -> std::io::Result<bool> {
+        self.inner.mapping.is_committed(offset)
+    }
 }
 
 /// SAFETY: the underlying VA mapping is guaranteed to be valid for the lifetime
@@ -892,6 +917,29 @@ unsafe impl GuestMemoryAccess for VaMapper {
         bitmap_failure: bool,
     ) -> PageFaultAction {
         assert!(!bitmap_failure, "bitmaps are not used");
+
+        #[cfg(windows)]
+        {
+            let mappings = self.inner.mappings.read();
+            if let Some(&(start, end, ref props)) = mappings.get_entry(&address)
+                && props.private
+                && props.deferred_commit
+            {
+                props.stats.deferred_commit_faults.increment();
+                let range = deferred_commit_range(address, len as u64, start, end + 1);
+                if let Err(err) = self
+                    .inner
+                    .mapping
+                    .commit(range.start() as usize, range.len() as usize)
+                {
+                    return PageFaultAction::Fail(PageFaultError::new(
+                        GuestMemoryErrorKind::Other,
+                        FaultError::Commit(range, err),
+                    ));
+                }
+                return PageFaultAction::Retry;
+            }
+        }
 
         // Soft large pages (Windows): THP-eligible ranges on the primary mapper
         // are committed/mapped read-only, so the first *write* traps here (reads
@@ -982,6 +1030,27 @@ unsafe impl GuestMemoryAccess for VaMapper {
     }
 }
 
+/// Match Windows allocation granularity so adjacent first touches amortize
+/// commit bookkeeping without charging large unused regions.
+#[cfg(windows)]
+const DEFERRED_COMMIT_CLUSTER_SIZE: u64 = 64 * 1024;
+
+#[cfg(windows)]
+fn deferred_commit_range(
+    fault_start: u64,
+    fault_len: u64,
+    mapping_start: u64,
+    mapping_end: u64,
+) -> MemoryRange {
+    let start = (fault_start & !(DEFERRED_COMMIT_CLUSTER_SIZE - 1)).max(mapping_start);
+    let fault_end = fault_start.saturating_add(fault_len);
+    let end = fault_end
+        .div_ceil(DEFERRED_COMMIT_CLUSTER_SIZE)
+        .saturating_mul(DEFERRED_COMMIT_CLUSTER_SIZE)
+        .min(mapping_end);
+    MemoryRange::new(start..end)
+}
+
 /// The soft-large-page granularity (2 MB) used for opportunistic large SLAT
 /// entries and the per-region first-fault bitmap.
 const LARGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
@@ -1037,6 +1106,23 @@ impl ResolveMemoryFault for VaMapper {
             ));
         }
         props.stats.guest_faults.increment();
+
+        #[cfg(windows)]
+        if props.private && props.deferred_commit {
+            props.stats.deferred_commit_faults.increment();
+            let range = deferred_commit_range(fault.start(), fault.len(), start, end + 1);
+            if let Err(err) = self
+                .inner
+                .mapping
+                .commit(range.start() as usize, range.len() as usize)
+            {
+                return Err(GuestMemoryBackingError::new(
+                    GuestMemoryErrorKind::Other,
+                    fault.start(),
+                    FaultError::Commit(range, err),
+                ));
+            }
+        }
         let soft_lp = props.soft_lp.as_ref();
 
         let full_window = fault.end() <= window_end && base >= start && window_end <= end + 1;

@@ -764,6 +764,7 @@ impl VmService {
                     mem: Some(MemoryConfig {
                         mem_size,
                         prefetch_memory: false,
+                        deferred_commit: false,
                         private_memory: false,
                         transparent_hugepages: true,
                         hugepages: false,
@@ -1429,6 +1430,7 @@ fn build_numa_topology(numa: vmservice::NumaConfig) -> anyhow::Result<(NumaTopol
             Some(MemoryConfig {
                 mem_size,
                 prefetch_memory: prefetch,
+                deferred_commit: false,
                 private_memory,
                 transparent_hugepages: transparent_hugepages.unwrap_or(true),
                 hugepages,

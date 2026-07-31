@@ -435,6 +435,7 @@ pub enum ArchTopologyConfig {
 pub struct MemoryConfig {
     pub mem_size: u64,
     pub prefetch_memory: bool,
+    pub deferred_commit: bool,
     pub private_memory: bool,
     pub transparent_hugepages: bool,
     pub hugepages: bool,

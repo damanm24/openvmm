@@ -382,6 +382,10 @@ pub struct MemoryPolicy {
     /// build-time populate, with its first-fault windows pre-marked attempted
     /// (rather than the lazy deferred-protect, fault-time path).
     pub prefetch: bool,
+    /// Whether private RAM is reserved without upfront commit and committed in
+    /// bounded clusters on first access. This is currently effective on
+    /// Windows; Unix already demand-pages anonymous memory.
+    pub deferred_commit: bool,
 }
 
 impl MemoryPolicy {
@@ -396,6 +400,7 @@ impl MemoryPolicy {
             numa_node: None,
             transparent_hugepages: false,
             prefetch: false,
+            deferred_commit: false,
         }
     }
 }
