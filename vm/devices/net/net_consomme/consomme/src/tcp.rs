@@ -28,6 +28,7 @@ use pal_async::driver::Driver;
 use pal_async::interest::PollEvents;
 use pal_async::socket::PollReady;
 use pal_async::socket::PolledSocket;
+use parking_lot::Mutex;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::ETHERNET_HEADER_LEN;
 use smoltcp::wire::EthernetFrame;
@@ -49,6 +50,8 @@ use socket2::SockAddr;
 use socket2::Socket;
 use socket2::Type;
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::collections::hash_map;
 use std::io;
 use std::io::ErrorKind;
@@ -60,8 +63,11 @@ use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
+use std::task::Wake;
+use std::task::Waker;
 use thiserror::Error;
 
 #[derive(InspectMut)]
@@ -70,6 +76,79 @@ pub(crate) struct Tcp {
     connections: HashMap<FourTuple, TcpConnection>,
     connection_params: ConnectionParams,
     aggregate_stats: TcpAggregateStats,
+    #[inspect(skip)]
+    ready: Arc<ReadyList>,
+}
+
+#[derive(Default)]
+struct ReadyList {
+    inner: Mutex<ReadyInner>,
+}
+
+#[derive(Default)]
+struct ReadyInner {
+    queue: VecDeque<FourTuple>,
+    queued: HashSet<FourTuple>,
+    outer: Option<Waker>,
+}
+
+impl ReadyList {
+    fn enqueue(&self, flow: FourTuple) {
+        let mut inner = self.inner.lock();
+        if inner.queued.insert(flow) {
+            inner.queue.push_back(flow);
+        }
+    }
+
+    fn wake(&self, flow: FourTuple) {
+        let outer = {
+            let mut inner = self.inner.lock();
+            if inner.queued.insert(flow) {
+                inner.queue.push_back(flow);
+                inner.outer.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(outer) = outer {
+            outer.wake();
+        }
+    }
+
+    fn set_outer(&self, waker: &Waker) {
+        let mut inner = self.inner.lock();
+        if !inner.outer.as_ref().is_some_and(|w| w.will_wake(waker)) {
+            inner.outer = Some(waker.clone());
+        }
+    }
+
+    fn drain(&self) -> VecDeque<FourTuple> {
+        let mut inner = self.inner.lock();
+        inner.queued.clear();
+        std::mem::take(&mut inner.queue)
+    }
+
+    fn waker_for(self: &Arc<Self>, flow: FourTuple) -> Waker {
+        Waker::from(Arc::new(ConnectionWaker {
+            ready: self.clone(),
+            flow,
+        }))
+    }
+}
+
+struct ConnectionWaker {
+    ready: Arc<ReadyList>,
+    flow: FourTuple,
+}
+
+impl Wake for ConnectionWaker {
+    fn wake(self: Arc<Self>) {
+        self.ready.wake(self.flow);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.ready.wake(self.flow);
+    }
 }
 
 pub(crate) struct TcpFlows(HashMap<FourTuple, TcpConnection>);
@@ -184,6 +263,7 @@ impl Tcp {
                 tx_buffer: NormalizedBufferBounds::from_bounds(tx_buffer),
             },
             aggregate_stats: TcpAggregateStats::default(),
+            ready: Arc::new(ReadyList::default()),
         }
     }
 
@@ -203,7 +283,11 @@ impl Tcp {
     }
 
     pub fn insert_flows(&mut self, flows: TcpFlows) {
-        self.connections.extend(flows.0);
+        for (flow, mut connection) in flows.0 {
+            connection.waker = None;
+            self.ready.enqueue(flow);
+            self.connections.insert(flow, connection);
+        }
     }
 
     pub fn loopback_port_mappings(&self) -> Vec<TcpLoopbackPortMapping> {
@@ -280,6 +364,8 @@ struct TcpConnection {
     backend: TcpBackend,
     #[inspect(flatten)]
     inner: TcpConnectionInner,
+    #[inspect(skip)]
+    waker: Option<Waker>,
 }
 
 #[derive(Inspect)]
@@ -535,6 +621,7 @@ impl<T: SocketDriver> Access<'_, T> {
     /// shard and emits the initial SYN toward the guest.
     pub fn insert_accepted_tcp(&mut self, accepted: AcceptedTcpConnection) {
         let AcceptedTcpConnection { socket, flow } = accepted;
+        let ready = self.inner.shard.tcp.ready.clone();
         match self.inner.shard.tcp.connections.entry(flow) {
             hash_map::Entry::Vacant(entry) => {
                 let mut sender = Sender {
@@ -570,6 +657,7 @@ impl<T: SocketDriver> Access<'_, T> {
                     .aggregate_stats
                     .connections_accepted
                     .increment();
+                ready.enqueue(flow);
             }
             hash_map::Entry::Occupied(_) => {
                 tracing::warn!(
@@ -582,10 +670,14 @@ impl<T: SocketDriver> Access<'_, T> {
     }
 
     pub(crate) fn poll_tcp_connections(&mut self, cx: &mut Context<'_>) {
+        let ready = self.inner.shard.tcp.ready.clone();
+        ready.set_outer(cx.waker());
+        let ready_connections = ready.drain();
+
         // Divide the bounded egress capacity among current flows. Without a
-        // quota, the first ready connection can fill the queue and starve
-        // every later connection in the HashMap iteration.
-        let connection_count = self.inner.shard.tcp.connections.len();
+        // quota, the first ready connection can fill the queue and starve the
+        // other ready connections.
+        let connection_count = ready_connections.len();
         let remaining_packets = self.inner.shard.egress.remaining_packet_capacity();
         let per_connection_packet_budget = if connection_count == 0 || remaining_packets == 0 {
             0
@@ -593,10 +685,17 @@ impl<T: SocketDriver> Access<'_, T> {
             (remaining_packets / connection_count).clamp(1, MAX_TCP_PACKETS_PER_INGEST)
         };
 
-        // Check for any new incoming data
-        self.inner.shard.tcp.connections.retain(|ft, conn| {
+        for flow in ready_connections {
+            let Some(conn) = self.inner.shard.tcp.connections.get_mut(&flow) else {
+                continue;
+            };
+            let conn_waker = conn
+                .waker
+                .get_or_insert_with(|| ready.waker_for(flow))
+                .clone();
+            let mut conn_cx = Context::from_waker(&conn_waker);
             let mut sender = Sender {
-                ft,
+                ft: &flow,
                 config: &self.inner.shard.config.immutable,
                 runtime: &mut self.inner.primary.runtime,
                 buffer: &mut self.inner.shard.buffer,
@@ -606,7 +705,7 @@ impl<T: SocketDriver> Access<'_, T> {
             let keep = match &mut conn.backend {
                 TcpBackend::Dns(dns_handler) => match &mut self.inner.primary.dns {
                     Some(dns) => conn.inner.poll_dns_backend(
-                        cx,
+                        &mut conn_cx,
                         &mut sender,
                         dns_handler,
                         dns,
@@ -618,21 +717,22 @@ impl<T: SocketDriver> Access<'_, T> {
                     }
                 },
                 TcpBackend::Socket(opt_socket) => conn.inner.poll_socket_backend(
-                    cx,
+                    &mut conn_cx,
                     &mut sender,
                     opt_socket,
                     per_connection_packet_budget,
                 ),
             };
-            if !keep {
+            let close_reason = (!keep).then_some(conn.inner.last_close_reason);
+            if let Some(close_reason) = close_reason {
                 self.inner
                     .shard
                     .tcp
                     .aggregate_stats
-                    .record_close(conn.inner.last_close_reason);
+                    .record_close(close_reason);
+                self.inner.shard.tcp.connections.remove(&flow);
             }
-            keep
-        })
+        }
     }
 
     pub(crate) fn refresh_tcp_driver(&mut self) {
@@ -661,6 +761,11 @@ impl<T: SocketDriver> Access<'_, T> {
                 }
             }
         });
+
+        let ready = self.inner.shard.tcp.ready.clone();
+        for flow in self.inner.shard.tcp.connections.keys() {
+            ready.enqueue(*flow);
+        }
     }
 
     pub(crate) fn handle_tcp(
@@ -704,6 +809,8 @@ impl<T: SocketDriver> Access<'_, T> {
             egress: &mut self.inner.shard.egress,
         };
 
+        let ready = self.inner.shard.tcp.ready.clone();
+        let mut mark_ready = false;
         match self.inner.shard.tcp.connections.entry(ft) {
             hash_map::Entry::Occupied(mut e) => {
                 let keep = e.get_mut().inner.handle_packet(&mut sender, &tcp)?;
@@ -724,6 +831,7 @@ impl<T: SocketDriver> Access<'_, T> {
                         AckPolicy::Defer,
                         MAX_TCP_PACKETS_PER_INGEST,
                     );
+                    mark_ready = true;
                 } else {
                     self.inner
                         .shard
@@ -804,10 +912,14 @@ impl<T: SocketDriver> Access<'_, T> {
                         .aggregate_stats
                         .connections_initiated
                         .increment();
+                    mark_ready = true;
                 } else {
                     // Ignore the packet.
                 }
             }
+        }
+        if mark_ready {
+            ready.enqueue(ft);
         }
         Ok(())
     }
@@ -1155,6 +1267,7 @@ impl TcpConnection {
         Ok(Self {
             backend: TcpBackend::Socket(Some(socket)),
             inner,
+            waker: None,
         })
     }
 
@@ -1177,6 +1290,7 @@ impl TcpConnection {
                 PolledSocket::new(sender.client.driver(), socket).map_err(DropReason::Io)?,
             )),
             inner,
+            waker: None,
         })
     }
 
@@ -1206,6 +1320,7 @@ impl TcpConnection {
         Ok(Self {
             backend: TcpBackend::Dns(DnsTcpHandler::new(flow)),
             inner,
+            waker: None,
         })
     }
 }
