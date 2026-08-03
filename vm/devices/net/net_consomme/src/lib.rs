@@ -473,20 +473,38 @@ impl ConsommeControl {
         ip_addr: Option<IpAddr>,
         host_port: u16,
         guest_port: u16,
-    ) -> Result<(), ConsommeMessageError> {
+    ) -> Result<u16, ConsommeMessageError> {
+        let (host_port_config, dynamic_port_recv) = if host_port == 0 {
+            let (send, recv) = mesh::oneshot();
+            (
+                net_backend_resources::consomme::HostPort::Dynamic(send),
+                Some(recv),
+            )
+        } else {
+            (
+                net_backend_resources::consomme::HostPort::Fixed(host_port),
+                None,
+            )
+        };
         self.send
             .call(
                 |rpc| ControlRequest::Port(ConsommeRequest::Bind(rpc)),
                 HostPortConfig {
                     protocol: protocol.into(),
                     host_address: ip_addr.map(net_backend_resources::consomme::HostIpAddress::from),
-                    host_port: net_backend_resources::consomme::HostPort::Fixed(host_port),
+                    host_port: host_port_config,
                     guest_port,
                 },
             )
             .await
             .map_err(ConsommeMessageError::Mesh)?
-            .map_err(ConsommeMessageError::Remote)
+            .map_err(ConsommeMessageError::Remote)?;
+        match dynamic_port_recv {
+            Some(recv) => recv
+                .await
+                .map_err(|err| ConsommeMessageError::Mesh(RpcError::Channel(err))),
+            None => Ok(host_port),
+        }
     }
 
     /// Unbinds a port previously reserved with bind_port(); `ip_addr` (or `None`)
@@ -1432,6 +1450,24 @@ mod tests {
                 .params()
                 .allow_host_local_access
         );
+    }
+
+    #[pal_async::async_test]
+    async fn control_dynamic_bind_returns_assigned_port(driver: DefaultDriver) {
+        let (mut endpoint, control) =
+            ConsommeEndpoint::new_dynamic(ConsommeConfig::new(), ConsommeParams::new().unwrap());
+        endpoint.shards[0].lock().driver = Some(Arc::new(driver));
+        let mut bind =
+            Box::pin(control.bind_port(IpProtocol::Tcp, Some(Ipv4Addr::LOCALHOST.into()), 0, 80));
+        let mut action = Box::pin(endpoint.wait_for_endpoint_action());
+        let mut cx = Context::from_waker(Waker::noop());
+
+        assert!(Pin::new(&mut bind).poll(&mut cx).is_pending());
+        assert!(Pin::new(&mut action).poll(&mut cx).is_pending());
+        let Poll::Ready(Ok(port)) = Pin::new(&mut bind).poll(&mut cx) else {
+            panic!("dynamic bind did not complete");
+        };
+        assert_ne!(port, 0);
     }
 
     #[test]
