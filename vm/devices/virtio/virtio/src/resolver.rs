@@ -49,7 +49,7 @@ impl AsyncResolveResource<PciDeviceHandleKind, VirtioPciDeviceHandle> for Virtio
                 resource.0,
                 VirtioResolveInput {
                     driver_source: input.driver_source,
-                    vp_count: None,
+                    vp_count: Some(input.vp_count),
                 },
             )
             .await

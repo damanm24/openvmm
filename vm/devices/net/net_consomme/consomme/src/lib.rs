@@ -35,7 +35,6 @@ pub use classifier::FlowKey;
 pub use classifier::PacketClass;
 pub use classifier::PacketDirection;
 pub use classifier::classify_frame;
-pub use classifier::random_steering_seed;
 
 mod unix;
 mod windows;
@@ -53,8 +52,8 @@ const DEFAULT_TCP_BUFFER_BOUNDS: TcpBufferBounds = TcpBufferBounds {
 use inspect::Inspect;
 use inspect::InspectMut;
 use inspect_counters::Counter;
-use parking_lot::Mutex;
 use pal_async::driver::Driver;
+use parking_lot::Mutex;
 use smoltcp::phy::Checksum;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::DhcpMessageType;
@@ -1152,10 +1151,10 @@ impl Consomme {
 impl FlowState {
     /// Repartitions transport flows using the same stable steering keys as the
     /// packet classifier.
-    pub fn repartition(self, shard_count: usize, seed: u64) -> Vec<Self> {
+    pub fn repartition(self, shard_count: usize) -> Vec<Self> {
         assert!(shard_count > 0);
-        let tcp = self.tcp.repartition(shard_count, seed);
-        let udp = self.udp.repartition(shard_count, seed);
+        let tcp = self.tcp.repartition(shard_count);
+        let udp = self.udp.repartition(shard_count);
         tcp.into_iter()
             .zip(udp)
             .map(|(tcp, udp)| Self { tcp, udp })

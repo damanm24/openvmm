@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use crate::ConsommeConfig;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
@@ -12,19 +14,6 @@ const IPV4_MIN_HEADER_LEN: usize = 20;
 const IPV6_HEADER_LEN: usize = 40;
 const TCP: u8 = 6;
 const UDP: u8 = 17;
-
-/// Creates an endpoint-local steering seed.
-pub fn random_steering_seed() -> u64 {
-    let mut bytes = [0; 8];
-    if let Err(error) = getrandom::fill(&mut bytes) {
-        tracelimit::warn_ratelimited!(
-            error = &error as &dyn std::error::Error,
-            "failed to generate Consomme steering seed"
-        );
-        return 0x6f70_656e_766d_6d21;
-    }
-    u64::from_ne_bytes(bytes)
-}
 
 /// The direction in which a guest-visible frame is being classified.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,43 +45,22 @@ pub enum FlowKey {
 }
 
 impl FlowKey {
-    /// Computes a stable endpoint-seeded hash for shard selection.
-    pub fn stable_hash(self, seed: u64) -> u64 {
-        let mut hash = 0xcbf29ce484222325 ^ seed;
-        let mut write = |bytes: &[u8]| {
-            for byte in bytes {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-        };
+    /// Computes a stable hash for shard selection.
+    pub fn stable_hash(self) -> u64 {
+        let mut hasher = rustc_hash::FxHasher::default();
         match self {
             FlowKey::Tcp { guest, remote } => {
-                write(&[TCP]);
-                write_socket(&mut write, guest);
-                write_socket(&mut write, remote);
+                TCP.hash(&mut hasher);
+                guest.hash(&mut hasher);
+                remote.hash(&mut hasher);
             }
             FlowKey::Udp { guest, .. } => {
-                write(&[UDP]);
-                write_socket(&mut write, guest);
+                UDP.hash(&mut hasher);
+                guest.hash(&mut hasher);
             }
         }
-        // FNV's low bits have poor avalanche behavior, which matters when a
-        // power-of-two shard count selects a queue with modulo. Finalize the
-        // stable hash so patterned ephemeral ports use all available shards.
-        hash ^= hash >> 33;
-        hash = hash.wrapping_mul(0xff51afd7ed558ccd);
-        hash ^= hash >> 33;
-        hash = hash.wrapping_mul(0xc4ceb9fe1a85ec53);
-        hash ^ (hash >> 33)
+        hasher.finish()
     }
-}
-
-fn write_socket(mut write: impl FnMut(&[u8]), socket: SocketAddr) {
-    match socket.ip() {
-        IpAddr::V4(ip) => write(&ip.octets()),
-        IpAddr::V6(ip) => write(&ip.octets()),
-    }
-    write(&socket.port().to_be_bytes());
 }
 
 /// The classification result for a frame.
@@ -170,10 +138,7 @@ fn is_local_subnet(remote: IpAddr, config: &ConsommeConfig) -> bool {
     }
 }
 
-fn parse_ipv4(
-    payload: &[u8],
-    segmentation_offload: bool,
-) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
+fn parse_ipv4(payload: &[u8], segmentation_offload: bool) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
     let header = payload.get(..IPV4_MIN_HEADER_LEN)?;
     if header[0] >> 4 != 4 {
         return None;
@@ -204,10 +169,7 @@ fn parse_ipv4(
     Some((header[9], src, dst, payload.get(header_len..total_len)?))
 }
 
-fn parse_ipv6(
-    payload: &[u8],
-    segmentation_offload: bool,
-) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
+fn parse_ipv6(payload: &[u8], segmentation_offload: bool) -> Option<(u8, IpAddr, IpAddr, &[u8])> {
     let header = payload.get(..IPV6_HEADER_LEN)?;
     if header[0] >> 4 != 6 {
         return None;
@@ -264,12 +226,7 @@ mod tests {
         let outbound = ipv4_frame(TCP, [10, 0, 0, 2], [1, 1, 1, 1], [0x12, 0x34, 0, 80]);
         let inbound = ipv4_frame(TCP, [1, 1, 1, 1], [10, 0, 0, 2], [0, 80, 0x12, 0x34]);
         assert_eq!(
-            classify_frame(
-                &outbound,
-                PacketDirection::GuestToRemote,
-                &config,
-                false
-            ),
+            classify_frame(&outbound, PacketDirection::GuestToRemote, &config, false),
             classify_frame(&inbound, PacketDirection::RemoteToGuest, &config, false)
         );
     }
@@ -324,12 +281,7 @@ mod tests {
             [0x12, 0x34, 0x56, 0x78],
         );
         assert_eq!(
-            classify_frame(
-                &frame,
-                PacketDirection::GuestToRemote,
-                &config,
-                false
-            ),
+            classify_frame(&frame, PacketDirection::GuestToRemote, &config, false),
             PacketClass::Control
         );
     }
@@ -344,12 +296,7 @@ mod tests {
             [0x12, 0x34, 0, 53],
         );
         assert_eq!(
-            classify_frame(
-                &frame,
-                PacketDirection::GuestToRemote,
-                &config,
-                false
-            ),
+            classify_frame(&frame, PacketDirection::GuestToRemote, &config, false),
             PacketClass::Control
         );
     }
@@ -365,7 +312,7 @@ mod tests {
             guest,
             remote: "8.8.8.8:53".parse().unwrap(),
         };
-        assert_eq!(first.stable_hash(7), second.stable_hash(7));
+        assert_eq!(first.stable_hash(), second.stable_hash());
     }
 
     #[test]
@@ -377,7 +324,7 @@ mod tests {
                 guest: SocketAddr::new(Ipv4Addr::new(10, 0, 0, 2).into(), port),
                 remote,
             };
-            counts[flow.stable_hash(7) as usize % counts.len()] += 1;
+            counts[flow.stable_hash() as usize % counts.len()] += 1;
         }
         assert!(counts.into_iter().all(|count| (8..=24).contains(&count)));
     }
@@ -402,12 +349,7 @@ mod tests {
         frame[16..18].copy_from_slice(&0u16.to_be_bytes());
 
         assert_eq!(
-            classify_frame(
-                &frame,
-                PacketDirection::GuestToRemote,
-                &config,
-                true
-            ),
+            classify_frame(&frame, PacketDirection::GuestToRemote, &config, true),
             PacketClass::Flow(FlowKey::Tcp {
                 guest: "10.0.0.2:4660".parse().unwrap(),
                 remote: "1.1.1.1:80".parse().unwrap(),

@@ -895,6 +895,7 @@ dependencies = [
  "pal_async",
  "parking_lot",
  "resolv-conf",
+ "rustc-hash 2.1.1",
  "slab",
  "smoltcp",
  "socket2",

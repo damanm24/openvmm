@@ -2475,6 +2475,7 @@ impl InitializedVm {
                 vmm_core::device_builder::build_pcie_device(
                     vmm_core::device_builder::PciDeviceResolveContext {
                         driver_source,
+                        vp_count: processor_topology.vp_count(),
                         resolver,
                         resource: dev_cfg.resource,
                         doorbell_registration: partition
@@ -2660,6 +2661,7 @@ impl InitializedVm {
                     vmm_core::device_builder::build_vpci_device(
                         vmm_core::device_builder::PciDeviceResolveContext {
                             driver_source: &driver_source,
+                            vp_count: processor_topology.vp_count(),
                             resolver: &resolver,
                             resource: dev_cfg.resource,
                             doorbell_registration: partition
@@ -3691,6 +3693,7 @@ impl LoadedVm {
                                                 dma_target: &pcie_ctx.dma_target,
                                                 register_mmio,
                                                 driver_source: &self.inner.driver_source,
+                                                vp_count: self.inner.processor_topology.vp_count(),
                                                 doorbell_registration: self.inner.partition.clone().into_doorbell_registration(Vtl::Vtl0),
                                                 shared_mem_mapper: None,
                                             },

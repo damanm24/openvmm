@@ -235,7 +235,6 @@ struct EndpointShard {
 struct EndpointControl {
     port_forwards: Vec<PortForwardConfig>,
     active_shards: usize,
-    steering_seed: u64,
 }
 
 #[derive(Inspect, Default)]
@@ -340,7 +339,6 @@ impl ConsommeEndpoint {
             control: EndpointControl {
                 port_forwards: ports,
                 active_shards: 1,
-                steering_seed: consomme::random_steering_seed(),
             },
             config,
             local_recv,
@@ -377,11 +375,7 @@ impl ConsommeEndpoint {
                 source.consomme.discard_egress();
                 source.consomme.drain_flows()
             };
-            for (target, flows) in flows
-                .repartition(active_shards, self.control.steering_seed)
-                .into_iter()
-                .enumerate()
-            {
+            for (target, flows) in flows.repartition(active_shards).into_iter().enumerate() {
                 self.shards[target].lock().consomme.insert_flows(flows);
             }
         }
@@ -397,8 +391,7 @@ impl ConsommeEndpoint {
 impl InspectMut for ConsommeEndpoint {
     fn inspect_mut(&mut self, req: inspect::Request<'_>) {
         let mut resp = req.respond();
-        resp.field("active_shards", self.control.active_shards)
-            .field("steering_seed", self.control.steering_seed);
+        resp.field("active_shards", self.control.active_shards);
         for (index, shard) in self
             .shards
             .iter()
@@ -583,7 +576,6 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                 config: self.config.clone(),
                 queue_index,
                 active_shards,
-                steering_seed: self.control.steering_seed,
                 state: QueueState {
                     rx_avail: VecDeque::new(),
                     rx_ready: VecDeque::new(),
@@ -754,7 +746,6 @@ pub struct ConsommeQueue {
     config: Arc<ConsommeConfig>,
     queue_index: usize,
     active_shards: usize,
-    steering_seed: u64,
     state: QueueState,
     stats: Stats,
     driver: Arc<dyn Driver>,
@@ -786,7 +777,7 @@ impl ConsommeQueue {
     }
 
     fn flow_target(&self, flow: consomme::FlowKey) -> usize {
-        flow.stable_hash(self.steering_seed) as usize % self.active_shards
+        flow.stable_hash() as usize % self.active_shards
     }
 
     /// Ingests a frame that has already been copied out of guest memory.
@@ -841,9 +832,8 @@ impl ConsommeQueue {
             .take(self.active_shards)
             .flat_map(|shard| shard.lock().consomme.tcp_loopback_port_mappings())
             .collect::<Vec<_>>();
-        let accepted = self.with_consomme_no_pool(|consomme| {
-            consomme.poll_tcp_listeners(cx, &loopback_mappings)
-        });
+        let accepted = self
+            .with_consomme_no_pool(|consomme| consomme.poll_tcp_listeners(cx, &loopback_mappings));
         for accepted in accepted {
             let target = self.flow_target(accepted.flow_key());
             let mut state = self.lock_shard(target);
@@ -1209,7 +1199,6 @@ mod tests {
             config: endpoint.config.clone(),
             queue_index: 0,
             active_shards: 1,
-            steering_seed: endpoint.control.steering_seed,
             state: QueueState {
                 rx_avail: VecDeque::new(),
                 rx_ready: VecDeque::new(),

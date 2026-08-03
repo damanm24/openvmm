@@ -37,6 +37,8 @@ pub struct ResolvePciDeviceHandleParams<'a> {
     pub register_mmio: &'a mut (dyn RegisterMmioIntercept + Send),
     /// The VM's task driver source.
     pub driver_source: &'a VmTaskDriverSource,
+    /// The number of virtual processors in the VM.
+    pub vp_count: u32,
     /// An object with which to register doorbell regions.
     pub doorbell_registration: Option<Arc<dyn DoorbellRegistration>>,
     /// An object with which to register shared memory regions.

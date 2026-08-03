@@ -117,7 +117,7 @@ impl Udp {
 }
 
 impl UdpFlows {
-    pub fn repartition(self, shard_count: usize, seed: u64) -> Vec<Self> {
+    pub fn repartition(self, shard_count: usize) -> Vec<Self> {
         let mut shards = (0..shard_count)
             .map(|_| Self(HashMap::new()))
             .collect::<Vec<_>>();
@@ -126,7 +126,7 @@ impl UdpFlows {
                 guest,
                 remote: guest,
             };
-            let shard = key.stable_hash(seed) as usize % shard_count;
+            let shard = key.stable_hash() as usize % shard_count;
             shards[shard].0.insert(guest, connection);
         }
         shards

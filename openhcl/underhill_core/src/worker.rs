@@ -3453,6 +3453,7 @@ async fn new_underhill_vm(
             vmm_core::device_builder::build_vpci_device(
                 vmm_core::device_builder::PciDeviceResolveContext {
                     driver_source: &driver_source,
+                    vp_count: processor_topology.vp_count(),
                     resolver: &resolver,
                     resource,
                     doorbell_registration: None,

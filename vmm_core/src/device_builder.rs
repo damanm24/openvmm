@@ -27,6 +27,8 @@ pub use vpci::bus::VpciBusConfig;
 pub struct PciDeviceResolveContext<'a> {
     /// The VM's task driver source.
     pub driver_source: &'a VmTaskDriverSource,
+    /// The number of virtual processors in the VM.
+    pub vp_count: u32,
     /// The resource resolver.
     pub resolver: &'a ResourceResolver,
     /// The device resource to resolve.
@@ -137,6 +139,7 @@ pub async fn resolve_and_add_pci_device(
                         dma_target,
                         register_mmio: &mut services.register_mmio(),
                         driver_source: ctx.driver_source,
+                        vp_count: ctx.vp_count,
                         doorbell_registration: ctx.doorbell_registration,
                         shared_mem_mapper: ctx.shared_mem_mapper,
                     },

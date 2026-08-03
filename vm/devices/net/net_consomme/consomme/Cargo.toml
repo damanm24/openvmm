@@ -12,6 +12,7 @@ futures.workspace = true
 getrandom.workspace = true
 heapless.workspace = true
 parking_lot.workspace = true
+rustc-hash.workspace = true
 smoltcp = { workspace = true, features = [ "proto-ipv4", "proto-ipv6", "proto-dns", "medium-ethernet", "socket-raw", "std", "proto-dhcpv4" ] }
 socket2.workspace = true
 thiserror.workspace = true
