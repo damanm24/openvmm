@@ -855,6 +855,40 @@ impl<T: SocketDriver> Access<'_, T> {
     }
 }
 
+/// Computes the TCP pseudo-header checksum used to seed a TSO segment's
+/// checksum field for `VIRTIO_NET_HDR_F_NEEDS_CSUM`.
+fn tcp_pseudo_header_checksum(src: &IpAddress, dst: &IpAddress, length: u16) -> u16 {
+    fn sum_bytes(mut data: &[u8], mut accum: u32) -> u32 {
+        while data.len() >= 2 {
+            accum += u16::from_be_bytes([data[0], data[1]]) as u32;
+            data = &data[2..];
+        }
+        if let Some(&byte) = data.first() {
+            accum += (byte as u32) << 8;
+        }
+        accum
+    }
+
+    let mut accum = 0u32;
+    match (src, dst) {
+        (IpAddress::Ipv4(src), IpAddress::Ipv4(dst)) => {
+            accum = sum_bytes(&src.octets(), accum);
+            accum = sum_bytes(&dst.octets(), accum);
+        }
+        (IpAddress::Ipv6(src), IpAddress::Ipv6(dst)) => {
+            accum = sum_bytes(&src.octets(), accum);
+            accum = sum_bytes(&dst.octets(), accum);
+        }
+        _ => unreachable!("mismatched IP address families"),
+    }
+    accum += u8::from(IpProtocol::Tcp) as u32;
+    accum += length as u32;
+    while accum >> 16 != 0 {
+        accum = (accum & 0xffff) + (accum >> 16);
+    }
+    accum as u16
+}
+
 struct Sender<'a, T> {
     ft: &'a FourTuple,
     client: &'a mut T,
@@ -865,7 +899,12 @@ struct Sender<'a, T> {
 }
 
 impl<T: SocketDriver> Sender<'_, T> {
-    fn send_packet(&mut self, tcp: &TcpRepr<'_>, payload: Option<ring::View<'_>>) {
+    fn send_packet(
+        &mut self,
+        tcp: &TcpRepr<'_>,
+        payload: Option<ring::View<'_>>,
+        tso_mss: Option<u16>,
+    ) {
         let payload_len = payload.as_ref().map_or(0, |p| p.len());
         let buffer = &mut *self.buffer;
         let mut eth_packet = EthernetFrame::new_unchecked(&mut buffer[..]);
@@ -914,9 +953,17 @@ impl<T: SocketDriver> Sender<'_, T> {
             &ChecksumCapabilities::ignored(),
         );
 
-        let checksum_state = match self.ft.dst {
-            SocketAddr::V4(_) => ChecksumState::TCP4,
-            SocketAddr::V6(_) => ChecksumState::TCP6,
+        let checksum_state = match (self.ft.dst, tso_mss) {
+            (SocketAddr::V4(_), Some(mss)) => ChecksumState {
+                tso: Some(mss),
+                ..ChecksumState::TCP4
+            },
+            (SocketAddr::V6(_), Some(mss)) => ChecksumState {
+                tso: Some(mss),
+                ..ChecksumState::TCP6
+            },
+            (SocketAddr::V4(_), None) => ChecksumState::TCP4,
+            (SocketAddr::V6(_), None) => ChecksumState::TCP6,
         };
         let n = ETHERNET_HEADER_LEN + ip_total_len;
 
@@ -938,24 +985,32 @@ impl<T: SocketDriver> Sender<'_, T> {
         let (a, b) = payload.as_slices();
         let tcp_header_len = tcp_packet.header_len() as usize;
         tcp_packet.set_checksum(0);
-        // The TCP header length is a multiple of 4, so the header and `a` are
-        // 16-bit aligned; `b` shifts by a byte only when `a` has odd length, in
-        // which case its partial checksum is byte-swapped.
-        let checksum = !checksum::combine(&[
-            checksum::pseudo_header(
+        let checksum = if tso_mss.is_some() {
+            tcp_pseudo_header_checksum(
                 &src_ip_addr,
                 &dst_ip_addr,
-                IpProtocol::Tcp,
-                (tcp_header_len + payload_len) as u32,
-            ),
-            checksum::data(&tcp_packet.as_ref()[..tcp_header_len]),
-            checksum::data(a),
-            if a.len() % 2 == 0 {
-                checksum::data(b)
-            } else {
-                checksum::data(b).swap_bytes()
-            },
-        ]);
+                (tcp_header_len + payload_len) as u16,
+            )
+        } else {
+            // The TCP header length is a multiple of 4, so the header and `a`
+            // are 16-bit aligned; `b` shifts by a byte only when `a` has odd
+            // length, in which case its partial checksum is byte-swapped.
+            !checksum::combine(&[
+                checksum::pseudo_header(
+                    &src_ip_addr,
+                    &dst_ip_addr,
+                    IpProtocol::Tcp,
+                    (tcp_header_len + payload_len) as u32,
+                ),
+                checksum::data(&tcp_packet.as_ref()[..tcp_header_len]),
+                checksum::data(a),
+                if a.len() % 2 == 0 {
+                    checksum::data(b)
+                } else {
+                    checksum::data(b).swap_bytes()
+                },
+            ])
+        };
         tcp_packet.set_checksum(checksum);
 
         let header_len = n - payload_len;
@@ -986,7 +1041,7 @@ impl<T: SocketDriver> Sender<'_, T> {
 
         trace_tcp_packet(self.ft, &tcp, 0, "rst xmit");
 
-        self.send_packet(&tcp, None);
+        self.send_packet(&tcp, None, None);
     }
 }
 
@@ -1575,7 +1630,7 @@ impl TcpConnectionInner {
             payload: &[],
         };
 
-        sender.send_packet(&tcp, None);
+        sender.send_packet(&tcp, None, None);
         self.tx_send += 1;
         if ack_number.is_some() {
             // The guest reads the SYN-ACK window unscaled, so record that value.
@@ -1608,13 +1663,15 @@ impl TcpConnectionInner {
             self.stats.tx_blocked_window_full.increment();
         }
 
+        let ipv6 = matches!(sender.ft.dst, SocketAddr::V6(_));
+        let lro_supported = sender.egress.lro_supported(ipv6);
         let mut packets_sent = 0;
         while self.needs_ack || self.tx_send < tx_done {
             if packets_sent == packet_budget {
                 self.stats.tx_poll_budget_exhausted.increment();
                 break;
             }
-            let rx_mtu = sender.egress.rx_mtu();
+            let rx_mtu = sender.egress.tcp_rx_mtu(ipv6);
             if rx_mtu == 0 {
                 // Out of receive buffers.
                 self.stats.tx_blocked_no_rx_mtu.increment();
@@ -1643,7 +1700,7 @@ impl TcpConnectionInner {
             // exceeding:
             // 1. The available buffer length.
             // 2. The current window.
-            // 3. The configured maximum segment size.
+            // 3. The configured maximum segment size when LRO is unavailable.
             // 4. The client MTU.
             let tx_segment_end = {
                 let ip_header_len = match sender.ft.dst {
@@ -1652,11 +1709,20 @@ impl TcpConnectionInner {
                 };
                 let header_len = ETHERNET_HEADER_LEN + ip_header_len + tcp.header_len();
                 let mtu = rx_mtu.min(sender.buffer.len());
+                let max_payload = mtu.saturating_sub(header_len);
+                if max_payload == 0 {
+                    break;
+                }
+                let mss_limit = if lro_supported && max_payload > self.tx_mss {
+                    tx_next + max_payload
+                } else {
+                    tx_next + self.tx_mss
+                };
                 seq_min([
                     tx_payload_end,
                     tx_window_end,
-                    tx_next + self.tx_mss,
-                    tx_next + (mtu - header_len),
+                    mss_limit,
+                    tx_next + max_payload,
                 ])
             };
 
@@ -1707,7 +1773,12 @@ impl TcpConnectionInner {
                 .tx_buffer
                 .view(payload_start..payload_start + payload_len);
 
-            sender.send_packet(&tcp, Some(payload));
+            let tso_mss = if lro_supported && payload_len > self.tx_mss {
+                Some(self.tx_mss.min(u16::MAX as usize) as u16)
+            } else {
+                None
+            };
+            sender.send_packet(&tcp, Some(payload), tso_mss);
             packets_sent += 1;
             self.stats.pkts_tx_to_guest.increment();
             self.stats.bytes_tx_to_guest.add(payload_len as u64);
@@ -1764,7 +1835,7 @@ impl TcpConnectionInner {
 
         trace_tcp_packet(sender.ft, &tcp, 0, "ack");
 
-        sender.send_packet(&tcp, None);
+        sender.send_packet(&tcp, None, None);
         self.stats.standalone_acks_tx.increment();
         self.record_advertised_window(window_len);
     }

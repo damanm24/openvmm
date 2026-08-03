@@ -214,6 +214,8 @@ struct EgressQueue {
     recycled: Vec<Vec<u8>>,
     bytes: usize,
     stats: EgressStats,
+    lro4: bool,
+    lro6: bool,
 }
 
 impl EgressQueue {
@@ -227,6 +229,19 @@ impl EgressQueue {
         } else {
             MIN_MTU
         }
+    }
+
+    fn tcp_rx_mtu(&self, ipv6: bool) -> usize {
+        let mtu = self.rx_mtu();
+        if mtu != 0 && self.lro_supported(ipv6) {
+            usize::MAX
+        } else {
+            mtu
+        }
+    }
+
+    fn lro_supported(&self, ipv6: bool) -> bool {
+        if ipv6 { self.lro6 } else { self.lro4 }
     }
 
     fn push(&mut self, data: &[u8], checksum: ChecksumState) {
@@ -1126,6 +1141,12 @@ impl Consomme {
         while let Some(packet) = self.shard.egress.pop() {
             self.shard.egress.recycle(packet);
         }
+    }
+
+    /// Sets whether the frontend can receive coalesced TCP segments.
+    pub fn set_lro_support(&mut self, lro4: bool, lro6: bool) {
+        self.shard.egress.lro4 = lro4;
+        self.shard.egress.lro6 = lro6;
     }
 
     /// Removes all movable TCP and UDP flow state from this shard.

@@ -21,6 +21,7 @@ use mesh::rpc::RpcError;
 use mesh::rpc::RpcSend;
 use net_backend::BufferAccess;
 use net_backend::EndpointAction;
+use net_backend::L3Protocol;
 use net_backend::L4Protocol;
 use net_backend::QueueConfig;
 use net_backend::RssConfig;
@@ -545,6 +546,15 @@ impl net_backend::Endpoint for ConsommeEndpoint {
         "consomme"
     }
 
+    fn set_rx_offload_support(&mut self, support: net_backend::RxOffloadSupport) {
+        for shard in self.shards.iter() {
+            shard
+                .lock()
+                .consomme
+                .set_lro_support(support.lro4, support.lro6);
+        }
+    }
+
     async fn get_queues(
         &mut self,
         config: Vec<QueueConfig>,
@@ -871,17 +881,23 @@ impl ConsommeQueue {
             let checksum = packet.checksum();
             let max = pool.capacity(rx_id) as usize;
             if packet.data().len() <= max {
+                let (l3_protocol, l2_len, l3_len, l4_len) =
+                    parse_rx_header_lengths(packet.data(), &checksum);
                 pool.write_packet_segments(
                     rx_id,
                     &RxMetadata {
                         offset: 0,
                         len: packet.data().len(),
-                        ip_checksum: if checksum.ipv4 {
+                        ip_checksum: if checksum.tso.is_some() {
+                            RxChecksumState::Unknown
+                        } else if checksum.ipv4 {
                             RxChecksumState::Good
                         } else {
                             RxChecksumState::Unknown
                         },
-                        l4_checksum: if checksum.tcp || checksum.udp {
+                        l4_checksum: if checksum.tso.is_some() {
+                            RxChecksumState::Unknown
+                        } else if checksum.tcp || checksum.udp {
                             RxChecksumState::Good
                         } else {
                             RxChecksumState::Unknown
@@ -893,6 +909,11 @@ impl ConsommeQueue {
                         } else {
                             L4Protocol::Unknown
                         },
+                        l3_protocol,
+                        l2_len,
+                        l3_len,
+                        l4_len,
+                        gso_size: checksum.tso.unwrap_or(0),
                         vlan: None,
                     },
                     &[packet.data()],
@@ -1150,6 +1171,47 @@ struct QueueState {
     /// Reusable scratch buffer for assembling outbound packets from guest memory.
     /// The max TSO size is 64KB which limits the maximum size of the scratch buffer.
     tx_scratch: Vec<u8>,
+}
+
+fn parse_rx_header_lengths(data: &[u8], checksum: &ChecksumState) -> (L3Protocol, u8, u16, u8) {
+    const ETHERTYPE_IPV4: u16 = 0x0800;
+    const ETHERTYPE_IPV6: u16 = 0x86dd;
+
+    if data.len() < 14 {
+        return (L3Protocol::Unknown, 0, 0, 0);
+    }
+
+    let ethertype = u16::from_be_bytes([data[12], data[13]]);
+    let l2_len = 14;
+    match ethertype {
+        ETHERTYPE_IPV4 if checksum.ipv4 && data.len() >= usize::from(l2_len) + 20 => {
+            let l3_len = u16::from(data[usize::from(l2_len)] & 0x0f) * 4;
+            let l3_len = l3_len.max(20);
+            if usize::from(l2_len) + usize::from(l3_len) > data.len() {
+                return (L3Protocol::Unknown, 0, 0, 0);
+            }
+            let l4_start = usize::from(l2_len) + usize::from(l3_len);
+            let l4_len = parse_tcp_l4_len(data, checksum, l4_start);
+            (L3Protocol::Ipv4, l2_len, l3_len, l4_len)
+        }
+        ETHERTYPE_IPV6 if data.len() >= usize::from(l2_len) + 40 => {
+            let l3_len = 40;
+            let l4_start = usize::from(l2_len) + usize::from(l3_len);
+            let l4_len = parse_tcp_l4_len(data, checksum, l4_start);
+            (L3Protocol::Ipv6, l2_len, l3_len, l4_len)
+        }
+        _ => (L3Protocol::Unknown, 0, 0, 0),
+    }
+}
+
+fn parse_tcp_l4_len(data: &[u8], checksum: &ChecksumState, l4_start: usize) -> u8 {
+    if checksum.tcp && data.len() >= l4_start + 20 {
+        let l4_len = (data[l4_start + 12] >> 4).saturating_mul(4).max(20);
+        if l4_start + usize::from(l4_len) <= data.len() {
+            return l4_len;
+        }
+    }
+    0
 }
 
 #[derive(Inspect, Default)]
