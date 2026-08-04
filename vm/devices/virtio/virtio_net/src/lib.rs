@@ -293,8 +293,6 @@ impl VirtioDevice for Device {
             .with_status(true)
             .with_csum(csum)
             .with_guest_csum(true)
-            .with_guest_tso4(true)
-            .with_guest_tso6(true)
             .with_host_tso4(host_tso)
             .with_host_tso6(host_tso)
             .with_ctrl_vq(self.adapter.max_queue_pairs > 1)
