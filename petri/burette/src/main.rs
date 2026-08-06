@@ -36,8 +36,8 @@ use std::sync::OnceLock;
 use tests::boot_time::BootProfile;
 use tests::disk_io::DiskBackend;
 use tests::network::NetBackend;
-use tests::network::NicBackend;
 use tests::network::NetworkWorkload;
+use tests::network::NicBackend;
 
 /// Available performance tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

@@ -234,9 +234,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let mut post_test_hooks = Vec::new();
         let log_source = crate::log_source();
         let test_name = match (self.backend, self.workload) {
-            (NetBackend::Consomme, NetworkWorkload::SingleConnection) => {
-                "network_consomme_single"
-            }
+            (NetBackend::Consomme, NetworkWorkload::SingleConnection) => "network_consomme_single",
             (NetBackend::Consomme, NetworkWorkload::ParallelConnections) => {
                 "network_consomme_parallel"
             }
@@ -372,129 +370,128 @@ impl crate::harness::WarmPerfTest for NetworkTest {
 
         if self.workload == NetworkWorkload::SingleConnection {
             // TCP TX (guest sends to host)
-        let name = format!("{prefix}_tcp_tx_gbps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port,
-                &name,
-                IperfMode::TcpTx,
-                1,
-                LONG_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("TCP TX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
+            let name = format!("{prefix}_tcp_tx_gbps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port,
+                    &name,
+                    IperfMode::TcpTx,
+                    1,
+                    LONG_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("TCP TX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
 
-        // TCP RX (host sends to guest, -R flag)
-        let name = format!("{prefix}_tcp_rx_gbps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port + 1,
-                &name,
-                IperfMode::TcpRx,
-                1,
-                LONG_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("TCP RX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
+            // TCP RX (host sends to guest, -R flag)
+            let name = format!("{prefix}_tcp_rx_gbps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port + 1,
+                    &name,
+                    IperfMode::TcpRx,
+                    1,
+                    LONG_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("TCP RX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
 
-        // UDP TX (guest sends to host)
-        let name = format!("{prefix}_udp_tx_pps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port + 2,
-                &name,
-                IperfMode::UdpTx,
-                1,
-                LONG_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("UDP TX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
-
+            // UDP TX (guest sends to host)
+            let name = format!("{prefix}_udp_tx_pps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port + 2,
+                    &name,
+                    IperfMode::UdpTx,
+                    1,
+                    LONG_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("UDP TX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
         } else {
             // Long-lived TCP connections, scaled to the VM's vCPU count.
-        let name = format!("{prefix}_tcp_tx_long_lived_gbps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port + 3,
-                &name,
-                IperfMode::TcpTx,
-                LONG_LIVED_CONNECTION_COUNT,
-                LONG_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("long-lived TCP TX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
+            let name = format!("{prefix}_tcp_tx_long_lived_gbps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port + 3,
+                    &name,
+                    IperfMode::TcpTx,
+                    LONG_LIVED_CONNECTION_COUNT,
+                    LONG_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("long-lived TCP TX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
 
-        let name = format!("{prefix}_tcp_rx_long_lived_gbps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port + 4,
-                &name,
-                IperfMode::TcpRx,
-                LONG_LIVED_CONNECTION_COUNT,
-                LONG_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("long-lived TCP RX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
+            let name = format!("{prefix}_tcp_rx_long_lived_gbps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port + 4,
+                    &name,
+                    IperfMode::TcpRx,
+                    LONG_LIVED_CONNECTION_COUNT,
+                    LONG_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("long-lived TCP RX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
 
-        // A larger burst of short-lived TCP connections.
-        let name = format!("{prefix}_tcp_tx_short_lived_gbps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port + 5,
-                &name,
-                IperfMode::TcpTx,
-                SHORT_LIVED_CONNECTION_COUNT,
-                SHORT_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("short-lived TCP TX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
+            // A larger burst of short-lived TCP connections.
+            let name = format!("{prefix}_tcp_tx_short_lived_gbps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port + 5,
+                    &name,
+                    IperfMode::TcpTx,
+                    SHORT_LIVED_CONNECTION_COUNT,
+                    SHORT_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("short-lived TCP TX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
 
-        let name = format!("{prefix}_tcp_rx_short_lived_gbps");
-        recorder.start(&name)?;
-        let m = self
-            .run_iperf3(
-                state,
-                host_ip,
-                base_port + 6,
-                &name,
-                IperfMode::TcpRx,
-                SHORT_LIVED_CONNECTION_COUNT,
-                SHORT_LIVED_DURATION_SECONDS,
-            )
-            .await
-            .context("short-lived TCP RX test failed")?;
-        recorder.stop()?;
-        metrics.push(m);
+            let name = format!("{prefix}_tcp_rx_short_lived_gbps");
+            recorder.start(&name)?;
+            let m = self
+                .run_iperf3(
+                    state,
+                    host_ip,
+                    base_port + 6,
+                    &name,
+                    IperfMode::TcpRx,
+                    SHORT_LIVED_CONNECTION_COUNT,
+                    SHORT_LIVED_DURATION_SECONDS,
+                )
+                .await
+                .context("short-lived TCP RX test failed")?;
+            recorder.stop()?;
+            metrics.push(m);
         }
 
         Ok(metrics)
