@@ -37,6 +37,7 @@ use tests::boot_time::BootProfile;
 use tests::disk_io::DiskBackend;
 use tests::network::NetBackend;
 use tests::network::NicBackend;
+use tests::network::NetworkWorkload;
 
 /// Available performance tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -321,21 +322,27 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                 all_stats.extend(stats);
             }
             TestName::Network => {
-                let test = tests::network::NetworkTest {
-                    diag: args.diag,
-                    nic: args.nic,
-                    backend: args.backend,
-                    perf_dir: args.perf_dir.clone(),
-                };
-
                 let artifacts = resolve_artifacts(tests::network::register_artifacts)?;
                 let resolver = petri::ArtifactResolver::resolver(&artifacts);
 
-                let stats = pal_async::DefaultPool::run_with(async |driver| {
-                    harness::run_warm_test(&test, &resolver, &driver, args.iterations).await
-                })
-                .context("network test failed")?;
-                all_stats.extend(stats);
+                for workload in [
+                    NetworkWorkload::SingleConnection,
+                    NetworkWorkload::ParallelConnections,
+                ] {
+                    let test = tests::network::NetworkTest {
+                        diag: args.diag,
+                        nic: args.nic,
+                        backend: args.backend,
+                        workload,
+                        perf_dir: args.perf_dir.clone(),
+                    };
+
+                    let stats = pal_async::DefaultPool::run_with(async |driver| {
+                        harness::run_warm_test(&test, &resolver, &driver, args.iterations).await
+                    })
+                    .context("network test failed")?;
+                    all_stats.extend(stats);
+                }
             }
             TestName::DiskIo => {
                 let test = tests::disk_io::DiskIoTest {

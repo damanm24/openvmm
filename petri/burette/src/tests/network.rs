@@ -22,9 +22,11 @@ use petri::pipette::cmd;
 
 use petri_artifacts_common::tags::MachineArch;
 
-const VCPU_COUNT: u32 = 2;
+const SINGLE_CONNECTION_VCPU_COUNT: u32 = 2;
+const PARALLEL_CONNECTION_VCPU_COUNT: u32 = 8;
 const LONG_LIVED_CONNECTIONS_PER_VCPU: u32 = 8;
-const LONG_LIVED_CONNECTION_COUNT: u32 = VCPU_COUNT * LONG_LIVED_CONNECTIONS_PER_VCPU;
+const LONG_LIVED_CONNECTION_COUNT: u32 =
+    PARALLEL_CONNECTION_VCPU_COUNT * LONG_LIVED_CONNECTIONS_PER_VCPU;
 const SHORT_LIVED_CONNECTION_COUNT: u32 = 64;
 const LONG_LIVED_DURATION_SECONDS: u32 = 10;
 const SHORT_LIVED_DURATION_SECONDS: u32 = 1;
@@ -55,6 +57,15 @@ pub enum NetBackend {
     Tap,
 }
 
+/// Which connection workload to run in a VM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkWorkload {
+    /// Single-connection TCP and UDP throughput.
+    SingleConnection,
+    /// Multi-connection long- and short-lived TCP throughput.
+    ParallelConnections,
+}
+
 /// Network throughput test via iperf3.
 pub struct NetworkTest {
     /// Print guest serial output and take framebuffer screenshots.
@@ -63,6 +74,8 @@ pub struct NetworkTest {
     pub nic: NicBackend,
     /// Which network backend to use.
     pub backend: NetBackend,
+    /// Which connection workload to run.
+    pub workload: NetworkWorkload,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<std::path::PathBuf>,
 }
@@ -111,11 +124,31 @@ impl crate::harness::WarmPerfTest for NetworkTest {
     type State = NetworkTestState;
 
     fn name(&self) -> &str {
-        match (self.backend, self.nic) {
-            (NetBackend::Consomme, NicBackend::Vmbus) => "network_vmbus",
-            (NetBackend::Consomme, NicBackend::VirtioNet) => "network_virtio",
-            (NetBackend::Tap, NicBackend::Vmbus) => "network_tap_vmbus",
-            (NetBackend::Tap, NicBackend::VirtioNet) => "network_tap_virtio",
+        match (self.backend, self.nic, self.workload) {
+            (NetBackend::Consomme, NicBackend::Vmbus, NetworkWorkload::SingleConnection) => {
+                "network_vmbus_single"
+            }
+            (NetBackend::Consomme, NicBackend::Vmbus, NetworkWorkload::ParallelConnections) => {
+                "network_vmbus_parallel"
+            }
+            (NetBackend::Consomme, NicBackend::VirtioNet, NetworkWorkload::SingleConnection) => {
+                "network_virtio_single"
+            }
+            (NetBackend::Consomme, NicBackend::VirtioNet, NetworkWorkload::ParallelConnections) => {
+                "network_virtio_parallel"
+            }
+            (NetBackend::Tap, NicBackend::Vmbus, NetworkWorkload::SingleConnection) => {
+                "network_tap_vmbus_single"
+            }
+            (NetBackend::Tap, NicBackend::Vmbus, NetworkWorkload::ParallelConnections) => {
+                "network_tap_vmbus_parallel"
+            }
+            (NetBackend::Tap, NicBackend::VirtioNet, NetworkWorkload::SingleConnection) => {
+                "network_tap_virtio_single"
+            }
+            (NetBackend::Tap, NicBackend::VirtioNet, NetworkWorkload::ParallelConnections) => {
+                "network_tap_virtio_parallel"
+            }
         }
     }
 
@@ -200,9 +233,15 @@ impl crate::harness::WarmPerfTest for NetworkTest {
 
         let mut post_test_hooks = Vec::new();
         let log_source = crate::log_source();
-        let test_name = match self.backend {
-            NetBackend::Consomme => "network_consomme",
-            NetBackend::Tap => "network_tap",
+        let test_name = match (self.backend, self.workload) {
+            (NetBackend::Consomme, NetworkWorkload::SingleConnection) => {
+                "network_consomme_single"
+            }
+            (NetBackend::Consomme, NetworkWorkload::ParallelConnections) => {
+                "network_consomme_parallel"
+            }
+            (NetBackend::Tap, NetworkWorkload::SingleConnection) => "network_tap_single",
+            (NetBackend::Tap, NetworkWorkload::ParallelConnections) => "network_tap_parallel",
         };
         let params = petri::PetriTestParams {
             test_name,
@@ -214,9 +253,13 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let erofs_path = require_petritools_erofs(resolver);
         let erofs_file = fs_err::File::open(&erofs_path)?;
 
+        let vp_count = match self.workload {
+            NetworkWorkload::SingleConnection => SINGLE_CONNECTION_VCPU_COUNT,
+            NetworkWorkload::ParallelConnections => PARALLEL_CONNECTION_VCPU_COUNT,
+        };
         let mut builder = petri::PetriVmBuilder::minimal(params, artifacts, driver)?
             .with_processor_topology(petri::ProcessorTopology {
-                vp_count: VCPU_COUNT,
+                vp_count,
                 ..Default::default()
             })
             .with_memory(petri::MemoryConfig {
@@ -327,7 +370,8 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let prefix = format!("net_{label}");
         let base_port: u16 = 5201;
 
-        // TCP TX (guest sends to host)
+        if self.workload == NetworkWorkload::SingleConnection {
+            // TCP TX (guest sends to host)
         let name = format!("{prefix}_tcp_tx_gbps");
         recorder.start(&name)?;
         let m = self
@@ -381,7 +425,8 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         recorder.stop()?;
         metrics.push(m);
 
-        // Long-lived TCP connections, scaled to the VM's vCPU count.
+        } else {
+            // Long-lived TCP connections, scaled to the VM's vCPU count.
         let name = format!("{prefix}_tcp_tx_long_lived_gbps");
         recorder.start(&name)?;
         let m = self
@@ -450,6 +495,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
             .context("short-lived TCP RX test failed")?;
         recorder.stop()?;
         metrics.push(m);
+        }
 
         Ok(metrics)
     }
