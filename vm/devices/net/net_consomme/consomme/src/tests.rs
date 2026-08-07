@@ -16,6 +16,23 @@ use smoltcp::wire::TcpRepr;
 
 const ETHERNET_HEADER_LEN: usize = 14;
 
+#[test]
+fn lro_mtu_is_bounded_by_remaining_egress_bytes() {
+    let mut egress = EgressQueue::default();
+    egress.lro4 = true;
+
+    assert_eq!(egress.tcp_rx_mtu(false), MAX_EGRESS_BYTES);
+
+    let fill = vec![0; MAX_EGRESS_BYTES - 32 * 1024];
+    assert!(egress.push(&fill, ChecksumState::NONE));
+    assert_eq!(egress.tcp_rx_mtu(false), 32 * 1024);
+
+    let final_packet = vec![0; egress.tcp_rx_mtu(false)];
+    assert!(egress.push(&final_packet, ChecksumState::NONE));
+    assert_eq!(egress.tcp_rx_mtu(false), 0);
+    assert_eq!(egress.stats.dropped.get(), 0);
+}
+
 struct TestClient {
     driver: DefaultDriver,
 }

@@ -574,6 +574,11 @@ impl TcpState {
 }
 
 impl<T: SocketDriver> Access<'_, T> {
+    /// Returns whether any port-forward TCP listeners are active.
+    pub fn has_tcp_listeners(&self) -> bool {
+        !self.inner.primary.tcp_listeners.listeners.is_empty()
+    }
+
     pub(crate) fn poll_tcp(&mut self, cx: &mut Context<'_>) {
         let loopback_mappings = self.inner.shard.tcp.loopback_port_mappings();
         for accepted in self.poll_tcp_listeners(cx, &loopback_mappings) {
@@ -1038,7 +1043,7 @@ impl<T: SocketDriver> Sender<'_, T> {
         tcp: &TcpRepr<'_>,
         payload: Option<ring::View<'_>>,
         tso_mss: Option<u16>,
-    ) {
+    ) -> bool {
         let payload_len = payload.as_ref().map_or(0, |p| p.len());
         let buffer = &mut *self.buffer;
         let mut eth_packet = EthernetFrame::new_unchecked(&mut buffer[..]);
@@ -1087,27 +1092,43 @@ impl<T: SocketDriver> Sender<'_, T> {
             &ChecksumCapabilities::ignored(),
         );
 
+        let partial_checksum = self.egress.checksum_supported();
         let checksum_state = match (self.ft.dst, tso_mss) {
             (SocketAddr::V4(_), Some(mss)) => ChecksumState {
+                l4_partial: true,
                 tso: Some(mss),
                 ..ChecksumState::TCP4
             },
             (SocketAddr::V6(_), Some(mss)) => ChecksumState {
+                l4_partial: true,
                 tso: Some(mss),
                 ..ChecksumState::TCP6
             },
-            (SocketAddr::V4(_), None) => ChecksumState::TCP4,
-            (SocketAddr::V6(_), None) => ChecksumState::TCP6,
+            (SocketAddr::V4(_), None) => ChecksumState {
+                l4_partial: partial_checksum,
+                ..ChecksumState::TCP4
+            },
+            (SocketAddr::V6(_), None) => ChecksumState {
+                l4_partial: partial_checksum,
+                ..ChecksumState::TCP6
+            },
         };
         let n = ETHERNET_HEADER_LEN + ip_total_len;
 
         let payload = match payload {
             Some(p) if p.len() != 0 => p,
             _ => {
-                tcp_packet.fill_checksum(&dst_ip_addr, &src_ip_addr);
+                if partial_checksum {
+                    tcp_packet.set_checksum(tcp_pseudo_header_checksum(
+                        &src_ip_addr,
+                        &dst_ip_addr,
+                        tcp_packet.header_len().into(),
+                    ));
+                } else {
+                    tcp_packet.fill_checksum(&dst_ip_addr, &src_ip_addr);
+                }
                 let buffer = &*self.buffer;
-                self.egress.push(&buffer[..n], checksum_state);
-                return;
+                return self.egress.push(&buffer[..n], checksum_state);
             }
         };
 
@@ -1119,7 +1140,7 @@ impl<T: SocketDriver> Sender<'_, T> {
         let (a, b) = payload.as_slices();
         let tcp_header_len = tcp_packet.header_len() as usize;
         tcp_packet.set_checksum(0);
-        let checksum = if tso_mss.is_some() {
+        let checksum = if tso_mss.is_some() || partial_checksum {
             tcp_pseudo_header_checksum(
                 &src_ip_addr,
                 &dst_ip_addr,
@@ -1151,9 +1172,9 @@ impl<T: SocketDriver> Sender<'_, T> {
         let buffer = &*self.buffer;
         let header = &buffer[..header_len];
         if b.is_empty() {
-            self.egress.push_segments(&[header, a], checksum_state);
+            self.egress.push_segments(&[header, a], checksum_state)
         } else {
-            self.egress.push_segments(&[header, a, b], checksum_state);
+            self.egress.push_segments(&[header, a, b], checksum_state)
         }
     }
 
@@ -1798,7 +1819,9 @@ impl TcpConnectionInner {
             payload: &[],
         };
 
-        sender.send_packet(&tcp, None, None);
+        if !sender.send_packet(&tcp, None, None) {
+            return;
+        }
         self.tx_send += 1;
         if ack_number.is_some() {
             // The guest reads the SYN-ACK window unscaled, so record that value.
@@ -1946,7 +1969,10 @@ impl TcpConnectionInner {
             } else {
                 None
             };
-            sender.send_packet(&tcp, Some(payload), tso_mss);
+            if !sender.send_packet(&tcp, Some(payload), tso_mss) {
+                self.stats.tx_blocked_no_rx_mtu.increment();
+                break;
+            }
             packets_sent += 1;
             self.stats.pkts_tx_to_guest.increment();
             self.stats.bytes_tx_to_guest.add(payload_len as u64);
@@ -2003,9 +2029,10 @@ impl TcpConnectionInner {
 
         trace_tcp_packet(sender.ft, &tcp, 0, "ack");
 
-        sender.send_packet(&tcp, None, None);
-        self.stats.standalone_acks_tx.increment();
-        self.record_advertised_window(window_len);
+        if sender.send_packet(&tcp, None, None) {
+            self.stats.standalone_acks_tx.increment();
+            self.record_advertised_window(window_len);
+        }
     }
 
     fn handle_listen_syn(

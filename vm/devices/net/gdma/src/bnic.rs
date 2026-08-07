@@ -122,6 +122,7 @@ impl BufferAccess for GuestBuffers {
             RxChecksumState::Unknown => {}
             RxChecksumState::Good => flags.set_rx_iphdr_csum_succeed(true),
             RxChecksumState::Bad => flags.set_rx_iphdr_csum_fail(true),
+            RxChecksumState::Partial => {}
             RxChecksumState::ValidatedButWrong => {}
         }
         match metadata.l4_protocol {
@@ -130,12 +131,14 @@ impl BufferAccess for GuestBuffers {
                 RxChecksumState::Unknown => {}
                 RxChecksumState::Good => flags.set_rx_tcp_csum_succeed(true),
                 RxChecksumState::Bad => flags.set_rx_tcp_csum_fail(true),
+                RxChecksumState::Partial => {}
                 RxChecksumState::ValidatedButWrong => {}
             },
             net_backend::L4Protocol::Udp => match metadata.l4_checksum {
                 RxChecksumState::Unknown => {}
                 RxChecksumState::Good => flags.set_rx_udp_csum_succeed(true),
                 RxChecksumState::Bad => flags.set_rx_udp_csum_fail(true),
+                RxChecksumState::Partial => {}
                 RxChecksumState::ValidatedButWrong => {}
             },
         }

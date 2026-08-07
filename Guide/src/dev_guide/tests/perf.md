@@ -65,6 +65,28 @@ burette run --test network -o network.json
 burette run --test network --nic virtio-net -o network.json
 ```
 
+Use `--network-test` to run only one network workload phase. Combine it with
+`--iterations 1` to execute that phase only once:
+
+```bash
+burette run --test network --network-test tcp-rx --iterations 1 -o network.json
+```
+
+Other values are `tcp-tx`, `udp-tx`, `tcp-tx-long-lived`,
+`tcp-rx-long-lived`, `tcp-tx-short-lived`, and `tcp-rx-short-lived`.
+
+Use `--collect-inspect` with `--nic virtio-net` to recursively collect the
+virtio-net inspect node once per second during each network workload phase:
+
+```bash
+burette run --test network --nic virtio-net --collect-inspect -o network.json
+```
+
+Each metric and warm iteration gets a separate attached inspect log. The
+filename identifies the backend, workload, NIC, and traffic direction. Because
+inspect collection adds work to the measured process, use this option for
+diagnostics rather than baseline performance measurements.
+
 Reported metrics:
 
 - `memory_rss_kib` — total RSS across process tree

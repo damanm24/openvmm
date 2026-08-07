@@ -12,6 +12,7 @@ use consomme::ChecksumState;
 use consomme::Consomme;
 use consomme::ConsommeConfig;
 use consomme::ConsommeParams;
+use consomme::EgressPacket;
 pub use consomme::IpVersion;
 use inspect::Inspect;
 use inspect::InspectMut;
@@ -566,10 +567,11 @@ impl net_backend::Endpoint for ConsommeEndpoint {
 
     fn set_rx_offload_support(&mut self, support: net_backend::RxOffloadSupport) {
         for shard in self.shards.iter() {
-            shard
-                .lock()
-                .consomme
-                .set_lro_support(support.lro4, support.lro6);
+            shard.lock().consomme.set_rx_offload_support(
+                support.checksum,
+                support.lro4,
+                support.lro6,
+            );
         }
     }
 
@@ -587,7 +589,6 @@ impl net_backend::Endpoint for ConsommeEndpoint {
             self.migrate_flows(active_shards);
             self.control.active_shards = active_shards;
         }
-
         let mut new_queues = Vec::with_capacity(active_shards);
         for (queue_index, config) in config.into_iter().enumerate() {
             let driver: Arc<dyn Driver> = Arc::from(config.driver);
@@ -607,6 +608,7 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                 state: QueueState {
                     rx_avail: VecDeque::new(),
                     rx_ready: VecDeque::new(),
+                    egress_batch: Vec::new(),
                     tx_avail: VecDeque::new(),
                     tx_ready: VecDeque::new(),
                     tx_scratch: Vec::new(),
@@ -853,6 +855,9 @@ impl ConsommeQueue {
         if self.queue_index != 0 {
             return;
         }
+        if !self.with_consomme_no_pool(|consomme| consomme.has_tcp_listeners()) {
+            return;
+        }
 
         let loopback_mappings = self
             .shards
@@ -891,11 +896,31 @@ impl ConsommeQueue {
     }
 
     fn drain_egress(&mut self, pool: &mut dyn BufferAccess) {
-        while let Some(rx_id) = self.state.rx_avail.pop_front() {
-            let Some(packet) = self.lock_shard(self.queue_index).consomme.pop_egress() else {
-                self.state.rx_avail.push_front(rx_id);
-                break;
-            };
+        if self.state.rx_avail.is_empty() {
+            return;
+        }
+
+        let mut packets = std::mem::take(&mut self.state.egress_batch);
+        {
+            let mut shard = self.lock_shard(self.queue_index);
+            while packets.len() < self.state.rx_avail.len() {
+                let Some(packet) = shard.consomme.pop_egress() else {
+                    break;
+                };
+                packets.push(packet);
+            }
+        }
+        if packets.is_empty() {
+            self.state.egress_batch = packets;
+            return;
+        }
+
+        for packet in &packets {
+            let rx_id = self
+                .state
+                .rx_avail
+                .pop_front()
+                .expect("egress batch is bounded by available RX buffers");
             let checksum = packet.checksum();
             let max = pool.capacity(rx_id) as usize;
             if packet.data().len() <= max {
@@ -913,8 +938,8 @@ impl ConsommeQueue {
                         } else {
                             RxChecksumState::Unknown
                         },
-                        l4_checksum: if checksum.tso.is_some() {
-                            RxChecksumState::Unknown
+                        l4_checksum: if checksum.tso.is_some() || checksum.l4_partial {
+                            RxChecksumState::Partial
                         } else if checksum.tcp || checksum.udp {
                             RxChecksumState::Good
                         } else {
@@ -946,10 +971,15 @@ impl ConsommeQueue {
                 self.stats.rx_dropped.increment();
                 self.state.rx_avail.push_front(rx_id);
             }
-            self.lock_shard(self.queue_index)
-                .consomme
-                .recycle_egress(packet);
         }
+
+        {
+            let mut shard = self.lock_shard(self.queue_index);
+            for packet in packets.drain(..) {
+                shard.consomme.recycle_egress(packet);
+            }
+        }
+        self.state.egress_batch = packets;
     }
 }
 
@@ -1067,6 +1097,7 @@ impl net_backend::Queue for ConsommeQueue {
                 ipv4: meta.flags.offload_ip_header_checksum(),
                 tcp: meta.flags.offload_tcp_checksum(),
                 udp: meta.flags.offload_udp_checksum(),
+                l4_partial: false,
                 tso: meta
                     .flags
                     .offload_tcp_segmentation()
@@ -1184,6 +1215,7 @@ impl net_backend::Queue for ConsommeQueue {
 struct QueueState {
     rx_avail: VecDeque<RxId>,
     rx_ready: VecDeque<RxId>,
+    egress_batch: Vec<EgressPacket>,
     tx_avail: VecDeque<TxSegment>,
     tx_ready: VecDeque<TxId>,
     /// Reusable scratch buffer for assembling outbound packets from guest memory.
@@ -1282,6 +1314,7 @@ mod tests {
             state: QueueState {
                 rx_avail: VecDeque::new(),
                 rx_ready: VecDeque::new(),
+                egress_batch: Vec::new(),
                 tx_avail: VecDeque::new(),
                 tx_ready: VecDeque::new(),
                 tx_scratch: Vec::new(),

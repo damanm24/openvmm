@@ -1917,6 +1917,47 @@ async fn rx_offload_data_valid_validated_but_wrong(driver: DefaultDriver) {
     );
 }
 
+/// A non-GSO packet with a partial TCP checksum asks the guest to complete it.
+#[async_test]
+async fn rx_offload_partial_checksum(driver: DefaultDriver) {
+    let mut harness = TestHarness::new(&driver);
+    let features = NetworkFeaturesBank0::new().with_guest_csum(true);
+    let features = VirtioDeviceFeatures::new().with_bank(0, features.into_bits());
+    let mut handle = harness.enable_and_get_handle_with_features(features).await;
+
+    let buffer_size: u32 = 1500;
+    let desc_index: u16 = 0;
+    let gpa = harness.post_rx_buffer_and_signal(desc_index, buffer_size);
+    handle.wait_for_rx_pending().await;
+
+    let payload = [0u8; 64];
+    let metadata = RxMetadata {
+        offset: 0,
+        len: payload.len(),
+        ip_checksum: RxChecksumState::Good,
+        l4_checksum: RxChecksumState::Partial,
+        l4_protocol: L4Protocol::Tcp,
+        l3_protocol: L3Protocol::Ipv4,
+        l2_len: 14,
+        l3_len: 20,
+        l4_len: 20,
+        ..Default::default()
+    };
+    handle.inject_rx_packet_with_metadata(&payload, &metadata);
+
+    let (used_id, _) = harness.wait_for_rx_used().await;
+    assert_eq!(used_id, desc_index);
+
+    let hdr = read_virtio_header(&harness.mem, gpa);
+    let flags = VirtioNetHeaderFlags::from(hdr.flags);
+    assert!(flags.needs_csum());
+    assert!(!flags.data_valid());
+    assert_eq!(hdr.gso_type, 0);
+    assert_eq!(hdr.gso_size, 0);
+    assert_eq!(hdr.csum_start, 34);
+    assert_eq!(hdr.csum_offset, 16);
+}
+
 // --- Feature Negotiation Tests ---
 
 /// Verify that the device advertises CSUM, HOST_TSO, and HOST_USO features

@@ -30,6 +30,7 @@ use std::sync::Arc;
 struct TestClient {
     driver: DefaultDriver,
     received_packets: Arc<Mutex<Vec<Vec<u8>>>>,
+    received_checksums: Arc<Mutex<Vec<ChecksumState>>>,
 }
 
 impl TestClient {
@@ -37,6 +38,7 @@ impl TestClient {
         Self {
             driver,
             received_packets: Arc::new(Mutex::new(Vec::new())),
+            received_checksums: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -46,8 +48,9 @@ impl SocketDriver for TestClient {
         &self.driver
     }
 
-    fn capture_egress(&mut self, data: &[u8], _checksum: ChecksumState) {
+    fn capture_egress(&mut self, data: &[u8], checksum: ChecksumState) {
         self.received_packets.lock().push(data.to_vec());
+        self.received_checksums.lock().push(checksum);
     }
 }
 
@@ -478,6 +481,7 @@ impl TcpTestHarness {
     /// Clear captured guest packets so subsequent searches don't match old ones.
     fn clear_guest_packets(&mut self) {
         self.client.received_packets.lock().clear();
+        self.client.received_checksums.lock().clear();
     }
 
     /// The four-tuple identifying the established connection.
@@ -1884,6 +1888,22 @@ async fn test_tcp_tx_buffer_autotune_caps_at_max(driver: DefaultDriver) {
         32 << 10,
         "tx ring must cap at the configured 32 KiB max"
     );
+}
+
+#[pal_async::async_test]
+async fn test_tcp_partial_checksum_offload(driver: DefaultDriver) {
+    let mut h = TcpTestHarness::connect(driver).await;
+    h.consomme.set_rx_offload_support(true, false, false);
+    h.clear_guest_packets();
+
+    h.host_write(b"partial checksum payload").await;
+    h.poll_until_guest_packet(|tcp| !tcp.payload.is_empty())
+        .await;
+
+    let checksum = *h.client.received_checksums.lock().last().unwrap();
+    assert!(checksum.tcp);
+    assert!(checksum.l4_partial);
+    assert_eq!(checksum.tso, None);
 }
 
 #[test]

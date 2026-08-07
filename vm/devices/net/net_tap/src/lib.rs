@@ -117,12 +117,12 @@ pub use vnet_hdr::*;
 /// offload support. TSO is only enabled when the guest can consume LRO, so
 /// guests without `GUEST_TSO4/6` never receive oversized coalesced frames.
 fn tap_offload_flags(support: net_backend::RxOffloadSupport) -> u32 {
-    let mut flags = 0;
+    let mut flags = if support.checksum { TUN_F_CSUM } else { 0 };
     if support.lro4 {
-        flags |= TUN_F_CSUM | TUN_F_TSO4;
+        flags |= TUN_F_TSO4;
     }
     if support.lro6 {
-        flags |= TUN_F_CSUM | TUN_F_TSO6;
+        flags |= TUN_F_TSO6;
     }
     flags
 }
@@ -142,6 +142,7 @@ impl TapEndpoint {
         Ok(Self {
             tap: Arc::new(Mutex::new(Some(tap))),
             rx_offload_support: net_backend::RxOffloadSupport {
+                checksum: false,
                 lro4: false,
                 lro6: false,
             },
@@ -631,24 +632,31 @@ fn parse_vnet_hdr(hdr: &VirtioNetHdr, frame: &[u8]) -> RxMetadata {
         (RxChecksumState::Unknown, RxChecksumState::Unknown)
     } else if hdr.flags.needs_csum() {
         // Non-GSO packet with a partial (pseudo-header-only) L4
-        // checksum. The kernel guarantees the packet data is correct,
-        // but the checksum field in the packet itself is incomplete.
-        (RxChecksumState::Good, RxChecksumState::Good)
+        // checksum. Preserve that state so the frontend asks the guest
+        // to complete the checksum field.
+        (RxChecksumState::Good, RxChecksumState::Partial)
     } else {
         (RxChecksumState::Unknown, RxChecksumState::Unknown)
     };
 
     let gso_protocol = hdr.gso_type.protocol();
 
-    let l4_protocol = match gso_protocol {
+    let mut l4_protocol = match gso_protocol {
         VirtioNetHdrGsoProtocol::TCPV4 | VirtioNetHdrGsoProtocol::TCPV6 => L4Protocol::Tcp,
         VirtioNetHdrGsoProtocol::UDP | VirtioNetHdrGsoProtocol::UDP_L4 => L4Protocol::Udp,
         _ => L4Protocol::Unknown,
     };
+    if hdr.flags.needs_csum() && hdr.gso_size == 0 {
+        l4_protocol = match hdr.csum_offset {
+            16 => L4Protocol::Tcp,
+            6 => L4Protocol::Udp,
+            _ => L4Protocol::Unknown,
+        };
+    }
 
     // Parse the actual Ethernet header to determine l2_len, handling
     // VLAN tags. This mirrors the TX path's parse_ethertype logic.
-    let (parsed_l2_len, _, _) = parse_ethertype(frame);
+    let (parsed_l2_len, is_ipv4, is_ipv6) = parse_ethertype(frame);
 
     // Extract GSO metadata when the kernel delivers a coalesced packet.
     let (l3_protocol, gso_size, l2_len, l3_len, l4_len) = if hdr.gso_size > 0
@@ -682,6 +690,16 @@ fn parse_vnet_hdr(hdr: &VirtioNetHdr, frame: &[u8]) -> RxMetadata {
         } else {
             (L3Protocol::Unknown, 0, 0, 0, 0)
         }
+    } else if hdr.flags.needs_csum() && hdr.gso_size == 0 {
+        let l3_protocol = if is_ipv4 {
+            L3Protocol::Ipv4
+        } else if is_ipv6 {
+            L3Protocol::Ipv6
+        } else {
+            L3Protocol::Unknown
+        };
+        let l3_len = hdr.csum_start.saturating_sub(parsed_l2_len as u16);
+        (l3_protocol, 0, parsed_l2_len, l3_len, 0)
     } else {
         (L3Protocol::Unknown, 0, 0, 0, 0)
     };
@@ -794,6 +812,7 @@ mod tests {
     #[test]
     fn frontend_gso_support_matches_ip_version() {
         let support = net_backend::RxOffloadSupport {
+            checksum: false,
             lro4: true,
             lro6: false,
         };
@@ -816,19 +835,20 @@ mod tests {
     }
 
     #[test]
-    fn rx_metadata_from_vnet_hdr_needs_csum_non_gso_treated_as_good() {
-        // Non-GSO + NEEDS_CSUM: data integrity is fine, L4 checksum is
-        // partial. Report as Good so DATA_VALID is set — RxMetadata has
-        // no way to propagate NEEDS_CSUM for non-GSO packets.
+    fn rx_metadata_from_vnet_hdr_needs_csum_non_gso_is_partial() {
         let hdr = VirtioNetHdr {
             flags: VirtioNetHdrFlags::new().with_needs_csum(true),
-            gso_type: VirtioNetHdrGso::new().with_protocol(VirtioNetHdrGsoProtocol::TCPV6),
+            csum_start: 14 + 40,
+            csum_offset: 16,
             ..Default::default()
         };
         let meta = parse_vnet_hdr(&hdr, &ETH_IPV6);
         assert_eq!(meta.ip_checksum, RxChecksumState::Good);
-        assert_eq!(meta.l4_checksum, RxChecksumState::Good);
+        assert_eq!(meta.l4_checksum, RxChecksumState::Partial);
         assert_eq!(meta.l4_protocol, L4Protocol::Tcp);
+        assert_eq!(meta.l3_protocol, L3Protocol::Ipv6);
+        assert_eq!(meta.l2_len, 14);
+        assert_eq!(meta.l3_len, 40);
     }
 
     #[test]

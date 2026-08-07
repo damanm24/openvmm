@@ -30,6 +30,9 @@ const LONG_LIVED_CONNECTION_COUNT: u32 =
 const SHORT_LIVED_CONNECTION_COUNT: u32 = 64;
 const LONG_LIVED_DURATION_SECONDS: u32 = 10;
 const SHORT_LIVED_DURATION_SECONDS: u32 = 1;
+const INSPECT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+const CONSOMME_VIRTIO_NET_INSPECT_PATH: &str = "pcie:s0rc0rp0-virtio/device";
+const TAP_VIRTIO_NET_INSPECT_PATH: &str = "pcie:s0rc0rp1-virtio/device";
 
 /// Which NIC frontend to use for the network test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -66,6 +69,38 @@ pub enum NetworkWorkload {
     ParallelConnections,
 }
 
+/// An individual network workload phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum NetworkTestCase {
+    /// Single-connection TCP transmit.
+    TcpTx,
+    /// Single-connection TCP receive.
+    TcpRx,
+    /// Single-connection UDP transmit.
+    UdpTx,
+    /// Long-lived parallel TCP transmit.
+    TcpTxLongLived,
+    /// Long-lived parallel TCP receive.
+    TcpRxLongLived,
+    /// Short-lived parallel TCP transmit.
+    TcpTxShortLived,
+    /// Short-lived parallel TCP receive.
+    TcpRxShortLived,
+}
+
+impl NetworkTestCase {
+    /// Return the VM workload configuration required by this phase.
+    pub fn workload(self) -> NetworkWorkload {
+        match self {
+            Self::TcpTx | Self::TcpRx | Self::UdpTx => NetworkWorkload::SingleConnection,
+            Self::TcpTxLongLived
+            | Self::TcpRxLongLived
+            | Self::TcpTxShortLived
+            | Self::TcpRxShortLived => NetworkWorkload::ParallelConnections,
+        }
+    }
+}
+
 /// Network throughput test via iperf3.
 pub struct NetworkTest {
     /// Print guest serial output and take framebuffer screenshots.
@@ -76,6 +111,10 @@ pub struct NetworkTest {
     pub backend: NetBackend,
     /// Which connection workload to run.
     pub workload: NetworkWorkload,
+    /// If set, run only this individual workload phase.
+    pub test_case: Option<NetworkTestCase>,
+    /// Whether to collect OpenVMM inspect snapshots during each workload phase.
+    pub collect_inspect: bool,
     /// If set, record per-phase perf traces in this directory.
     pub perf_dir: Option<std::path::PathBuf>,
 }
@@ -92,6 +131,15 @@ pub struct NetworkTestState {
     _helper_mesh: mesh_process::Mesh,
     /// Async driver for timers.
     driver: pal_async::DefaultDriver,
+    /// Configuration for per-phase virtio-net inspect collection.
+    inspect: Option<InspectCollection>,
+    /// Test name used to scope inspect attachment filenames.
+    inspect_test_name: &'static str,
+}
+
+struct InspectCollection {
+    log_source: petri::PetriLogSource,
+    path: &'static str,
 }
 
 fn build_firmware(resolver: &petri::ArtifactResolver<'_>) -> petri::Firmware {
@@ -161,6 +209,19 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         resolver: &petri::ArtifactResolver<'_>,
         driver: &pal_async::DefaultDriver,
     ) -> anyhow::Result<NetworkTestState> {
+        let inspect_path = if self.collect_inspect {
+            anyhow::ensure!(
+                self.nic == NicBackend::VirtioNet,
+                "--collect-inspect requires --nic virtio-net"
+            );
+            Some(match self.backend {
+                NetBackend::Consomme => CONSOMME_VIRTIO_NET_INSPECT_PATH,
+                NetBackend::Tap => TAP_VIRTIO_NET_INSPECT_PATH,
+            })
+        } else {
+            None
+        };
+
         // Verify host iperf3 is available.
         let iperf3 = std::env::var("IPERF3").unwrap_or_else(|_| "iperf3".into());
         let status = std::process::Command::new(&iperf3)
@@ -355,6 +416,8 @@ impl crate::harness::WarmPerfTest for NetworkTest {
             iperf_requests: ready.requests,
             _helper_mesh: helper_mesh,
             driver: driver.clone(),
+            inspect: inspect_path.map(|path| InspectCollection { log_source, path }),
+            inspect_test_name: test_name,
         })
     }
 
@@ -369,129 +432,143 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let base_port: u16 = 5201;
 
         if self.workload == NetworkWorkload::SingleConnection {
-            // TCP TX (guest sends to host)
-            let name = format!("{prefix}_tcp_tx_gbps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port,
-                    &name,
-                    IperfMode::TcpTx,
-                    1,
-                    LONG_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("TCP TX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::TcpTx) {
+                // TCP TX (guest sends to host)
+                let name = format!("{prefix}_tcp_tx_gbps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port,
+                        &name,
+                        IperfMode::TcpTx,
+                        1,
+                        LONG_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("TCP TX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
 
-            // TCP RX (host sends to guest, -R flag)
-            let name = format!("{prefix}_tcp_rx_gbps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port + 1,
-                    &name,
-                    IperfMode::TcpRx,
-                    1,
-                    LONG_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("TCP RX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::TcpRx) {
+                // TCP RX (host sends to guest, -R flag)
+                let name = format!("{prefix}_tcp_rx_gbps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port + 1,
+                        &name,
+                        IperfMode::TcpRx,
+                        1,
+                        LONG_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("TCP RX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
 
-            // UDP TX (guest sends to host)
-            let name = format!("{prefix}_udp_tx_pps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port + 2,
-                    &name,
-                    IperfMode::UdpTx,
-                    1,
-                    LONG_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("UDP TX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::UdpTx) {
+                // UDP TX (guest sends to host)
+                let name = format!("{prefix}_udp_tx_pps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port + 2,
+                        &name,
+                        IperfMode::UdpTx,
+                        1,
+                        LONG_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("UDP TX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
         } else {
-            // Long-lived TCP connections, scaled to the VM's vCPU count.
-            let name = format!("{prefix}_tcp_tx_long_lived_gbps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port + 3,
-                    &name,
-                    IperfMode::TcpTx,
-                    LONG_LIVED_CONNECTION_COUNT,
-                    LONG_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("long-lived TCP TX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::TcpTxLongLived) {
+                // Long-lived TCP connections, scaled to the VM's vCPU count.
+                let name = format!("{prefix}_tcp_tx_long_lived_gbps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port + 3,
+                        &name,
+                        IperfMode::TcpTx,
+                        LONG_LIVED_CONNECTION_COUNT,
+                        LONG_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("long-lived TCP TX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
 
-            let name = format!("{prefix}_tcp_rx_long_lived_gbps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port + 4,
-                    &name,
-                    IperfMode::TcpRx,
-                    LONG_LIVED_CONNECTION_COUNT,
-                    LONG_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("long-lived TCP RX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::TcpRxLongLived) {
+                let name = format!("{prefix}_tcp_rx_long_lived_gbps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port + 4,
+                        &name,
+                        IperfMode::TcpRx,
+                        LONG_LIVED_CONNECTION_COUNT,
+                        LONG_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("long-lived TCP RX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
 
-            // A larger burst of short-lived TCP connections.
-            let name = format!("{prefix}_tcp_tx_short_lived_gbps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port + 5,
-                    &name,
-                    IperfMode::TcpTx,
-                    SHORT_LIVED_CONNECTION_COUNT,
-                    SHORT_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("short-lived TCP TX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::TcpTxShortLived) {
+                // A larger burst of short-lived TCP connections.
+                let name = format!("{prefix}_tcp_tx_short_lived_gbps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port + 5,
+                        &name,
+                        IperfMode::TcpTx,
+                        SHORT_LIVED_CONNECTION_COUNT,
+                        SHORT_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("short-lived TCP TX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
 
-            let name = format!("{prefix}_tcp_rx_short_lived_gbps");
-            recorder.start(&name)?;
-            let m = self
-                .run_iperf3(
-                    state,
-                    host_ip,
-                    base_port + 6,
-                    &name,
-                    IperfMode::TcpRx,
-                    SHORT_LIVED_CONNECTION_COUNT,
-                    SHORT_LIVED_DURATION_SECONDS,
-                )
-                .await
-                .context("short-lived TCP RX test failed")?;
-            recorder.stop()?;
-            metrics.push(m);
+            if self.should_run(NetworkTestCase::TcpRxShortLived) {
+                let name = format!("{prefix}_tcp_rx_short_lived_gbps");
+                recorder.start(&name)?;
+                let m = self
+                    .run_iperf3(
+                        state,
+                        host_ip,
+                        base_port + 6,
+                        &name,
+                        IperfMode::TcpRx,
+                        SHORT_LIVED_CONNECTION_COUNT,
+                        SHORT_LIVED_DURATION_SECONDS,
+                    )
+                    .await
+                    .context("short-lived TCP RX test failed")?;
+                recorder.stop()?;
+                metrics.push(m);
+            }
         }
 
         Ok(metrics)
@@ -505,6 +582,12 @@ impl crate::harness::WarmPerfTest for NetworkTest {
             .send(crate::iperf_helper::IperfRequest::Stop);
         state._helper_mesh.shutdown().await;
         Ok(())
+    }
+}
+
+impl NetworkTest {
+    fn should_run(&self, test_case: NetworkTestCase) -> bool {
+        self.test_case.is_none_or(|selected| selected == test_case)
     }
 }
 
@@ -536,6 +619,20 @@ impl NetworkTest {
     ) -> anyhow::Result<MetricResult> {
         use mesh::rpc::RpcSend;
 
+        let inspect_output = state
+            .inspect
+            .as_ref()
+            .map(|inspect| {
+                inspect
+                    .log_source
+                    .create_attachment(&format!(
+                        "{}_{}_inspect.log",
+                        state.inspect_test_name, metric_name
+                    ))
+                    .map(|output| (output, inspect.path))
+            })
+            .transpose()?;
+
         // Ask the helper to start an iperf3 server (blocks until client done).
         let json_future = state.iperf_requests.call_failable(
             crate::iperf_helper::IperfRequest::RunIperf3,
@@ -555,8 +652,9 @@ impl NetworkTest {
             .sleep(std::time::Duration::from_millis(500))
             .await;
 
-        // Run guest iperf3 client.
-        run_guest_iperf3_client(
+        // Run guest iperf3 client, optionally collecting OpenVMM inspect
+        // snapshots until the client exits.
+        let client = run_guest_iperf3_client(
             &state.agent,
             host_ip,
             port,
@@ -564,8 +662,17 @@ impl NetworkTest {
             parallel_connections,
             duration_seconds,
             metric_name,
-        )
-        .await?;
+        );
+        if let Some((output, path)) = inspect_output.as_ref() {
+            let sampler = collect_vmm_inspect(state, output, path, metric_name);
+            futures::pin_mut!(client, sampler);
+            match futures::future::select(client, sampler).await {
+                futures::future::Either::Left((result, _)) => result?,
+                futures::future::Either::Right((never, _)) => match never {},
+            }
+        } else {
+            client.await?;
+        }
 
         // Collect JSON from the helper.
         let json = json_future.await.context("iperf3 helper RPC failed")?;
@@ -580,6 +687,38 @@ impl NetworkTest {
         );
 
         parse_result(&json, metric_name, &mode)
+    }
+}
+
+/// Collect OpenVMM inspect snapshots until the workload future drops this sampler.
+async fn collect_vmm_inspect(
+    state: &NetworkTestState,
+    output: &fs_err::File,
+    path: &str,
+    metric_name: &str,
+) -> std::convert::Infallible {
+    use std::io::Write as _;
+
+    let mut timer = pal_async::timer::PolledTimer::new(&state.driver);
+    loop {
+        let result: anyhow::Result<()> = async {
+            let node = state.vm.inspect_vmm(path).await?;
+            let mut output = output;
+            writeln!(
+                output,
+                "===== {} metric={metric_name} =====\n{node:#}",
+                jiff::Timestamp::now()
+            )
+            .context("failed to write OpenVMM inspect snapshot")
+        }
+        .await;
+
+        if let Err(error) = result {
+            tracing::warn!(metric = metric_name, %error, "stopping OpenVMM inspect collection");
+            std::future::pending::<()>().await;
+        }
+
+        timer.sleep(INSPECT_INTERVAL).await;
     }
 }
 

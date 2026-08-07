@@ -36,6 +36,7 @@ use std::sync::OnceLock;
 use tests::boot_time::BootProfile;
 use tests::disk_io::DiskBackend;
 use tests::network::NetBackend;
+use tests::network::NetworkTestCase;
 use tests::network::NetworkWorkload;
 use tests::network::NicBackend;
 
@@ -132,6 +133,14 @@ struct RunArgs {
     /// Network endpoint backend.
     #[arg(long, default_value = "consomme")]
     backend: NetBackend,
+
+    /// Run only one network workload phase.
+    #[arg(long)]
+    network_test: Option<NetworkTestCase>,
+
+    /// Collect recursive virtio-net inspect snapshots during network workloads.
+    #[arg(long)]
+    collect_inspect: bool,
 
     /// Record `perf record -p <pid> -g` traces scoped to each test,
     /// saving per-test .data files in this directory. Linux only.
@@ -325,15 +334,23 @@ fn cmd_run(args: RunArgs) -> anyhow::Result<()> {
                 let artifacts = resolve_artifacts(tests::network::register_artifacts)?;
                 let resolver = petri::ArtifactResolver::resolver(&artifacts);
 
-                for workload in [
-                    NetworkWorkload::SingleConnection,
-                    NetworkWorkload::ParallelConnections,
-                ] {
+                let workloads = args.network_test.map_or_else(
+                    || {
+                        vec![
+                            NetworkWorkload::SingleConnection,
+                            NetworkWorkload::ParallelConnections,
+                        ]
+                    },
+                    |test| vec![test.workload()],
+                );
+                for workload in workloads {
                     let test = tests::network::NetworkTest {
                         diag: args.diag,
                         nic: args.nic,
                         backend: args.backend,
                         workload,
+                        test_case: args.network_test,
+                        collect_inspect: args.collect_inspect,
                         perf_dir: args.perf_dir.clone(),
                     };
 

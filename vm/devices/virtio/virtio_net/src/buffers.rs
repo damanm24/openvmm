@@ -29,6 +29,17 @@ fn gso_header_offsets(metadata: &RxMetadata) -> Option<(u16, u16)> {
     (usize::from(total_hdr) <= metadata.len).then_some((csum_start, total_hdr))
 }
 
+fn checksum_offsets(metadata: &RxMetadata) -> Option<(u16, u16)> {
+    let csum_start = (metadata.l2_len as u16).checked_add(metadata.l3_len)?;
+    let csum_offset = match metadata.l4_protocol {
+        net_backend::L4Protocol::Tcp => 16,
+        net_backend::L4Protocol::Udp => 6,
+        net_backend::L4Protocol::Unknown => return None,
+    };
+    (usize::from(csum_start) + usize::from(csum_offset) + 2 <= metadata.len)
+        .then_some((csum_start, csum_offset))
+}
+
 /// Holds virtio buffers available for a network backend to send data to the client.
 #[derive(Inspect)]
 #[inspect(extra = "Self::inspect_extra")]
@@ -235,7 +246,8 @@ impl BufferAccess for VirtioWorkPool {
                 L3Protocol::Unknown => false,
             };
         let gso_header_offsets = gso_header_offsets(metadata);
-        let (gso_type, gso_size, hdr_len, csum_start, csum_offset) = if metadata.gso_size > 0
+        let (gso_type, gso_size, hdr_len, mut csum_start, mut csum_offset) = if metadata.gso_size
+            > 0
             && metadata.l2_len > 0
             && metadata.l3_len > 0
             && metadata.l4_len > 0
@@ -272,11 +284,21 @@ impl BufferAccess for VirtioWorkPool {
             (0, 0, 0, 0, 0)
         };
 
-        // When GSO is active, set NEEDS_CSUM so the guest computes
+        let partial_checksum_offsets = (metadata.gso_size == 0
+            && metadata.l4_checksum == net_backend::RxChecksumState::Partial
+            && self.guest_csum)
+            .then(|| checksum_offsets(metadata))
+            .flatten();
+        if let Some((start, offset)) = partial_checksum_offsets {
+            csum_start = start;
+            csum_offset = offset;
+        }
+
+        // When GSO or a partial checksum is active, set NEEDS_CSUM so the guest computes
         // per-segment checksums, and clear DATA_VALID to avoid the
         // contradictory combination that could cause the guest to
         // skip required per-segment checksum computation.
-        let flags = if gso_size > 0 {
+        let flags = if gso_size > 0 || partial_checksum_offsets.is_some() {
             flags.with_needs_csum(true).with_data_valid(false)
         } else {
             flags

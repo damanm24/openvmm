@@ -214,6 +214,7 @@ struct EgressQueue {
     recycled: Vec<Vec<u8>>,
     bytes: usize,
     stats: EgressStats,
+    checksum: bool,
     lro4: bool,
     lro6: bool,
 }
@@ -234,7 +235,7 @@ impl EgressQueue {
     fn tcp_rx_mtu(&self, ipv6: bool) -> usize {
         let mtu = self.rx_mtu();
         if mtu != 0 && self.lro_supported(ipv6) {
-            usize::MAX
+            MAX_EGRESS_BYTES - self.bytes
         } else {
             mtu
         }
@@ -244,15 +245,19 @@ impl EgressQueue {
         if ipv6 { self.lro6 } else { self.lro4 }
     }
 
-    fn push(&mut self, data: &[u8], checksum: ChecksumState) {
-        self.push_segments(&[data], checksum);
+    fn checksum_supported(&self) -> bool {
+        self.checksum
     }
 
-    fn push_segments(&mut self, segments: &[&[u8]], checksum: ChecksumState) {
+    fn push(&mut self, data: &[u8], checksum: ChecksumState) -> bool {
+        self.push_segments(&[data], checksum)
+    }
+
+    fn push_segments(&mut self, segments: &[&[u8]], checksum: ChecksumState) -> bool {
         let len = segments.iter().map(|segment| segment.len()).sum::<usize>();
         if self.packets.len() == MAX_EGRESS_PACKETS || self.bytes + len > MAX_EGRESS_BYTES {
             self.stats.dropped.increment();
-            return;
+            return false;
         }
 
         let mut data = self.recycled.pop().unwrap_or_default();
@@ -265,6 +270,7 @@ impl EgressQueue {
         self.packets.push_back(EgressPacket { data, checksum });
         self.stats.high_water_packets = self.stats.high_water_packets.max(self.packets.len());
         self.stats.high_water_bytes = self.stats.high_water_bytes.max(self.bytes);
+        true
     }
 
     fn pop(&mut self) -> Option<EgressPacket> {
@@ -704,6 +710,9 @@ pub struct ChecksumState {
     /// On receive, the data has a valid UDP checksum. On send, the checksum
     /// should be ignored.
     pub udp: bool,
+    /// The L4 checksum field contains only the pseudo-header sum and must be
+    /// completed by the packet recipient.
+    pub l4_partial: bool,
     /// The data consists of multiple TCP segments, each with the provided
     /// segment size.
     ///
@@ -719,6 +728,7 @@ impl ChecksumState {
         ipv4: false,
         tcp: false,
         udp: false,
+        l4_partial: false,
         tso: None,
         gso: None,
     };
@@ -726,6 +736,7 @@ impl ChecksumState {
         ipv4: true,
         tcp: false,
         udp: false,
+        l4_partial: false,
         tso: None,
         gso: None,
     };
@@ -733,6 +744,7 @@ impl ChecksumState {
         ipv4: true,
         tcp: true,
         udp: false,
+        l4_partial: false,
         tso: None,
         gso: None,
     };
@@ -740,6 +752,7 @@ impl ChecksumState {
         ipv4: true,
         tcp: false,
         udp: true,
+        l4_partial: false,
         tso: None,
         gso: None,
     };
@@ -747,6 +760,7 @@ impl ChecksumState {
         ipv4: false,
         tcp: true,
         udp: false,
+        l4_partial: false,
         tso: None,
         gso: None,
     };
@@ -1144,7 +1158,8 @@ impl Consomme {
     }
 
     /// Sets whether the frontend can receive coalesced TCP segments.
-    pub fn set_lro_support(&mut self, lro4: bool, lro6: bool) {
+    pub fn set_rx_offload_support(&mut self, checksum: bool, lro4: bool, lro6: bool) {
+        self.shard.egress.checksum = checksum;
         self.shard.egress.lro4 = lro4;
         self.shard.egress.lro6 = lro6;
     }

@@ -953,6 +953,7 @@ impl Coordinator {
         c_state
             .endpoint
             .set_rx_offload_support(net_backend::RxOffloadSupport {
+                checksum: features.guest_csum(),
                 lro4: features.guest_csum() && features.guest_tso4(),
                 lro6: features.guest_csum() && features.guest_tso6(),
             });

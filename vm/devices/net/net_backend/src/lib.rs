@@ -178,6 +178,8 @@ pub struct TxOffloadSupport {
 /// (LRO) packets via [`RxMetadata::gso_size`].
 #[derive(Debug, Copy, Clone, Default)]
 pub struct RxOffloadSupport {
+    /// The frontend supports receiving packets with partial L4 checksums.
+    pub checksum: bool,
     /// The frontend supports receiving LRO packets over IPv4 TCP.
     pub lro4: bool,
     /// The frontend supports receiving LRO packets over IPv6 TCP.
@@ -434,6 +436,9 @@ pub enum RxChecksumState {
     Good,
     /// The checksum value is incorrect.
     Bad,
+    /// The checksum field contains only the transport pseudo-header sum and
+    /// must be completed by the guest.
+    Partial,
     /// The checksum has been validated, but the value in the header is wrong.
     ///
     /// This occurs when LRO/RSC offload has been performed--multiple packet
