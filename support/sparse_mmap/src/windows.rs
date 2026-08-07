@@ -990,18 +990,32 @@ impl SparseMapping {
     ///
     /// Committing already-committed pages is a no-op.
     pub fn commit(&self, offset: usize, len: usize) -> Result<(), Error> {
+        self.commit_numa(offset, len, None)
+    }
+
+    /// Commits a range of previously reserved or decommitted memory,
+    /// optionally allocating its physical pages from a specific NUMA node.
+    ///
+    /// Committing already-committed pages is a no-op.
+    pub fn commit_numa(
+        &self,
+        offset: usize,
+        len: usize,
+        numa_node: Option<u32>,
+    ) -> Result<(), Error> {
         let _ = self.validate_offset_len(offset, len)?;
         if len == 0 {
             return Ok(());
         }
         unsafe {
+            let mut param = numa_extended_param(numa_node);
             virtual_alloc(
                 self.process.as_ref(),
                 self.address.wrapping_add(offset),
                 len,
                 MEM_COMMIT,
                 PAGE_READWRITE,
-                &mut [],
+                param.as_mut_slice(),
             )?;
         }
         Ok(())

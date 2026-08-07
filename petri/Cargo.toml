@@ -95,6 +95,10 @@ powershell_builder.workspace = true
 vmsocket.workspace = true
 vmswitch.workspace = true
 windows-version.workspace = true
+windows = { workspace = true, features = [
+	"Win32_System_ProcessStatus",
+	"Win32_System_Threading",
+] }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hvdef.workspace = true

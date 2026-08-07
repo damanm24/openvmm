@@ -105,8 +105,8 @@ impl MemoryCli {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.deferred_commit {
             anyhow::ensure!(
-                cfg!(windows),
-                "deferred_commit is only supported on Windows"
+                cfg!(any(windows, target_os = "linux")),
+                "deferred_commit is only supported on Windows and Linux"
             );
             anyhow::ensure!(
                 self.shared == Some(false),
@@ -115,10 +115,6 @@ impl MemoryCli {
             anyhow::ensure!(
                 !self.prefetch,
                 "deferred_commit=on conflicts with prefetch=on"
-            );
-            anyhow::ensure!(
-                self.transparent_hugepages != Some(true),
-                "deferred_commit=on conflicts with thp=on"
             );
         }
         if self.hugepage_size.is_some() && !self.hugepages {
@@ -393,7 +389,7 @@ options:
     `pcie_port=<name>`             present the disk using pcie under the specified port, incompatible with `dvd`, `vtl2`, `uh`, and `uh-nvme`
     `on=<name>`                    attach to a named controller (NVMe or SCSI), incompatible with `pcie_port` and `vtl2`
     `nsid=<N>`                     NVMe namespace ID (1-based), requires `on`; auto-assigned if omitted
-    deferred_commit[=on|off] commit private RAM on first access (Windows only)
+    deferred_commit[=on|off] demand-page private RAM (Windows and Linux)
     `lun=<N>`                      SCSI LUN (0-based), requires `on`; auto-assigned if omitted
     `relay=<ctrl>[:<loc>]`         relay through OpenHCL to the named OpenHCL controller, with optional location (LUN or NSID)
 "#)]
@@ -1587,10 +1583,6 @@ fn parse_numa_node(s: &str) -> anyhow::Result<NumaNodeCli> {
     anyhow::ensure!(
         node.memory.file.is_none(),
         "'file' is not supported in --numa"
-    );
-    anyhow::ensure!(
-        !(node.memory.deferred_commit && node.host_numa_node.is_some()),
-        "deferred_commit=on conflicts with host_numa_node"
     );
     node.memory.validate()?;
     Ok(node)
@@ -4752,13 +4744,14 @@ mod tests {
             }
         );
 
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         assert_eq!(
-            parse_memory_config("size=8G,shared=off,deferred_commit=on").unwrap(),
+            parse_memory_config("size=8G,shared=off,deferred_commit=on,thp=on").unwrap(),
             MemoryCli {
                 size: Some(vmm_cli::MemorySize(8 * 1024 * 1024 * 1024)),
                 shared: Some(false),
                 deferred_commit: true,
+                transparent_hugepages: Some(true),
                 ..Default::default()
             }
         );
@@ -4772,7 +4765,6 @@ mod tests {
         assert!(parse_memory_config("hugepages=on,file=/tmp/memory.bin").is_err());
         assert!(parse_memory_config("deferred_commit=on").is_err());
         assert!(parse_memory_config("shared=off,deferred_commit=on,prefetch=on").is_err());
-        assert!(parse_memory_config("shared=off,deferred_commit=on,thp=on").is_err());
 
         // Semantic validation of the hugepage size happens in the memory
         // builder, not in CLI parsing.
@@ -5262,6 +5254,14 @@ mod tests {
         // Node with host_numa_node.
         let n = parse_numa_node("size=1G,host_numa_node=1").unwrap();
         assert_eq!(n.host_numa_node, Some(1));
+
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            let n =
+                parse_numa_node("size=1G,shared=off,deferred_commit=on,host_numa_node=0").unwrap();
+            assert!(n.memory.deferred_commit);
+            assert_eq!(n.host_numa_node, Some(0));
+        }
 
         // All options together.
         let n = parse_numa_node("size=1G,vps=[0,1],host_numa_node=0,hugepages=on").unwrap();

@@ -382,6 +382,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn test_commit_reserved_numa_node0() {
+        let page_size = SparseMapping::page_size();
+        let mapping = SparseMapping::new(4 * page_size).unwrap();
+
+        mapping.reserve(0, 4 * page_size).unwrap();
+        mapping.commit_numa(page_size, page_size, Some(0)).unwrap();
+
+        let pattern = vec![0xABu8; page_size];
+        mapping.write_at(page_size, &pattern).unwrap();
+        let mut buf = vec![0u8; page_size];
+        mapping.read_at(page_size, &mut buf).unwrap();
+        assert_eq!(buf, pattern);
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn test_madvise_hugepage() {
         let page_size = SparseMapping::page_size();

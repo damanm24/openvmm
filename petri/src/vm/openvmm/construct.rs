@@ -457,6 +457,8 @@ impl PetriVmConfigOpenVmm {
                 dynamic_memory_range,
                 numa_mem_sizes,
                 private_memory,
+                deferred_commit,
+                host_numa_node,
                 transparent_hugepages,
             } = memory;
 
@@ -488,20 +490,23 @@ impl PetriVmConfigOpenVmm {
                 None => !private_incompatible,
             };
 
-            // THP is only valid for private anonymous memory and only on
-            // Linux; disable it otherwise to avoid a memory build error.
-            let transparent_hugepages =
-                transparent_hugepages && private_memory && cfg!(target_os = "linux");
+            if deferred_commit && !private_memory {
+                anyhow::bail!("deferred commit requires private guest memory");
+            }
+
+            // THP/soft large pages are only valid for private anonymous
+            // memory; disable them otherwise to avoid a memory build error.
+            let transparent_hugepages = transparent_hugepages && private_memory;
 
             let make_mem = |size: u64| openvmm_defs::config::MemoryConfig {
                 mem_size: size,
                 prefetch_memory: false,
-                deferred_commit: false,
+                deferred_commit,
                 private_memory,
                 transparent_hugepages,
                 hugepages: false,
                 hugepage_size: None,
-                host_numa_node: None,
+                host_numa_node,
             };
 
             if let Some(sizes) = numa_mem_sizes {

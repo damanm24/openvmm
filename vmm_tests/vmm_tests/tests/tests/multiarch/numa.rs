@@ -27,6 +27,7 @@ fn make_mem(size: u64, private_memory: bool) -> MemoryConfig {
     MemoryConfig {
         mem_size: size,
         prefetch_memory: false,
+        deferred_commit: false,
         private_memory,
         transparent_hugepages: false,
         hugepages: false,
@@ -100,12 +101,44 @@ async fn guest_node_distances(agent: &PipetteClient, node: u32) -> anyhow::Resul
 /// VPs 0,1 to node 0 and VPs 2,3 to node 1. Default SLIT distances.
 #[openvmm_test(linux_direct_x64, linux_direct_aarch64)]
 async fn boot_numa_two_nodes(config: PetriVmBuilder<OpenVmmPetriBackend>) -> anyhow::Result<()> {
-    let (vm, agent) = config
-        .with_memory(petri::MemoryConfig {
+    boot_numa_two_nodes_with_memory(
+        config,
+        petri::MemoryConfig {
             startup_bytes: SIZE_2_GB * 2,
             numa_mem_sizes: Some(vec![SIZE_2_GB, SIZE_2_GB]),
             ..Default::default()
-        })
+        },
+    )
+    .await
+}
+
+/// Boot a 2-node NUMA VM with deferred private memory and verify that deferred
+/// commit composes with per-node backings, host NUMA binding, and THP.
+#[openvmm_test(linux_direct_x64, linux_direct_aarch64)]
+async fn boot_numa_two_nodes_deferred_commit(
+    config: PetriVmBuilder<OpenVmmPetriBackend>,
+) -> anyhow::Result<()> {
+    boot_numa_two_nodes_with_memory(
+        config,
+        petri::MemoryConfig {
+            startup_bytes: SIZE_2_GB * 2,
+            numa_mem_sizes: Some(vec![SIZE_2_GB, SIZE_2_GB]),
+            private_memory: Some(true),
+            deferred_commit: true,
+            host_numa_node: Some(0),
+            transparent_hugepages: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn boot_numa_two_nodes_with_memory(
+    config: PetriVmBuilder<OpenVmmPetriBackend>,
+    memory: petri::MemoryConfig,
+) -> anyhow::Result<()> {
+    let (vm, agent) = config
+        .with_memory(memory)
         .with_processor_topology(petri::ProcessorTopology {
             vp_count: 4,
             vps_per_socket: Some(2),

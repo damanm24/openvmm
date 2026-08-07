@@ -51,14 +51,19 @@ otherwise, for the lighter-weight anonymous backing.
 
 On Windows with WHP, `deferred_commit=on` reserves private guest RAM without
 initially charging Windows commit for the complete range. The first host or
-guest access commits the containing 64 KiB cluster. A VM can therefore expose
-more guest RAM than it has touched without consuming the same amount of the
-system commit limit at startup.
+guest access commits the containing 64 KiB cluster. With `thp=on`, the first
+write to an eligible 2 MB window instead commits and prefetches that complete
+window so WHP can use a large SLAT entry. Host NUMA binding is applied when
+each range is committed.
 
-Deferred commit requires `shared=off` and a hypervisor that forwards guest
-memory faults to OpenVMM. It is incompatible with prefetch, transparent huge
-pages, host NUMA binding, and pinned mappings. Other host platforms reject the
-option; their anonymous-memory behavior is governed by the host kernel.
+On Linux, private anonymous RAM is already demand-paged by the kernel, so the
+option selects that existing behavior without changing the mapping flags. The
+kernel's overcommit policy still governs virtual-memory accounting and
+allocation failure.
+
+Deferred commit requires `shared=off`. Windows additionally requires WHP to
+forward guest memory faults to OpenVMM. It is incompatible with prefetch and
+pinned mappings. Platforms other than Windows and Linux reject the option.
 
 ## Prefetch
 
@@ -91,18 +96,23 @@ other an opt-in, guaranteed reservation — so it is worth keeping them straight
 
 ### Transparent Huge Pages (`thp=on`)
 
-Transparent Huge Pages are a **Linux** feature that is **on by default**.
-OpenVMM marks guest RAM as THP-eligible (via `madvise` with `MADV_HUGEPAGE`),
-inviting the kernel to *opportunistically* back it with 2 MB pages. It is
-best-effort: the kernel promotes pages when it can and silently falls back to
-4 KB when it cannot, so nothing is pinned or guaranteed. Because it is only an
-advisory hint, it applies to **both shared and private** guest RAM; pass
-`thp=off` to opt out.
+On Linux, OpenVMM marks guest RAM as THP-eligible via
+`madvise(MADV_HUGEPAGE)`, inviting the kernel to opportunistically back it with
+2 MB pages. The kernel silently falls back to 4 KB pages when promotion is not
+possible.
+
+On Windows, the same option enables best-effort **soft large pages** for the
+primary mapping used by the loader and WHP. OpenVMM prefetches an eligible
+2 MB window on its first write so Windows can supply contiguous backing and
+WHP can install a large SLAT entry. With deferred commit, this means that a
+first write may commit 2 MB rather than the normal 64 KiB cluster.
 
 - Applies to both shared and private memory.
-- Linux only; a no-op on other hosts.
+- Uses native THP on Linux and soft large pages on Windows; a no-op on other
+  hosts.
 - On by default; suppressed automatically for explicit `hugepages=on`
-  backings, which are already huge.
+  backings, which are already huge. It also defaults off with deferred commit
+  so users must explicitly choose its wider first-write commitment.
 
 ### Explicit huge pages (`hugepages=on`)
 

@@ -2345,13 +2345,23 @@ pub struct MemoryConfig {
     ///
     /// Only applies to the OpenVMM backend; ignored by Hyper-V.
     pub private_memory: Option<bool>,
-    /// Mark private guest RAM as eligible for Transparent Huge Pages (THP),
-    /// improving performance for large allocations.
+    /// Commit private guest RAM on first access instead of reserving host
+    /// commit for the complete range at VM construction.
+    ///
+    /// Requires [`Self::private_memory`] to be `Some(true)`. Only applies to
+    /// the OpenVMM backend; ignored by Hyper-V.
+    pub deferred_commit: bool,
+    /// Bind guest RAM allocations to a host NUMA node.
+    ///
+    /// Only applies to the OpenVMM backend; ignored by Hyper-V.
+    pub host_numa_node: Option<u32>,
+    /// Mark private guest RAM as eligible for Transparent Huge Pages on Linux
+    /// or soft large pages on Windows.
     ///
     /// Defaults to `true`. Only takes effect when the guest RAM is backed by
-    /// private anonymous memory (see [`Self::private_memory`]) and only on
-    /// Linux; it is silently ignored otherwise (shared memory, hugetlb/file
-    /// backing, OpenHCL, PCAT/Gen1, or non-Linux hosts).
+    /// private anonymous memory (see [`Self::private_memory`]); it is silently
+    /// ignored otherwise (shared memory, hugetlb/file backing, OpenHCL, or
+    /// PCAT/Gen1).
     ///
     /// Only applies to the OpenVMM backend; ignored by Hyper-V.
     pub transparent_hugepages: bool,
@@ -2364,6 +2374,8 @@ impl Default for MemoryConfig {
             dynamic_memory_range: None,
             numa_mem_sizes: None,
             private_memory: None,
+            deferred_commit: false,
+            host_numa_node: None,
             transparent_hugepages: true,
         }
     }

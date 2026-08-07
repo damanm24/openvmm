@@ -136,6 +136,8 @@ struct MappingProps {
     private: bool,
     /// Private memory is committed in clusters on first access.
     deferred_commit: bool,
+    /// Host NUMA node used when deferred pages are committed.
+    numa_node: Option<u32>,
     /// General per-mapping fault counters, always present. See [`FaultStats`].
     stats: FaultStats,
     /// Soft-large-page state for this range's 2 MB regions. `Some` only for
@@ -146,8 +148,9 @@ struct MappingProps {
     /// mapping-index read lock.
     ///
     /// `Some` also marks the range (private or shared) as "deferred protect":
-    /// committed/mapped read-only and upgraded to read-write — then materialized
-    /// with a 2 MB prefetch — a window at a time on first write.
+    /// committed/mapped read-only, or reserved when commit is deferred, and
+    /// upgraded to read-write — then materialized with a 2 MB prefetch — a
+    /// window at a time on first write.
     soft_lp: Option<SoftLp>,
 }
 
@@ -387,8 +390,7 @@ impl MapperTask {
         let soft_lp = cfg!(windows)
             && params.policy.transparent_hugepages
             && params.writable
-            && self.inner.primary
-            && !params.policy.deferred_commit;
+            && self.inner.primary;
 
         // Deferred protect (map read-only, populate lazily on the first write
         // fault) drives the *lazy* soft-LP path. When the range is prefetched it
@@ -416,6 +418,7 @@ impl MapperTask {
             MappingProps {
                 private,
                 deferred_commit: private && params.policy.deferred_commit && cfg!(windows),
+                numa_node: params.policy.numa_node,
                 stats: FaultStats::default(),
                 soft_lp: soft_lp.then(|| {
                     let regions = large_region_count(params.range);
@@ -926,18 +929,28 @@ unsafe impl GuestMemoryAccess for VaMapper {
                 && props.deferred_commit
             {
                 props.stats.deferred_commit_faults.increment();
-                let range = deferred_commit_range(address, len as u64, start, end + 1);
-                if let Err(err) = self
-                    .inner
-                    .mapping
-                    .commit(range.start() as usize, range.len() as usize)
-                {
+                let fault_end = address.saturating_add(len as u64);
+                let base = address & !(LARGE_PAGE_SIZE - 1);
+                let window_end = base + LARGE_PAGE_SIZE;
+                let full_window = fault_end <= window_end && base >= start && window_end <= end + 1;
+                let range = if write && props.soft_lp.is_some() && full_window {
+                    MemoryRange::new(base..window_end)
+                } else {
+                    deferred_commit_range(address, len as u64, start, end + 1)
+                };
+                if let Err(err) = self.inner.mapping.commit_numa(
+                    range.start() as usize,
+                    range.len() as usize,
+                    props.numa_node,
+                ) {
                     return PageFaultAction::Fail(PageFaultError::new(
                         GuestMemoryErrorKind::Other,
                         FaultError::Commit(range, err),
                     ));
                 }
-                return PageFaultAction::Retry;
+                if !write || props.soft_lp.is_none() {
+                    return PageFaultAction::Retry;
+                }
             }
         }
 
@@ -1107,22 +1120,6 @@ impl ResolveMemoryFault for VaMapper {
         }
         props.stats.guest_faults.increment();
 
-        #[cfg(windows)]
-        if props.private && props.deferred_commit {
-            props.stats.deferred_commit_faults.increment();
-            let range = deferred_commit_range(fault.start(), fault.len(), start, end + 1);
-            if let Err(err) = self
-                .inner
-                .mapping
-                .commit(range.start() as usize, range.len() as usize)
-            {
-                return Err(GuestMemoryBackingError::new(
-                    GuestMemoryErrorKind::Other,
-                    fault.start(),
-                    FaultError::Commit(range, err),
-                ));
-            }
-        }
         let soft_lp = props.soft_lp.as_ref();
 
         let full_window = fault.end() <= window_end && base >= start && window_end <= end + 1;
@@ -1139,6 +1136,27 @@ impl ResolveMemoryFault for VaMapper {
             // `widen` implies `soft_lp` is `Some`.
             if let Some(sl) = soft_lp {
                 sl.stats.guest_promotions.increment();
+            }
+        }
+
+        #[cfg(windows)]
+        if props.private && props.deferred_commit {
+            props.stats.deferred_commit_faults.increment();
+            let range = if widen {
+                MemoryRange::new(base..window_end)
+            } else {
+                deferred_commit_range(fault.start(), fault.len(), start, end + 1)
+            };
+            if let Err(err) = self.inner.mapping.commit_numa(
+                range.start() as usize,
+                range.len() as usize,
+                props.numa_node,
+            ) {
+                return Err(GuestMemoryBackingError::new(
+                    GuestMemoryErrorKind::Other,
+                    fault.start(),
+                    FaultError::Commit(range, err),
+                ));
             }
         }
 

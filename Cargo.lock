@@ -6401,6 +6401,7 @@ dependencies = [
  "vmsocket",
  "vmswitch",
  "vtl2_settings_proto",
+ "windows 0.62.0",
  "windows-version",
  "x86defs",
 ]

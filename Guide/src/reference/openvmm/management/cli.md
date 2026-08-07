@@ -28,13 +28,14 @@ as well as the generated CLI help (via `cargo run -- --help`).
     `on`; `off` uses private anonymous memory.
   * `prefetch[=on|off]` - pre-populate guest RAM mappings up front.
     Only has an effect under WHP; a no-op on KVM/mshv.
-  * `deferred_commit[=on|off]` - reserve private guest RAM and charge Windows
-    commit in 64 KiB clusters on first access. Windows/WHP only; requires
-    `shared=off` and conflicts with `prefetch=on`, `thp=on`, host NUMA binding,
-    and pinned mappings.
-  * `thp[=on|off]` - mark guest RAM (shared or private) as Transparent Huge
-    Page eligible. Linux-only, best-effort, and on by default; pass `thp=off` to
-    opt out.
+  * `deferred_commit[=on|off]` - demand-page private guest RAM. On Windows/WHP,
+    charge commit in 64 KiB clusters on first access; Linux anonymous RAM is
+    already demand-paged. Requires `shared=off` and conflicts with
+    `prefetch=on` and pinned mappings.
+  * `thp[=on|off]` - request best-effort 2 MB backing for guest RAM: native THP
+    on Linux or soft large pages on Windows. With deferred commit, the first
+    Windows write may commit a complete 2 MB window. On by default except with
+    `hugepages=on` or `deferred_commit=on`.
   * `hugepages[=on|off]` - allocate guest RAM from explicit large/huge pages
     (Linux hugetlb pages or a Windows `SEC_LARGE_PAGES` section). Requires
     shared memory.
