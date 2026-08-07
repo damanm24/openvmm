@@ -1037,6 +1037,32 @@ mod tests {
 
     #[cfg(windows)]
     #[async_test]
+    async fn deferred_commit_soft_large_page_handles_spanning_host_write() {
+        const MIB: usize = 1024 * 1024;
+        let range = MemoryRange::new(0..8 * MIB as u64);
+        let backing = RamBackingRequest::new(vec![range])
+            .private_memory(true)
+            .deferred_commit(true)
+            .transparent_hugepages(true)
+            .host_numa_node(Some(0));
+        let manager = GuestMemoryBuilder::new()
+            .supports_memory_fault_resolution(true)
+            .add_backing(backing)
+            .build(range.end())
+            .await
+            .unwrap();
+        let memory = GuestMemory::new("test-primary", manager.va_mapper.clone());
+
+        memory.write_at(MIB as u64, &vec![0x5a; 6 * MIB]).unwrap();
+
+        assert!(!is_committed(&manager, 0));
+        assert!(is_committed(&manager, MIB));
+        assert!(is_committed(&manager, 7 * MIB - 1));
+        assert!(!is_committed(&manager, 7 * MIB));
+    }
+
+    #[cfg(windows)]
+    #[async_test]
     async fn deferred_commit_requires_private_memory() {
         let range = MemoryRange::new(0..64 * 1024);
         let error = GuestMemoryBuilder::new()

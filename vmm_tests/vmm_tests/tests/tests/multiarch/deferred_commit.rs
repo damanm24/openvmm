@@ -141,7 +141,7 @@ async fn log_deferred_memory_diagnostics(
         "deferred guest memory mapping diagnostics"
     );
 
-    let mut command = match os_flavor {
+    let command = match os_flavor {
         OsFlavor::Linux => {
             let mut command = agent.command("sh");
             command.args([

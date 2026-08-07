@@ -953,7 +953,8 @@ unsafe impl GuestMemoryAccess for VaMapper {
                 let base = address & !(LARGE_PAGE_SIZE - 1);
                 let window_end = base + LARGE_PAGE_SIZE;
                 let full_window = fault_end <= window_end && base >= start && window_end <= end + 1;
-                let range = if write && props.soft_lp.is_some() && full_window {
+                let promote_window = write && props.soft_lp.is_some() && full_window;
+                let range = if promote_window {
                     MemoryRange::new(base..window_end)
                 } else {
                     deferred_commit_range(address, len as u64, start, end + 1)
@@ -968,7 +969,11 @@ unsafe impl GuestMemoryAccess for VaMapper {
                         FaultError::Commit(range, err),
                     ));
                 }
-                if !write || props.soft_lp.is_none() {
+                // Only continue into the soft-LP path below when the complete
+                // window was committed. A spanning access commits just its
+                // bounded range, which may leave part of the first window
+                // reserved and therefore invalid to pass to VirtualProtect.
+                if !promote_window {
                     return PageFaultAction::Retry;
                 }
             }
