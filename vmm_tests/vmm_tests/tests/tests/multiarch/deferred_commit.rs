@@ -134,9 +134,21 @@ async fn log_deferred_memory_diagnostics(
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.into_iter().sum::<u64>())
     });
+    let committed_bytes = mappings_value.as_object().and_then(|entries| {
+        let values = entries
+            .values()
+            .filter(|entry| {
+                entry["private"].as_bool() == Some(true)
+                    && entry["deferred_commit"].as_bool() == Some(true)
+            })
+            .filter_map(|entry| entry["committed_bytes"].as_u64())
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then(|| values.into_iter().sum::<u64>())
+    });
     tracing::info!(
         phase,
         ?resident_bytes,
+        ?committed_bytes,
         mappings = %mappings_json,
         "deferred guest memory mapping diagnostics"
     );
