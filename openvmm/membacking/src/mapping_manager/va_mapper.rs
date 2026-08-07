@@ -134,8 +134,8 @@ struct MappingProps {
     /// Backed by private anonymous memory (committed up front) rather than a
     /// shared file/section mapping.
     private: bool,
-    /// Private memory is committed in clusters on first access.
-    #[cfg(windows)]
+    /// Deferred commit was requested for this private mapping. Windows commits
+    /// explicit clusters on first access; Linux uses native demand paging.
     deferred_commit: bool,
     /// Host NUMA node used when deferred pages are committed.
     #[cfg(windows)]
@@ -258,6 +258,7 @@ impl Inspect for VaMapper {
                         inspect::adhoc(|req| {
                             let mut resp = req.respond();
                             resp.field("private", props.private);
+                            resp.field("deferred_commit", props.deferred_commit);
                             #[cfg(target_os = "linux")]
                             match self.inner.mapping.resident_page_count(
                                 range.start() as usize,
@@ -447,7 +448,6 @@ impl MapperTask {
             params.range,
             MappingProps {
                 private,
-                #[cfg(windows)]
                 deferred_commit: private && params.policy.deferred_commit,
                 #[cfg(windows)]
                 numa_node: params.policy.numa_node,
