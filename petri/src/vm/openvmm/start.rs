@@ -185,6 +185,7 @@ impl PetriVmConfigOpenVmm {
                 resources,
                 mesh,
                 worker,
+                inspect_deferred_memory,
                 framebuffer_view,
                 cidata_mounted: false,
                 tcp_pipette_port,

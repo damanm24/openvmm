@@ -273,6 +273,18 @@ impl Inspect for VaMapper {
                                     resp.field("resident_error", error.to_string());
                                 }
                             }
+                            #[cfg(windows)]
+                            match self.inner.mapping.committed_byte_count(
+                                range.start() as usize,
+                                range.len() as usize,
+                            ) {
+                                Ok(bytes) => {
+                                    resp.field("committed_bytes", bytes as u64);
+                                }
+                                Err(error) => {
+                                    resp.field("committed_error", error.to_string());
+                                }
+                            }
                             resp.field("faults", &props.stats);
                             if let Some(sl) = &props.soft_lp {
                                 resp.field("soft_large_pages", &sl.stats);

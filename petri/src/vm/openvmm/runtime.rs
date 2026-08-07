@@ -199,6 +199,7 @@ pub(super) struct PetriVmInner {
     pub(super) resources: PetriVmResourcesOpenVmm,
     pub(super) mesh: Mesh,
     pub(super) worker: Arc<Worker>,
+    pub(super) inspect_deferred_memory: bool,
     pub(super) framebuffer_view: Option<View>,
     /// Whether CIDATA has already been mounted inside the guest.
     /// Used to skip re-mounting after save/restore (where guest state is
@@ -570,6 +571,14 @@ impl PetriVmInner {
     }
 
     async fn wait_for_agent(&mut self, set_high_vtl: bool) -> anyhow::Result<PipetteClient> {
+        if self.inspect_deferred_memory && !set_high_vtl {
+            let mappings = self.worker.inspect("memory/mappings").await;
+            tracing::info!(
+                mappings = %mappings.json(),
+                "deferred guest memory mappings before waiting for pipette"
+            );
+        }
+
         // Use TCP transport if configured (Windows no-vmbus guests).
         if let Some(port) = self.tcp_pipette_port {
             assert!(!set_high_vtl, "TCP pipette transport does not support VTL2");

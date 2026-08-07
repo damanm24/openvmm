@@ -1044,6 +1044,47 @@ impl SparseMapping {
         Ok(info.State == MEM_COMMIT)
     }
 
+    /// Returns the number of committed bytes in a mapping range without
+    /// accessing the pages.
+    pub fn committed_byte_count(&self, offset: usize, len: usize) -> io::Result<usize> {
+        let end = self.validate_offset_len(offset, len)?;
+        let mapping_base = self.address as usize;
+        let mut cursor = mapping_base + offset;
+        let end_address = mapping_base + end;
+        let mut committed = 0usize;
+
+        while cursor < end_address {
+            let mut info = Memory::MEMORY_BASIC_INFORMATION::default();
+            // SAFETY: `cursor` remains within the validated mapping range and
+            // `info` is valid for the duration of the query.
+            let result = unsafe {
+                VirtualQueryEx(
+                    self.process.as_ref().handle(),
+                    cursor as *const c_void,
+                    &mut info,
+                    size_of_val(&info),
+                )
+            };
+            if result == 0 {
+                return Err(Error::last_os_error());
+            }
+
+            let region_end = (info.BaseAddress as usize)
+                .checked_add(info.RegionSize)
+                .ok_or(io::ErrorKind::InvalidData)?
+                .min(end_address);
+            if region_end <= cursor {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            if info.State == MEM_COMMIT {
+                committed += region_end - cursor;
+            }
+            cursor = region_end;
+        }
+
+        Ok(committed)
+    }
+
     /// Names a mapping range for debugging. No-op on Windows.
     pub fn set_name(&self, _offset: usize, _len: usize, _name: &str) {}
 
@@ -1276,7 +1317,12 @@ mod tests {
         let mapping = SparseMapping::new(2 * PAGE_SIZE).unwrap();
 
         mapping.reserve(0, 2 * PAGE_SIZE).unwrap();
+        assert_eq!(mapping.committed_byte_count(0, 2 * PAGE_SIZE).unwrap(), 0);
         mapping.commit(0, PAGE_SIZE).unwrap();
+        assert_eq!(
+            mapping.committed_byte_count(0, 2 * PAGE_SIZE).unwrap(),
+            PAGE_SIZE
+        );
 
         let data = [0x5a; 32];
         mapping.write_at(0, &data).unwrap();
