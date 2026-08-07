@@ -135,8 +135,10 @@ struct MappingProps {
     /// shared file/section mapping.
     private: bool,
     /// Private memory is committed in clusters on first access.
+    #[cfg(windows)]
     deferred_commit: bool,
     /// Host NUMA node used when deferred pages are committed.
+    #[cfg(windows)]
     numa_node: Option<u32>,
     /// General per-mapping fault counters, always present. See [`FaultStats`].
     stats: FaultStats,
@@ -255,6 +257,22 @@ impl Inspect for VaMapper {
                         &range.to_string(),
                         inspect::adhoc(|req| {
                             let mut resp = req.respond();
+                            resp.field("private", props.private);
+                            #[cfg(target_os = "linux")]
+                            match self.inner.mapping.resident_page_count(
+                                range.start() as usize,
+                                range.len() as usize,
+                            ) {
+                                Ok(pages) => {
+                                    resp.field(
+                                        "resident_bytes",
+                                        pages as u64 * SparseMapping::page_size() as u64,
+                                    );
+                                }
+                                Err(error) => {
+                                    resp.field("resident_error", error.to_string());
+                                }
+                            }
                             resp.field("faults", &props.stats);
                             if let Some(sl) = &props.soft_lp {
                                 resp.field("soft_large_pages", &sl.stats);
@@ -417,7 +435,9 @@ impl MapperTask {
             params.range,
             MappingProps {
                 private,
-                deferred_commit: private && params.policy.deferred_commit && cfg!(windows),
+                #[cfg(windows)]
+                deferred_commit: private && params.policy.deferred_commit,
+                #[cfg(windows)]
                 numa_node: params.policy.numa_node,
                 stats: FaultStats::default(),
                 soft_lp: soft_lp.then(|| {

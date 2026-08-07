@@ -200,6 +200,33 @@ impl SparseMapping {
         }
     }
 
+    /// Returns the number of resident base pages in a mapped range without
+    /// faulting nonresident pages in.
+    #[cfg(target_os = "linux")]
+    pub fn resident_page_count(&self, offset: usize, len: usize) -> Result<usize, Error> {
+        self.validate_offset_len(offset, len)?;
+        if len == 0 {
+            return Ok(0);
+        }
+
+        let page_size = page_size();
+        let mut residency = vec![0; len / page_size];
+        // SAFETY: The range was validated above and `residency` has one byte
+        // for every base page in the range, as required by mincore.
+        let result = unsafe {
+            libc::mincore(
+                self.address.byte_add(offset),
+                len,
+                residency.as_mut_ptr(),
+            )
+        };
+        if result < 0 {
+            return Err(Error::last_os_error());
+        }
+
+        Ok(residency.iter().filter(|value| **value & 1 != 0).count())
+    }
+
     /// Maps read-only zero pages at the given offset within the mapping.
     pub fn map_zero(&self, offset: usize, len: usize) -> Result<(), Error> {
         // SAFETY: The flags passed in are guaranteed to be valid

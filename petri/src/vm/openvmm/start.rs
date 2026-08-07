@@ -145,11 +145,26 @@ impl PetriVmConfigOpenVmm {
             );
         }
 
+        let inspect_deferred_memory = config
+            .numa
+            .nodes
+            .iter()
+            .filter_map(|node| node.mem.as_ref())
+            .any(|memory| memory.deferred_commit);
+
         let (worker, halt_notif) = Worker::launch(&host, config, shared_memory)
             .await
             .context("failed to launch vm worker")?;
 
         let worker = Arc::new(worker);
+
+        if inspect_deferred_memory {
+            let mappings = worker.inspect("memory/mappings").await;
+            tracing::info!(
+                mappings = %mappings.json(),
+                "deferred guest memory mappings before first resume"
+            );
+        }
 
         let is_minimal = resources.properties.minimal_mode;
 

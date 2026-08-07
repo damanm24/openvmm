@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use futures::AsyncBufReadExt as _;
 use futures::io::BufReader;
 use petri::MemoryConfig;
+use petri::PetriVm;
 use petri::PetriVmBuilder;
 use petri::SIZE_1_GB;
 use petri::openvmm::OpenVmmPetriBackend;
@@ -71,6 +72,7 @@ async fn deferred_commit_grows_with_guest_demand(
         .run()
         .await?;
 
+    log_deferred_memory_diagnostics(&vm, &agent, os_flavor, "after_agent_ready").await?;
     let initial_private_bytes =
         petri::process_memory::process_private_memory_bytes(vm.backend().pid())?;
     tracing::info!(
@@ -84,6 +86,7 @@ async fn deferred_commit_grows_with_guest_demand(
     );
 
     let _memory_pressure = start_memory_pressure(&agent, os_flavor, TOUCHED_BYTES).await?;
+    log_deferred_memory_diagnostics(&vm, &agent, os_flavor, "after_guest_pressure").await?;
     let grown_private_bytes =
         petri::process_memory::process_private_memory_bytes(vm.backend().pid())?;
     let minimum_growth = TOUCHED_BYTES * 7 / 8;
@@ -104,6 +107,75 @@ async fn deferred_commit_grows_with_guest_demand(
 
     agent.power_off().await?;
     vm.wait_for_clean_teardown().await?;
+    Ok(())
+}
+
+async fn log_deferred_memory_diagnostics(
+    vm: &PetriVm<OpenVmmPetriBackend>,
+    agent: &PipetteClient,
+    os_flavor: OsFlavor,
+    phase: &str,
+) -> anyhow::Result<()> {
+    let mappings = vm
+        .inspect_vmm("memory/mappings")
+        .await
+        .with_context(|| format!("inspecting deferred memory mappings during {phase}"))?;
+    let mappings_json = mappings.json().to_string();
+    let mappings_value: serde_json::Value = serde_json::from_str(&mappings_json)
+        .context("parsing deferred memory mapping inspect output")?;
+    let resident_bytes = mappings_value.as_object().and_then(|entries| {
+        let values = entries
+            .values()
+            .filter(|entry| {
+                entry["private"].as_bool() == Some(true)
+                    && entry["deferred_commit"].as_bool() == Some(true)
+            })
+            .filter_map(|entry| entry["resident_bytes"].as_u64())
+            .collect::<Vec<_>>();
+        (!values.is_empty()).then(|| values.into_iter().sum::<u64>())
+    });
+    tracing::info!(
+        phase,
+        ?resident_bytes,
+        mappings = %mappings_json,
+        "deferred guest memory mapping diagnostics"
+    );
+
+    let mut command = match os_flavor {
+        OsFlavor::Linux => {
+            let mut command = agent.command("sh");
+            command.args([
+                "-c",
+                "grep -E '^(MemTotal|MemFree|MemAvailable|Active\\(anon\\)|Inactive\\(anon\\)|AnonPages):' /proc/meminfo",
+            ]);
+            command
+        }
+        OsFlavor::Windows => {
+            let mut command = agent.command("powershell.exe");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$os = Get-CimInstance Win32_OperatingSystem; $memory = Get-CimInstance Win32_PerfRawData_PerfOS_Memory; [ordered]@{ TotalVisibleMemoryBytes = [uint64]$os.TotalVisibleMemorySize * 1KB; FreePhysicalMemoryBytes = [uint64]$os.FreePhysicalMemory * 1KB; AvailableBytes = [uint64]$memory.AvailableBytes; FreeAndZeroPageListBytes = [uint64]$memory.FreeAndZeroPageListBytes; ModifiedPageListBytes = [uint64]$memory.ModifiedPageListBytes; StandbyCacheNormalPriorityBytes = [uint64]$memory.StandbyCacheNormalPriorityBytes } | ConvertTo-Json -Compress",
+            ]);
+            command
+        }
+        _ => return Ok(()),
+    };
+    let output = command.output().await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() {
+        tracing::info!(phase, guest_memory = %stdout.trim(), "guest memory diagnostics");
+    } else {
+        tracing::warn!(
+            phase,
+            status = %output.status,
+            stderr = %stderr.trim(),
+            "guest memory diagnostics unavailable"
+        );
+    }
+
     Ok(())
 }
 

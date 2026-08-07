@@ -296,6 +296,16 @@ fn inspect_mappings(mappings: &Vec<Mapping>) -> impl '_ + Inspect {
                         .field("writable", mapping.params.writable)
                         .field("mapping_type", mapping.params.mapping_type)
                         .field("backed_by_fd", mapping.params.backing.mappable().is_some())
+                        .field(
+                            "deferred_commit",
+                            mapping.params.policy.deferred_commit,
+                        )
+                        .field(
+                            "transparent_hugepages",
+                            mapping.params.policy.transparent_hugepages,
+                        )
+                        .field("prefetch", mapping.params.policy.prefetch)
+                        .field("numa_node", mapping.params.policy.numa_node)
                         .hex("file_offset", mapping.params.backing.file_offset());
                 }),
             );
