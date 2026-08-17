@@ -128,11 +128,6 @@ impl FlowNode for Node {
                     let windows_via_wsl2 = windows_target && crate::_util::running_in_wsl(rt);
 
                     let working_dir_ref = working_dir.as_path();
-                    let working_dir_win = windows_via_wsl2.then(|| {
-                        crate::_util::wslpath::linux_to_win(rt, working_dir_ref)
-                            .display()
-                            .to_string()
-                    });
 
                     let tool_config_files: Vec<(String, PathBuf)> = tool_config_files
                         .into_iter()
@@ -242,19 +237,7 @@ impl FlowNode for Node {
                     let make_portable_path = |path: PathBuf| -> anyhow::Result<PathBuf> {
                         let path = if portable {
                             if windows_target {
-                                let working_dir_trimmed =
-                                    working_dir_win.as_ref().unwrap().trim_end_matches('\\');
-                                let path_win = path.display().to_string();
-                                let path_trimmed = path_win.trim_end_matches('\\');
-                                PathBuf::from(format!(
-                                    "$PSScriptRoot{}",
-                                    path_trimmed
-                                        .strip_prefix(working_dir_trimmed)
-                                        .with_context(|| format!(
-                                            "{} not in {}",
-                                            path_win, working_dir_trimmed
-                                        ),)?
-                                ))
+                                make_portable_windows_path(&path, &converted_working_dir)?
                             } else {
                                 path.strip_prefix(working_dir_ref)
                                     .with_context(|| {
@@ -299,7 +282,7 @@ impl FlowNode for Node {
                         "--config-file".into(),
                         make_portable_path(config_file)?.into(),
                         "--workspace-remap".into(),
-                        make_portable_path(converted_working_dir)?.into(),
+                        make_portable_path(converted_working_dir.clone())?.into(),
                     ]);
 
                     for (tool, config_file) in tool_config_files {
@@ -387,6 +370,19 @@ impl FlowNode for Node {
 
         Ok(())
     }
+}
+
+fn make_portable_windows_path(path: &Path, working_dir: &Path) -> anyhow::Result<PathBuf> {
+    let working_dir = working_dir.display().to_string();
+    let working_dir = working_dir.trim_end_matches('\\');
+    let path = path.display().to_string();
+    let path_trimmed = path.trim_end_matches('\\');
+    Ok(PathBuf::from(format!(
+        "$PSScriptRoot{}",
+        path_trimmed
+            .strip_prefix(working_dir)
+            .with_context(|| format!("{} not in {}", path, working_dir))?
+    )))
 }
 
 // shared with `cargo_nextest_archive`

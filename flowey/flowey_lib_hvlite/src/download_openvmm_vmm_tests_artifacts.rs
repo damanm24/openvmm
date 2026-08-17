@@ -124,7 +124,7 @@ impl FlowNodeWithConfig for Node {
                     };
 
                     if let Some(vhd) = KnownTestArtifacts::from_filename(filename) {
-                        let size = e.metadata()?.len();
+                        let size = fs_err::metadata(e.path())?.len();
                         let expected_size = vhd.file_size();
                         if size != expected_size {
                             log::warn!(
