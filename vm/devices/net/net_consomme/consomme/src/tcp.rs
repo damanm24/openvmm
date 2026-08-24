@@ -9,7 +9,8 @@ use super::BindError;
 use super::Client;
 use super::DropReason;
 use crate::ChecksumState;
-use crate::ConsommeState;
+use crate::ConsommeConfig;
+use crate::ConsommePrimaryRuntime;
 use crate::FourTuple;
 use crate::IpAddresses;
 use crate::IpVersion;
@@ -157,6 +158,22 @@ impl Tcp {
             },
             aggregate_stats: TcpAggregateStats::default(),
         }
+    }
+
+    pub fn update_buffer_bounds(
+        &mut self,
+        rx_buffer: crate::TcpBufferBounds,
+        tx_buffer: crate::TcpBufferBounds,
+    ) {
+        self.connection_params = ConnectionParams {
+            rx_buffer: NormalizedBufferBounds::from_bounds(rx_buffer),
+            tx_buffer: NormalizedBufferBounds::from_bounds(tx_buffer),
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_count(&self) -> usize {
+        self.connections.len()
     }
 }
 
@@ -766,6 +783,7 @@ impl<T: Client> Access<'_, T> {
     pub(crate) fn poll_tcp(&mut self, cx: &mut Context<'_>) {
         // Check for any new incoming connections
         self.inner
+            .shard
             .tcp
             .listeners
             .retain(|key, listener| match listener.poll_listener(cx) {
@@ -773,8 +791,13 @@ impl<T: Client> Access<'_, T> {
                     if let Some((socket, mut other_addr)) = result {
                         // If this packet was originally from the guest, update the port to match
                         // the original guest port. This allows loopback to work as expected.
-                        if self.inner.state.params.is_local_address(&other_addr) {
-                            for (other_ft, connection) in self.inner.tcp.connections.iter() {
+                        if self
+                            .inner
+                            .primary
+                            .runtime
+                            .is_local_address(&self.inner.primary.config.immutable, &other_addr)
+                        {
+                            for (other_ft, connection) in self.inner.shard.tcp.connections.iter() {
                                 if matches!(connection.inner.state, TcpState::Connecting | TcpState::SynReceived)
                                     && PortForwardKey::from_socket_addr(other_ft.dst, other_ft.dst.port()) == *key
                                 {
@@ -791,7 +814,16 @@ impl<T: Client> Access<'_, T> {
                                 }
                             }
                         }
-                        let Some(ft) = self.inner.state.try_ft_from_remote_address(&other_addr, key.guest_port) else {
+                        let Some(ft) = self
+                            .inner
+                            .primary
+                            .runtime
+                            .try_ft_from_remote_address(
+                                &self.inner.primary.config.immutable,
+                                &other_addr,
+                                key.guest_port,
+                            )
+                        else {
                             return true;
                         };
 
@@ -801,18 +833,26 @@ impl<T: Client> Access<'_, T> {
                             dst: ft.src,
                         };
 
-                        match self.inner.tcp.connections.entry(ft) {
+                        match self.inner.shard.tcp.connections.entry(ft) {
                             hash_map::Entry::Vacant(e) => {
                                 let mut sender = Sender {
                                     ft: &ft,
                                     client: self.client,
-                                    state: &mut self.inner.state,
+                                    config: &self.inner.primary.config.immutable,
+                                    runtime: &mut self.inner.primary.runtime,
+                                    buffer: &mut self.inner.shard.buffer,
+                                    tcp_close_timeout: self
+                                        .inner
+                                        .primary
+                                        .config
+                                        .params
+                                        .tcp_close_timeout,
                                 };
 
                                 let conn = match TcpConnection::new_from_accept(
                                     &mut sender,
                                     socket,
-                                    &self.inner.tcp.connection_params,
+                                    &self.inner.shard.tcp.connection_params,
                                 ) {
                                     Ok(conn) => conn,
                                     Err(err) => {
@@ -827,7 +867,12 @@ impl<T: Client> Access<'_, T> {
                                 };
                                 tracing::trace!(?ft, "TCP connection established");
                                 e.insert(conn);
-                                self.inner.tcp.aggregate_stats.connections_accepted.increment();
+                                self.inner
+                                    .shard
+                                    .tcp
+                                    .aggregate_stats
+                                    .connections_accepted
+                                    .increment();
                             }
                             hash_map::Entry::Occupied(_) => {
                                 tracing::warn!(
@@ -845,10 +890,13 @@ impl<T: Client> Access<'_, T> {
         // Check for any new incoming data.
         let mut now = None;
         let mut next_deadline: Option<TimerInstant> = None;
-        self.inner.tcp.connections.retain(|ft, conn| {
+        self.inner.shard.tcp.connections.retain(|ft, conn| {
             let mut sender = Sender {
                 ft,
-                state: &mut self.inner.state,
+                config: &self.inner.primary.config.immutable,
+                runtime: &mut self.inner.primary.runtime,
+                buffer: &mut self.inner.shard.buffer,
+                tcp_close_timeout: self.inner.primary.config.params.tcp_close_timeout,
                 client: self.client,
             };
             let timed_out = conn.inner.next_timer_deadline().is_some_and(|deadline| {
@@ -866,11 +914,12 @@ impl<T: Client> Access<'_, T> {
                     conn.backend,
                     TcpBackend::Dns(ref handler) if handler.is_in_flight()
                 ) {
-                    self.inner.dns.complete_tcp_query();
+                    self.inner.primary.dns.complete_tcp_query();
                 }
                 match conn.inner.state {
                     TcpState::TimeWait => self
                         .inner
+                        .shard
                         .tcp
                         .aggregate_stats
                         .record_close(ConnectionCloseReason::Normal),
@@ -886,7 +935,7 @@ impl<T: Client> Access<'_, T> {
                                 conn.inner.stats.rsts_tx.increment();
                             }
                         }
-                        self.inner.tcp.aggregate_stats.record_timeout_close();
+                        self.inner.shard.tcp.aggregate_stats.record_timeout_close();
                     }
                 }
                 return false;
@@ -894,12 +943,12 @@ impl<T: Client> Access<'_, T> {
 
             let keep = match &mut conn.backend {
                 TcpBackend::Dns(dns_handler) => {
-                    if self.inner.dns.can_answer_queries() {
+                    if self.inner.primary.dns.can_answer_queries() {
                         conn.inner.poll_dns_backend(
                             cx,
                             &mut sender,
                             dns_handler,
-                            &mut self.inner.dns,
+                            &mut self.inner.primary.dns,
                         )
                     } else {
                         tracelimit::warn_ratelimited!(
@@ -913,11 +962,12 @@ impl<T: Client> Access<'_, T> {
                     &mut sender,
                     socket,
                     static_dns,
-                    &self.inner.dns,
+                    &self.inner.primary.dns,
                 ),
             };
             if !keep {
                 self.inner
+                    .shard
                     .tcp
                     .aggregate_stats
                     .record_close(conn.inner.last_close_reason);
@@ -932,6 +982,7 @@ impl<T: Client> Access<'_, T> {
         if let Some(deadline) = next_deadline {
             let timer = self
                 .inner
+                .shard
                 .tcp
                 .timer
                 .get_or_insert_with(|| TcpTimer::new(self.client.driver()));
@@ -942,8 +993,8 @@ impl<T: Client> Access<'_, T> {
     }
 
     pub(crate) fn refresh_tcp_driver(&mut self) {
-        self.inner.tcp.timer = Some(TcpTimer::new(self.client.driver()));
-        self.inner.tcp.connections.retain(|ft, conn| {
+        self.inner.shard.tcp.timer = Some(TcpTimer::new(self.client.driver()));
+        self.inner.shard.tcp.connections.retain(|ft, conn| {
             let TcpBackend::Socket {
                 socket: opt_socket, ..
             } = &mut conn.backend
@@ -1001,25 +1052,32 @@ impl<T: Client> Access<'_, T> {
 
         let is_dns_tcp = is_gateway_dns_tcp(
             &ft,
-            &self.inner.state.params,
-            self.inner.dns.can_answer_queries(),
+            &self.inner.primary.config.immutable,
+            self.inner.primary.dns.can_answer_queries(),
         );
-        let inspect_static_dns =
-            ft.dst.port() == crate::DNS_PORT && self.inner.dns.should_intercept_static_queries();
+        let inspect_static_dns = ft.dst.port() == crate::DNS_PORT
+            && self.inner.primary.dns.should_intercept_static_queries();
 
         let replace_time_wait = tcp.control == TcpControl::Syn
             && tcp.ack_number.is_none()
-            && self.inner.tcp.connections.get(&ft).is_some_and(|conn| {
-                conn.inner.state == TcpState::TimeWait && tcp.seq_number > conn.inner.rx_seq
-            });
-        if replace_time_wait && let Some(conn) = self.inner.tcp.connections.remove(&ft) {
+            && self
+                .inner
+                .shard
+                .tcp
+                .connections
+                .get(&ft)
+                .is_some_and(|conn| {
+                    conn.inner.state == TcpState::TimeWait && tcp.seq_number > conn.inner.rx_seq
+                });
+        if replace_time_wait && let Some(conn) = self.inner.shard.tcp.connections.remove(&ft) {
             if matches!(
                 conn.backend,
                 TcpBackend::Dns(ref handler) if handler.is_in_flight()
             ) {
-                self.inner.dns.complete_tcp_query();
+                self.inner.primary.dns.complete_tcp_query();
             }
             self.inner
+                .shard
                 .tcp
                 .aggregate_stats
                 .record_close(ConnectionCloseReason::Normal);
@@ -1028,10 +1086,13 @@ impl<T: Client> Access<'_, T> {
         let mut sender = Sender {
             ft: &ft,
             client: self.client,
-            state: &mut self.inner.state,
+            config: &self.inner.primary.config.immutable,
+            runtime: &mut self.inner.primary.runtime,
+            buffer: &mut self.inner.shard.buffer,
+            tcp_close_timeout: self.inner.primary.config.params.tcp_close_timeout,
         };
 
-        match self.inner.tcp.connections.entry(ft) {
+        match self.inner.shard.tcp.connections.entry(ft) {
             hash_map::Entry::Occupied(mut e) => {
                 let keep = e.get_mut().inner.handle_packet(&mut sender, &tcp)?;
                 if keep {
@@ -1049,6 +1110,7 @@ impl<T: Client> Access<'_, T> {
                     e.get_mut().inner.send_next(&mut sender, AckPolicy::Defer);
                 } else {
                     self.inner
+                        .shard
                         .tcp
                         .aggregate_stats
                         .record_close(e.get().inner.last_close_reason);
@@ -1058,7 +1120,7 @@ impl<T: Client> Access<'_, T> {
                     );
                     e.remove();
                     if dns_in_flight {
-                        self.inner.dns.complete_tcp_query();
+                        self.inner.primary.dns.complete_tcp_query();
                     }
                 }
             }
@@ -1073,19 +1135,21 @@ impl<T: Client> Access<'_, T> {
                         TcpConnection::new_dns(
                             &mut sender,
                             &tcp,
-                            &self.inner.tcp.connection_params,
+                            &self.inner.shard.tcp.connection_params,
                         )?
                     } else {
                         // Resolve virtual mapped addresses back to real host
                         // addresses before establishing the connection.
-                        let resolved_dst = sender.state.resolve_destination(&sender.ft.dst);
+                        let resolved_dst = sender.runtime.resolve_destination(&sender.ft.dst);
                         // If this is directed to a local port owned by the guest, use the
                         // appropriate host port substitution.
-                        let is_local_address = sender.state.params.is_local_address(&resolved_dst);
+                        let is_local_address = sender
+                            .runtime
+                            .is_local_address(sender.config, &resolved_dst);
                         let key =
                             PortForwardKey::from_socket_addr(resolved_dst, resolved_dst.port());
                         let ft = if is_local_address
-                            && let Some(listener) = self.inner.tcp.listeners.get(&key)
+                            && let Some(listener) = self.inner.shard.tcp.listeners.get(&key)
                         {
                             FourTuple {
                                 src: sender.ft.src,
@@ -1102,18 +1166,22 @@ impl<T: Client> Access<'_, T> {
                         let mut sender = Sender {
                             ft: &ft,
                             client: sender.client,
-                            state: sender.state,
+                            config: sender.config,
+                            runtime: sender.runtime,
+                            buffer: sender.buffer,
+                            tcp_close_timeout: sender.tcp_close_timeout,
                         };
                         TcpConnection::new(
                             &mut sender,
                             &tcp,
-                            &self.inner.tcp.connection_params,
+                            &self.inner.shard.tcp.connection_params,
                             is_local_address,
                             inspect_static_dns,
                         )?
                     };
                     e.insert(conn);
                     self.inner
+                        .shard
                         .tcp
                         .aggregate_stats
                         .connections_initiated
@@ -1131,7 +1199,7 @@ impl<T: Client> Access<'_, T> {
     pub fn bind_tcp_port(&mut self, socket: Socket, guest_port: u16) -> Result<(), BindError> {
         let host_addr = Self::socket_local_addr(&socket)?;
         let key = PortForwardKey::from_socket_addr(host_addr, guest_port);
-        match self.inner.tcp.listeners.entry(key) {
+        match self.inner.shard.tcp.listeners.entry(key) {
             hash_map::Entry::Occupied(_) => {
                 return Err(BindError::PortAlreadyBound(guest_port));
             }
@@ -1147,6 +1215,7 @@ impl<T: Client> Access<'_, T> {
     pub fn unbind_tcp_port(&mut self, family: IpVersion, port: u16) -> Result<(), BindError> {
         match self
             .inner
+            .shard
             .tcp
             .listeners
             .entry(PortForwardKey::new(family, port))
@@ -1171,16 +1240,19 @@ impl<T: Client> Access<'_, T> {
 struct Sender<'a, T> {
     ft: &'a FourTuple,
     client: &'a mut T,
-    state: &'a mut ConsommeState,
+    config: &'a ConsommeConfig,
+    runtime: &'a mut ConsommePrimaryRuntime,
+    buffer: &'a mut [u8],
+    tcp_close_timeout: Duration,
 }
 
 impl<T: Client> Sender<'_, T> {
     fn send_packet(&mut self, tcp: &TcpRepr<'_>, payload: Option<ring::View<'_>>) {
         let payload_len = payload.as_ref().map_or(0, |p| p.len());
-        let buffer = &mut self.state.buffer;
+        let buffer = &mut *self.buffer;
         let mut eth_packet = EthernetFrame::new_unchecked(&mut buffer[..]);
-        eth_packet.set_dst_addr(self.state.params.client_mac);
-        eth_packet.set_src_addr(self.state.params.gateway_mac);
+        eth_packet.set_dst_addr(self.config.client_mac);
+        eth_packet.set_src_addr(self.config.gateway_mac);
         let ip = IpRepr::new(
             self.ft.dst.ip().into(),
             self.ft.src.ip().into(),
@@ -1234,7 +1306,7 @@ impl<T: Client> Sender<'_, T> {
             Some(p) if p.len() != 0 => p,
             _ => {
                 tcp_packet.fill_checksum(&dst_ip_addr, &src_ip_addr);
-                let buffer = &self.state.buffer;
+                let buffer = &*self.buffer;
                 self.client.recv(&buffer[..n], &checksum_state);
                 return;
             }
@@ -1269,7 +1341,7 @@ impl<T: Client> Sender<'_, T> {
         tcp_packet.set_checksum(checksum);
 
         let header_len = n - payload_len;
-        let buffer = &self.state.buffer;
+        let buffer = &*self.buffer;
         let header = &buffer[..header_len];
         if b.is_empty() {
             self.client.recv_segments(&[header, a], &checksum_state);
@@ -1470,8 +1542,8 @@ impl TcpConnection {
         let flow = crate::dns_resolver::DnsFlow {
             src: sender.ft.src,
             dst: sender.ft.dst,
-            gateway_mac: sender.state.params.gateway_mac,
-            client_mac: sender.state.params.client_mac,
+            gateway_mac: sender.config.gateway_mac,
+            client_mac: sender.config.client_mac,
             transport: crate::dns_resolver::DnsTransport::Tcp,
         };
 
@@ -1565,7 +1637,7 @@ impl TcpConnectionInner {
                     if n == 0 {
                         // EOF — close the connection.
                         if !self.state.tx_fin() {
-                            self.close(sender.state.params.tcp_close_timeout);
+                            self.close(sender.tcp_close_timeout);
                         }
                         break;
                     }
@@ -1671,7 +1743,7 @@ impl TcpConnectionInner {
                         match Pin::new(&mut *socket).poll_read_vectored(cx, &mut bufs) {
                             Poll::Ready(Ok(n)) => {
                                 if n == 0 {
-                                    self.close(sender.state.params.tcp_close_timeout);
+                                    self.close(sender.tcp_close_timeout);
                                     break 'read;
                                 }
                                 if let Some(static_dns) = static_dns.as_mut() {
@@ -2110,7 +2182,7 @@ impl TcpConnectionInner {
                     SocketAddr::V6(_) => IPV6_HEADER_LEN,
                 };
                 let header_len = ETHERNET_HEADER_LEN + ip_header_len + tcp.header_len();
-                let mtu = rx_mtu.min(sender.state.buffer.len());
+                let mtu = rx_mtu.min(sender.buffer.len());
                 seq_min([
                     tx_payload_end,
                     tx_window_end,
@@ -2352,7 +2424,7 @@ impl TcpConnectionInner {
             SocketAddr::V6(_) => IPV6_HEADER_LEN,
         };
         let tcp_header_len = 20;
-        let mtu = sender.client.rx_mtu().min(sender.state.buffer.len());
+        let mtu = sender.client.rx_mtu().min(sender.buffer.len());
         let max_payload = mtu.saturating_sub(ETHERNET_HEADER_LEN + ip_header_len + tcp_header_len);
         let scale = if self.tx_window_scale_active {
             self.tx_window_scale
@@ -2426,7 +2498,7 @@ impl TcpConnectionInner {
             SocketAddr::V6(_) => IPV6_HEADER_LEN,
         };
         let header_len = ETHERNET_HEADER_LEN + ip_header_len + 20;
-        if rx_mtu.min(sender.state.buffer.len()) <= header_len {
+        if rx_mtu.min(sender.buffer.len()) <= header_len {
             return false;
         }
 
@@ -2625,7 +2697,7 @@ impl TcpConnectionInner {
             && tcp.seq_number + 1 == self.rx_seq
         {
             self.ack_or_defer(sender);
-            self.restart_time_wait(sender.state.params.tcp_close_timeout);
+            self.restart_time_wait(sender.tcp_close_timeout);
             return Ok(true);
         }
 
@@ -2668,10 +2740,7 @@ impl TcpConnectionInner {
                 && tcp.payload.len() <= 1
                 && (tcp.seq_number == self.rx_seq || tcp.seq_number + 1 == self.rx_seq);
             if is_zero_window_probe {
-                self.refresh_close_deadline(
-                    TimerInstant::now(),
-                    sender.state.params.tcp_close_timeout,
-                );
+                self.refresh_close_deadline(TimerInstant::now(), sender.tcp_close_timeout);
             }
             self.ack(sender);
             return Err(TcpError::Unacceptable.into());
@@ -2741,7 +2810,7 @@ impl TcpConnectionInner {
                     }
                     TcpState::Closing => {
                         self.state = TcpState::TimeWait;
-                        self.restart_time_wait(sender.state.params.tcp_close_timeout);
+                        self.restart_time_wait(sender.tcp_close_timeout);
                     }
                     TcpState::LastAck => {
                         self.last_close_reason = ConnectionCloseReason::Normal;
@@ -2756,7 +2825,7 @@ impl TcpConnectionInner {
         if self.tx_acked > previous_tx_acked {
             let now = *packet_now.get_or_insert_with(TimerInstant::now);
             self.retransmission.on_ack(self.tx_acked, self.tx_send, now);
-            self.refresh_close_deadline(now, sender.state.params.tcp_close_timeout);
+            self.refresh_close_deadline(now, sender.tcp_close_timeout);
         } else if ack_number == self.tx_acked
             && (self.tx_acked < self.tx_send || !self.tx_buffer.is_empty())
             && tcp.control == TcpControl::None
@@ -2766,7 +2835,7 @@ impl TcpConnectionInner {
             // is still responsive, even when its zero window prevents the ACK
             // number from advancing.
             let now = *packet_now.get_or_insert_with(TimerInstant::now);
-            self.refresh_close_deadline(now, sender.state.params.tcp_close_timeout);
+            self.refresh_close_deadline(now, sender.tcp_close_timeout);
         }
 
         let is_duplicate_ack = self.tx_acked == previous_tx_acked
@@ -2886,7 +2955,7 @@ impl TcpConnectionInner {
                         && matches!(self.lifetime_timer, LifetimeTimer::Close(_))
                     {
                         let now = *packet_now.get_or_insert_with(TimerInstant::now);
-                        self.refresh_close_deadline(now, sender.state.params.tcp_close_timeout);
+                        self.refresh_close_deadline(now, sender.tcp_close_timeout);
                     }
                     self.rx_buffer.extend_by(rx_consumed);
                     self.rx_seq += rx_consumed;
@@ -2917,7 +2986,7 @@ impl TcpConnectionInner {
                 }
                 TcpState::FinWait2 => {
                     self.state = TcpState::TimeWait;
-                    self.restart_time_wait(sender.state.params.tcp_close_timeout);
+                    self.restart_time_wait(sender.tcp_close_timeout);
                 }
                 TcpState::CloseWait
                 | TcpState::Closing
@@ -3158,17 +3227,13 @@ fn seq_min<const N: usize>(seqs: [TcpSeqNumber; N]) -> TcpSeqNumber {
 }
 
 /// Check if a TCP connection targets the gateway's DNS port.
-fn is_gateway_dns_tcp(
-    ft: &FourTuple,
-    params: &crate::ConsommeParams,
-    can_answer_queries: bool,
-) -> bool {
+fn is_gateway_dns_tcp(ft: &FourTuple, config: &ConsommeConfig, can_answer_queries: bool) -> bool {
     if !can_answer_queries || ft.dst.port() != crate::DNS_PORT {
         return false;
     }
     match ft.dst.ip() {
-        IpAddr::V4(ip) => params.gateway_ip == ip,
-        IpAddr::V6(ip) => params.gateway_link_local_ipv6 == ip,
+        IpAddr::V4(ip) => config.gateway_ip == ip,
+        IpAddr::V6(ip) => config.gateway_link_local_ipv6 == ip,
     }
 }
 

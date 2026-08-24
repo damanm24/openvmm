@@ -394,16 +394,16 @@ impl TcpTestHarness {
         let dst_port = std_listener.local_addr().unwrap().port();
         let mut listener = PolledSocket::new(&driver, std_listener).unwrap();
 
-        let mut consomme = Consomme::new({
+        let mut consomme = Consomme::new(ConsommeConfig::new(), {
             let mut params = params;
             params.allow_host_local_access = true;
             params
         });
         let mut client = TestClient::new(driver);
 
-        let guest_mac = consomme.params_mut().client_mac;
-        let gateway_mac = consomme.params_mut().gateway_mac;
-        let guest_ip = consomme.params_mut().client_ip;
+        let guest_mac = consomme.config().client_mac;
+        let gateway_mac = consomme.config().gateway_mac;
+        let guest_ip = consomme.config().client_ip;
         let dst_ip: Ipv4Address = Ipv4Addr::LOCALHOST;
         let guest_port = 44444u16;
         let guest_isn = TcpSeqNumber(1000);
@@ -714,6 +714,7 @@ impl TcpTestHarness {
         std::future::poll_fn(move |cx| {
             consomme.access(client).poll(cx);
             let inner = &consomme
+                .shard
                 .tcp
                 .connections
                 .get(&ft)
@@ -761,6 +762,7 @@ impl TcpTestHarness {
         let ft = self.four_tuple();
         &self
             .consomme
+            .shard
             .tcp
             .connections
             .get(&ft)
@@ -778,6 +780,7 @@ impl TcpTestHarness {
         std::future::poll_fn(|cx| {
             consomme.access(client).poll(cx);
             let inner = &consomme
+                .shard
                 .tcp
                 .connections
                 .get(&ft)
@@ -819,6 +822,7 @@ impl TcpTestHarness {
         std::future::poll_fn(move |cx| {
             consomme.access(client).poll(cx);
             let avail = consomme
+                .shard
                 .tcp
                 .connections
                 .get(&ft)
@@ -1089,7 +1093,7 @@ async fn test_tcp_overlapping_retransmit(driver: DefaultDriver) {
 /// TCP connection is forwarded to the guest as a SYN packet.
 #[pal_async::async_test]
 async fn test_tcp_bind_port_forward(driver: DefaultDriver) {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::new(driver.clone());
 
     let guest_port = 7777;
@@ -1111,6 +1115,7 @@ async fn test_tcp_bind_port_forward(driver: DefaultDriver) {
         assert!(
             access
                 .inner
+                .shard
                 .tcp
                 .listeners
                 .contains_key(&PortForwardKey::new(IpVersion::Ipv4, guest_port)),
@@ -1165,7 +1170,7 @@ async fn test_tcp_bind_port_forward(driver: DefaultDriver) {
 /// becomes available.
 #[pal_async::async_test]
 async fn test_tcp_port_forward_defers_initial_syn_without_rx_buffer(driver: DefaultDriver) {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::with_rx_buffers(driver.clone(), 0);
 
     let guest_port = 7777;
@@ -1192,7 +1197,7 @@ async fn test_tcp_port_forward_defers_initial_syn_without_rx_buffer(driver: Defa
         })
         .await;
 
-        if !consomme.tcp.connections.is_empty() {
+        if !consomme.shard.tcp.connections.is_empty() {
             break;
         }
         assert!(
@@ -1230,7 +1235,7 @@ async fn test_tcp_port_forward_defers_initial_syn_without_rx_buffer(driver: Defa
     let (_, _, syn) = parse_tcp_packet(&syn_packet);
     assert!(syn.ack_number.is_none());
 
-    let connection = consomme.tcp.connections.values_mut().next().unwrap();
+    let connection = consomme.shard.tcp.connections.values_mut().next().unwrap();
     assert!(matches!(
         connection.inner.lifetime_timer,
         LifetimeTimer::Handshake(_)
@@ -1245,7 +1250,7 @@ async fn test_tcp_port_forward_defers_initial_syn_without_rx_buffer(driver: Defa
     })
     .await;
     assert!(
-        consomme.tcp.connections.is_empty(),
+        consomme.shard.tcp.connections.is_empty(),
         "expired handshake should be reclaimed"
     );
     let rst_packet = received
@@ -1268,12 +1273,12 @@ async fn test_tcp_port_forward_defers_initial_syn_without_rx_buffer(driver: Defa
 /// stale tuple without allowing guest packets to accelerate SYN retransmits.
 #[pal_async::async_test]
 async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::with_rx_buffers(driver.clone(), 1);
 
-    let guest_mac = consomme.params_mut().client_mac;
-    let gateway_mac = consomme.params_mut().gateway_mac;
-    let guest_ip = consomme.params_mut().client_ip;
+    let guest_mac = consomme.config().client_mac;
+    let gateway_mac = consomme.config().gateway_mac;
+    let guest_ip = consomme.config().client_ip;
     let guest_port = 7777;
     let received = client.received_packets.clone();
 
@@ -1396,6 +1401,7 @@ async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
 
     client.add_rx_buffers(1);
     consomme
+        .shard
         .tcp
         .connections
         .get_mut(&ft)
@@ -1455,6 +1461,7 @@ async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
 
     assert_eq!(
         consomme
+            .shard
             .tcp
             .connections
             .get(&ft)
@@ -1466,6 +1473,7 @@ async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
     assert!(
         matches!(
             consomme
+                .shard
                 .tcp
                 .connections
                 .get(&ft)
@@ -1477,7 +1485,14 @@ async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
         "completed handshake should clear its deadline"
     );
     assert!(
-        consomme.tcp.connections.get(&ft).unwrap().inner.needs_ack,
+        consomme
+            .shard
+            .tcp
+            .connections
+            .get(&ft)
+            .unwrap()
+            .inner
+            .needs_ack,
         "final handshake ACK should remain pending without an RX buffer"
     );
     assert!(
@@ -1502,7 +1517,14 @@ async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
         "final handshake ACK should be sent once an RX buffer is available"
     );
     assert!(
-        !consomme.tcp.connections.get(&ft).unwrap().inner.needs_ack,
+        !consomme
+            .shard
+            .tcp
+            .connections
+            .get(&ft)
+            .unwrap()
+            .inner
+            .needs_ack,
         "sending the final handshake ACK should clear the pending state"
     );
 }
@@ -1513,12 +1535,12 @@ async fn test_tcp_port_forward_recovers_from_stale_ack(driver: DefaultDriver) {
 /// adapter.
 #[pal_async::async_test]
 async fn test_tcp_port_forward_loopback_src_rewritten(driver: DefaultDriver) {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::new(driver.clone());
 
     let guest_port = 9999;
     let received = client.received_packets.clone();
-    let client_ip = consomme.params_mut().client_ip;
+    let client_ip = consomme.config().client_ip;
 
     // Create and bind a TCP socket on loopback.
     let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
@@ -1598,15 +1620,15 @@ async fn test_tcp_port_forward_loopback_src_rewritten(driver: DefaultDriver) {
 /// back through the adapter.
 #[pal_async::async_test]
 async fn test_tcp_port_forward_loopback_adapter_src_not_rewritten(driver: DefaultDriver) {
-    let mut params = ConsommeParams::new().unwrap();
+    let mut config = ConsommeConfig::new();
     // Configure this endpoint as a loopback adapter.
-    params.client_ip = Ipv4Address::new(127, 0, 0, 1);
-    let mut consomme = Consomme::new(params);
+    config.client_ip = Ipv4Address::new(127, 0, 0, 1);
+    let mut consomme = Consomme::new(config, ConsommeParams::new().unwrap());
     let mut client = TestClient::new(driver.clone());
 
     let guest_port = 9999;
     let received = client.received_packets.clone();
-    let client_ip = consomme.params_mut().client_ip;
+    let client_ip = consomme.config().client_ip;
 
     // Create and bind a TCP socket on loopback.
     let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
@@ -1676,7 +1698,7 @@ async fn test_tcp_port_forward_loopback_adapter_src_not_rewritten(driver: Defaul
 /// Test that binding the same guest port twice returns `PortAlreadyBound`.
 #[pal_async::async_test]
 async fn test_tcp_bind_duplicate_port(driver: DefaultDriver) {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::new(driver);
 
     let guest_port = 8888;
@@ -1708,7 +1730,7 @@ async fn test_tcp_bind_duplicate_port(driver: DefaultDriver) {
 /// Test that the same guest TCP port can be bound separately for IPv4 and IPv6.
 #[pal_async::async_test]
 async fn test_tcp_bind_same_port_different_families(driver: DefaultDriver) {
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::new(driver);
 
     let guest_port = 8889;
@@ -1747,6 +1769,7 @@ async fn test_tcp_bind_same_port_different_families(driver: DefaultDriver) {
     assert!(
         access
             .inner
+            .shard
             .tcp
             .listeners
             .contains_key(&PortForwardKey::new(IpVersion::Ipv6, guest_port)),
@@ -1886,16 +1909,16 @@ async fn test_tcp_deferred_ack_batching(driver: DefaultDriver) {
 /// fields represent unscaled values.
 #[pal_async::async_test]
 async fn test_tcp_window_scale_activation(driver: DefaultDriver) {
-    let mut consomme = Consomme::new({
+    let mut consomme = Consomme::new(ConsommeConfig::new(), {
         let mut params = ConsommeParams::new().unwrap();
         params.allow_host_local_access = true;
         params
     });
     let mut client = TestClient::new(driver.clone());
 
-    let guest_mac = consomme.params_mut().client_mac;
-    let gateway_mac = consomme.params_mut().gateway_mac;
-    let guest_ip = consomme.params_mut().client_ip;
+    let guest_mac = consomme.config().client_mac;
+    let gateway_mac = consomme.config().gateway_mac;
+    let guest_ip = consomme.config().client_ip;
     let dst_ip: Ipv4Address = Ipv4Addr::LOCALHOST;
     let guest_port = 55555u16;
     let guest_isn = TcpSeqNumber(2000);
@@ -2021,6 +2044,7 @@ async fn test_tcp_window_scale_activation(driver: DefaultDriver) {
         dst: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, dst_port)),
     };
     let conn = consomme
+        .shard
         .tcp
         .connections
         .get(&ft)
@@ -2053,12 +2077,12 @@ async fn test_tcp_window_scale_activation(driver: DefaultDriver) {
 async fn test_tcp_port_forward_window_scale_guard(driver: DefaultDriver) {
     use std::io::Write;
 
-    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut consomme = Consomme::new(ConsommeConfig::new(), ConsommeParams::new().unwrap());
     let mut client = TestClient::new(driver.clone());
 
-    let guest_mac = consomme.params_mut().client_mac;
-    let gateway_mac = consomme.params_mut().gateway_mac;
-    let guest_ip = consomme.params_mut().client_ip;
+    let guest_mac = consomme.config().client_mac;
+    let gateway_mac = consomme.config().gateway_mac;
+    let guest_ip = consomme.config().client_ip;
     let guest_port = 7777u16;
     let received = client.received_packets.clone();
     let mut buf = vec![0u8; 1514];
@@ -2145,6 +2169,7 @@ async fn test_tcp_port_forward_window_scale_guard(driver: DefaultDriver) {
     };
     received.lock().clear();
     let mut conn = consomme
+        .shard
         .tcp
         .connections
         .remove(&ft)
@@ -2153,7 +2178,10 @@ async fn test_tcp_port_forward_window_scale_guard(driver: DefaultDriver) {
         let mut sender = Sender {
             ft: &ft,
             client: &mut client,
-            state: &mut consomme.state,
+            config: &consomme.primary.config.immutable,
+            runtime: &mut consomme.primary.runtime,
+            buffer: &mut consomme.shard.buffer,
+            tcp_close_timeout: consomme.primary.config.params.tcp_close_timeout,
         };
         conn.inner.handle_listen_syn(&mut sender, &invalid_syn_ack)
     };
@@ -2165,7 +2193,7 @@ async fn test_tcp_port_forward_window_scale_guard(driver: DefaultDriver) {
     assert_eq!(conn.inner.tx_acked, server_isn);
     assert_eq!(conn.inner.tx_send, server_isn + 1);
     assert_eq!(conn.inner.tx_syn, TxSynState::Syn);
-    consomme.tcp.connections.insert(ft, conn);
+    consomme.shard.tcp.connections.insert(ft, conn);
 
     std::future::poll_fn(|cx| {
         consomme.access(&mut client).poll(cx);
@@ -2219,6 +2247,7 @@ async fn test_tcp_port_forward_window_scale_guard(driver: DefaultDriver) {
     // Verify internal state: tx_window_scale_active should be FALSE
     // because handle_listen_syn doesn't activate it.
     let conn = consomme
+        .shard
         .tcp
         .connections
         .get(&ft)
@@ -2296,16 +2325,16 @@ async fn test_tcp_port_forward_window_scale_guard(driver: DefaultDriver) {
 /// source port, not the proxy ephemeral port).
 #[pal_async::async_test]
 async fn test_tcp_loopback_port_remap(driver: DefaultDriver) {
-    let mut consomme = Consomme::new({
+    let mut consomme = Consomme::new(ConsommeConfig::new(), {
         let mut params = ConsommeParams::new().unwrap();
         params.allow_host_local_access = true;
         params
     });
     let mut client = TestClient::new(driver.clone());
 
-    let guest_mac = consomme.params_mut().client_mac;
-    let gateway_mac = consomme.params_mut().gateway_mac;
-    let guest_ip = consomme.params_mut().client_ip;
+    let guest_mac = consomme.config().client_mac;
+    let gateway_mac = consomme.config().gateway_mac;
+    let guest_ip = consomme.config().client_ip;
     let listener_guest_port = 8080u16;
     let guest_src_port = 55555u16;
     let dst_ip: Ipv4Address = Ipv4Addr::LOCALHOST;
@@ -2651,8 +2680,15 @@ async fn test_tcp_time_wait_cleanup(driver: DefaultDriver) {
     // The connection should now be in TimeWait with a deadline set.
     {
         let access = h.consomme.access(&mut h.client);
-        assert_eq!(access.inner.tcp.connections.len(), 1);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        assert_eq!(access.inner.shard.tcp.connections.len(), 1);
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         assert_eq!(conn.inner.state, TcpState::TimeWait);
         assert_eq!(conn.inner.rx_buffer.capacity(), 0);
         assert_eq!(conn.inner.tx_buffer.capacity(), 0);
@@ -2697,7 +2733,14 @@ async fn test_tcp_time_wait_cleanup(driver: DefaultDriver) {
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         assert!(
             conn.inner.lifetime_timer.deadline() > Some(Instant::now() + Duration::from_secs(1)),
             "retransmitted FIN must restart the TimeWait deadline"
@@ -2714,7 +2757,13 @@ async fn test_tcp_time_wait_cleanup(driver: DefaultDriver) {
     .await;
 
     assert_eq!(
-        h.consomme.access(&mut h.client).inner.tcp.connections.len(),
+        h.consomme
+            .access(&mut h.client)
+            .inner
+            .shard
+            .tcp
+            .connections
+            .len(),
         0,
         "expired TimeWait connection should be removed"
     );
@@ -2722,6 +2771,7 @@ async fn test_tcp_time_wait_cleanup(driver: DefaultDriver) {
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_timeout
@@ -2733,6 +2783,7 @@ async fn test_tcp_time_wait_cleanup(driver: DefaultDriver) {
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_normal
@@ -2754,8 +2805,15 @@ async fn test_tcp_guest_action_timeout_cleanup(driver: DefaultDriver) {
 
         {
             let access = h.consomme.access(&mut h.client);
-            assert_eq!(access.inner.tcp.connections.len(), 1);
-            let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+            assert_eq!(access.inner.shard.tcp.connections.len(), 1);
+            let conn = access
+                .inner
+                .shard
+                .tcp
+                .connections
+                .values_mut()
+                .next()
+                .unwrap();
             conn.inner.state = state;
             conn.inner.lifetime_timer =
                 LifetimeTimer::Close(Instant::now() - Duration::from_secs(1));
@@ -2768,7 +2826,13 @@ async fn test_tcp_guest_action_timeout_cleanup(driver: DefaultDriver) {
         .await;
 
         assert_eq!(
-            h.consomme.access(&mut h.client).inner.tcp.connections.len(),
+            h.consomme
+                .access(&mut h.client)
+                .inner
+                .shard
+                .tcp
+                .connections
+                .len(),
             0,
             "expired {state_name} connection should be removed"
         );
@@ -2776,6 +2840,7 @@ async fn test_tcp_guest_action_timeout_cleanup(driver: DefaultDriver) {
             h.consomme
                 .access(&mut h.client)
                 .inner
+                .shard
                 .tcp
                 .aggregate_stats
                 .connections_closed_timeout
@@ -2787,6 +2852,7 @@ async fn test_tcp_guest_action_timeout_cleanup(driver: DefaultDriver) {
             h.consomme
                 .access(&mut h.client)
                 .inner
+                .shard
                 .tcp
                 .aggregate_stats
                 .connections_closed_normal
@@ -2808,7 +2874,14 @@ async fn test_tcp_close_wait_has_no_peer_progress_timeout(driver: DefaultDriver)
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         assert_eq!(conn.inner.state, TcpState::CloseWait);
         assert!(
             matches!(conn.inner.lifetime_timer, LifetimeTimer::None),
@@ -2827,6 +2900,7 @@ async fn test_tcp_close_wait_has_no_peer_progress_timeout(driver: DefaultDriver)
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_timeout
@@ -2847,7 +2921,14 @@ async fn test_tcp_last_ack_restarts_timeout_after_close_wait(driver: DefaultDriv
     // happens to be present.
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.lifetime_timer = LifetimeTimer::Close(Instant::now() + Duration::from_millis(1));
     }
 
@@ -2880,7 +2961,7 @@ async fn test_tcp_fin_wait_zero_window_probes_refresh_timeout(driver: DefaultDri
 
     let ft = h.four_tuple();
     {
-        let conn = h.consomme.tcp.connections.get_mut(&ft).unwrap();
+        let conn = h.consomme.shard.tcp.connections.get_mut(&ft).unwrap();
         let available = conn.inner.rx_window_cap - conn.inner.rx_buffer.len();
         conn.inner
             .rx_buffer
@@ -2902,7 +2983,7 @@ async fn test_tcp_fin_wait_zero_window_probes_refresh_timeout(driver: DefaultDri
     );
 
     {
-        let conn = h.consomme.tcp.connections.get_mut(&ft).unwrap();
+        let conn = h.consomme.shard.tcp.connections.get_mut(&ft).unwrap();
         conn.inner.lifetime_timer = LifetimeTimer::Close(Instant::now() + Duration::from_millis(1));
     }
 
@@ -2919,7 +3000,7 @@ async fn test_tcp_fin_wait_zero_window_probes_refresh_timeout(driver: DefaultDri
     );
 
     {
-        let conn = h.consomme.tcp.connections.get_mut(&ft).unwrap();
+        let conn = h.consomme.shard.tcp.connections.get_mut(&ft).unwrap();
         conn.inner.lifetime_timer = LifetimeTimer::Close(Instant::now() + Duration::from_millis(1));
     }
 
@@ -2955,8 +3036,15 @@ async fn test_tcp_closing_cleanup(driver: DefaultDriver) {
 
     {
         let access = h.consomme.access(&mut h.client);
-        assert_eq!(access.inner.tcp.connections.len(), 1);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        assert_eq!(access.inner.shard.tcp.connections.len(), 1);
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         assert_eq!(conn.inner.state, TcpState::Closing);
         assert_eq!(conn.inner.rx_buffer.capacity(), 0);
         assert!(
@@ -2973,7 +3061,13 @@ async fn test_tcp_closing_cleanup(driver: DefaultDriver) {
     .await;
 
     assert_eq!(
-        h.consomme.access(&mut h.client).inner.tcp.connections.len(),
+        h.consomme
+            .access(&mut h.client)
+            .inner
+            .shard
+            .tcp
+            .connections
+            .len(),
         0,
         "expired Closing connection should be removed"
     );
@@ -2981,6 +3075,7 @@ async fn test_tcp_closing_cleanup(driver: DefaultDriver) {
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_timeout
@@ -2992,6 +3087,7 @@ async fn test_tcp_closing_cleanup(driver: DefaultDriver) {
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_normal
@@ -3028,8 +3124,15 @@ async fn test_tcp_last_ack_cleanup(driver: DefaultDriver) {
     // deadline into the past.
     {
         let access = h.consomme.access(&mut h.client);
-        assert_eq!(access.inner.tcp.connections.len(), 1);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        assert_eq!(access.inner.shard.tcp.connections.len(), 1);
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         assert_eq!(conn.inner.state, TcpState::LastAck);
         assert_eq!(conn.inner.rx_buffer.capacity(), 0);
         assert_eq!(conn.inner.tx_buffer.capacity(), 0);
@@ -3047,7 +3150,13 @@ async fn test_tcp_last_ack_cleanup(driver: DefaultDriver) {
     .await;
 
     assert_eq!(
-        h.consomme.access(&mut h.client).inner.tcp.connections.len(),
+        h.consomme
+            .access(&mut h.client)
+            .inner
+            .shard
+            .tcp
+            .connections
+            .len(),
         0,
         "expired LastAck connection should be removed"
     );
@@ -3055,6 +3164,7 @@ async fn test_tcp_last_ack_cleanup(driver: DefaultDriver) {
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_timeout
@@ -3066,6 +3176,7 @@ async fn test_tcp_last_ack_cleanup(driver: DefaultDriver) {
         h.consomme
             .access(&mut h.client)
             .inner
+            .shard
             .tcp
             .aggregate_stats
             .connections_closed_normal
@@ -3093,7 +3204,14 @@ async fn test_tcp_retransmits_unacknowledged_data(driver: DefaultDriver) {
     h.clear_guest_packets();
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Rto {
             deadline: Instant::now() - Duration::from_millis(1),
             recover: None,
@@ -3144,7 +3262,14 @@ async fn test_tcp_retransmits_fin_until_acknowledged(driver: DefaultDriver) {
     h.clear_guest_packets();
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Rto {
             deadline: Instant::now() - Duration::from_millis(1),
             recover: None,
@@ -3193,7 +3318,14 @@ async fn test_tcp_close_before_syn_ack_retransmits_syn_then_fin(driver: DefaultD
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.state = TcpState::SynReceived;
         conn.inner.tx_acked = conn.inner.tx_acked - 1;
         conn.inner.tx_syn = TxSynState::SynAck;
@@ -3240,7 +3372,14 @@ async fn test_tcp_zero_window_persist_probe(driver: DefaultDriver) {
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         assert_eq!(conn.inner.tx_send, conn.inner.tx_acked);
         assert_eq!(conn.inner.tx_buffer.len(), 5);
         assert!(matches!(
@@ -3280,7 +3419,14 @@ async fn test_tcp_zero_window_persist_probe(driver: DefaultDriver) {
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Persist {
             deadline: Instant::now() - Duration::from_millis(1),
             backoff: 1,
@@ -3306,7 +3452,14 @@ async fn test_tcp_zero_window_persist_probe(driver: DefaultDriver) {
     h.client.add_rx_buffers(1);
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Persist {
             deadline: Instant::now() - Duration::from_millis(1),
             backoff: 1,
@@ -3404,7 +3557,14 @@ async fn test_tcp_zero_window_persist_preserves_recovery(driver: DefaultDriver) 
     let recover = h.connection_inner().tx_send;
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Rto {
             deadline: Instant::now() - Duration::from_millis(1),
             recover: None,
@@ -3429,7 +3589,14 @@ async fn test_tcp_zero_window_persist_preserves_recovery(driver: DefaultDriver) 
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Persist {
             deadline: Instant::now() - Duration::from_millis(1),
             backoff: 0,
@@ -3471,7 +3638,14 @@ async fn test_tcp_zero_window_persist_preserves_recovery(driver: DefaultDriver) 
     h.client.add_rx_buffers(1);
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Rto {
             deadline: Instant::now() - Duration::from_millis(1),
             recover: Some(recover),
@@ -3517,7 +3691,14 @@ async fn test_tcp_close_timeout_refreshes_on_progress(driver: DefaultDriver) {
 
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.lifetime_timer = LifetimeTimer::Close(Instant::now() + Duration::from_millis(1));
     }
     h.send_segment(TcpControl::None, h.guest_seq, &[]);
@@ -3548,6 +3729,7 @@ async fn test_tcp_close_timeout_ignores_duplicate_out_of_order_data(driver: Defa
     h.send_segment(TcpControl::None, out_of_order_seq, b"new");
     let deadline = Instant::now() + Duration::from_millis(10);
     h.consomme
+        .shard
         .tcp
         .connections
         .get_mut(&h.four_tuple())
@@ -3568,7 +3750,13 @@ async fn test_tcp_time_wait_accepts_newer_syn(driver: DefaultDriver) {
     let mut h = TcpTestHarness::connect(driver).await;
     let old_rx_seq = h.connection_inner().rx_seq;
     {
-        let connection = h.consomme.tcp.connections.get_mut(&h.four_tuple()).unwrap();
+        let connection = h
+            .consomme
+            .shard
+            .tcp
+            .connections
+            .get_mut(&h.four_tuple())
+            .unwrap();
         connection.inner.state = TcpState::TimeWait;
         connection.inner.lifetime_timer =
             LifetimeTimer::Close(Instant::now() + Duration::from_secs(60));
@@ -3593,6 +3781,7 @@ async fn test_tcp_time_wait_accepts_newer_syn(driver: DefaultDriver) {
 
     let replacement = h
         .consomme
+        .shard
         .tcp
         .connections
         .get(&h.four_tuple())
@@ -3621,7 +3810,7 @@ async fn test_tcp_close_timeout_wakes_driver(driver: DefaultDriver) {
 
     std::future::poll_fn(|cx| {
         h.consomme.access(&mut h.client).poll(cx);
-        if h.consomme.tcp.connections.is_empty() {
+        if h.consomme.shard.tcp.connections.is_empty() {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -3638,6 +3827,7 @@ async fn test_tcp_close_timeout_saturates(driver: DefaultDriver) {
     let mut h = TcpTestHarness::connect(driver).await;
     let ft = h.four_tuple();
     h.consomme
+        .shard
         .tcp
         .connections
         .get_mut(&ft)
@@ -3656,7 +3846,14 @@ async fn test_tcp_rto_recovery_advances_on_each_ack(driver: DefaultDriver) {
     h.clear_guest_packets();
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.tx_window_len = 3 * 536;
         conn.inner.tx_window_scale = 0;
     }
@@ -3667,7 +3864,14 @@ async fn test_tcp_rto_recovery_advances_on_each_ack(driver: DefaultDriver) {
     let first_sequence = h.connection_inner().tx_acked;
     {
         let access = h.consomme.access(&mut h.client);
-        let conn = access.inner.tcp.connections.values_mut().next().unwrap();
+        let conn = access
+            .inner
+            .shard
+            .tcp
+            .connections
+            .values_mut()
+            .next()
+            .unwrap();
         conn.inner.retransmission.timer = RetransmissionTimer::Rto {
             deadline: Instant::now() - Duration::from_millis(1),
             recover: None,

@@ -10,6 +10,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use consomme::ChecksumState;
 use consomme::Consomme;
+use consomme::ConsommeConfig;
 use consomme::ConsommeParams;
 pub use consomme::IpVersion;
 pub use consomme::StaticDnsRecord;
@@ -154,23 +155,28 @@ struct EndpointState {
 }
 
 impl ConsommeEndpoint {
-    pub fn new(state: ConsommeParams) -> Self {
-        Self::with_state(state, Vec::new(), None, None)
+    pub fn new(config: ConsommeConfig, params: ConsommeParams) -> Self {
+        Self::with_state(config, params, Vec::new(), None, None)
     }
 
     /// Creates a new endpoint with ports to forward once the queue starts.
-    pub fn new_with_ports(state: ConsommeParams, ports: Vec<PortForwardConfig>) -> Self {
-        Self::with_state(state, ports, None, None)
+    pub fn new_with_ports(
+        config: ConsommeConfig,
+        params: ConsommeParams,
+        ports: Vec<PortForwardConfig>,
+    ) -> Self {
+        Self::with_state(config, params, ports, None, None)
     }
 
     /// Creates a new endpoint with an in-process [`ConsommeControl`] handle for
     /// runtime bind/unbind and state updates.
-    pub fn new_dynamic(state: ConsommeParams) -> (Self, ConsommeControl) {
+    pub fn new_dynamic(config: ConsommeConfig, params: ConsommeParams) -> (Self, ConsommeControl) {
         let (request_send, request_recv) = mesh::channel();
         let (state_update_send, state_update_recv) = mesh::channel();
         (
             Self::with_state(
-                state,
+                config,
+                params,
                 Vec::new(),
                 Some(request_recv),
                 Some(state_update_recv),
@@ -185,22 +191,24 @@ impl ConsommeEndpoint {
     /// Creates a new endpoint with initial ports and a channel for serializable
     /// runtime requests from an external source (e.g. ttrpc server).
     pub fn new_with_request_channel(
-        state: ConsommeParams,
+        config: ConsommeConfig,
+        params: ConsommeParams,
         ports: Vec<PortForwardConfig>,
         request_recv: mesh::Receiver<ConsommeRequest>,
     ) -> Self {
-        Self::with_state(state, ports, Some(request_recv), None)
+        Self::with_state(config, params, ports, Some(request_recv), None)
     }
 
     fn with_state(
-        state: ConsommeParams,
+        config: ConsommeConfig,
+        params: ConsommeParams,
         ports: Vec<PortForwardConfig>,
         request_recv: Option<mesh::Receiver<ConsommeRequest>>,
         state_update_recv: Option<mesh::Receiver<StateUpdateRequest>>,
     ) -> Self {
         ConsommeEndpoint {
             endpoint_state: Arc::new(Mutex::new(Some(EndpointState {
-                consomme: Consomme::new(state),
+                consomme: Consomme::new(config, params),
                 port_forwards: ports,
             }))),
             state_update_recv,
@@ -491,9 +499,8 @@ impl net_backend::Endpoint for ConsommeEndpoint {
                     PendingRequest::Request(request) => process_request(c, request),
                     PendingRequest::StateUpdate(rpc) => {
                         rpc.handle_sync(|f| {
-                            f(c.get_mut().params_mut());
-                            c.get_mut().clear_local_addr_map();
-                            c.update_dns_nameservers()
+                            c.get_mut().update_params(f);
+                            c.update_dns_nameservers();
                         });
                     }
                 }
@@ -941,7 +948,7 @@ mod tests {
     }
 
     fn endpoint() -> ConsommeEndpoint {
-        ConsommeEndpoint::new(ConsommeParams::new().unwrap())
+        ConsommeEndpoint::new(ConsommeConfig::new(), ConsommeParams::new().unwrap())
     }
 
     #[test]
@@ -973,6 +980,7 @@ mod tests {
 
         let (send, recv) = mesh::channel::<ConsommeRequest>();
         let mut ep = ConsommeEndpoint::new_with_request_channel(
+            ConsommeConfig::new(),
             ConsommeParams::new().unwrap(),
             Vec::new(),
             recv,
@@ -997,6 +1005,7 @@ mod tests {
 
         let (send, recv) = mesh::channel::<ConsommeRequest>();
         let mut ep = ConsommeEndpoint::new_with_request_channel(
+            ConsommeConfig::new(),
             ConsommeParams::new().unwrap(),
             Vec::new(),
             recv,
