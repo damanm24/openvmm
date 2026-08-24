@@ -141,6 +141,26 @@ fn build_ipv6_syn(
     ETHERNET_HEADER_LEN + smoltcp::wire::IPV6_HEADER_LEN + tcp.header_len()
 }
 
+#[test]
+fn classifies_tcp_guest_flow() {
+    let config = ConsommeConfig::new();
+    let guest_mac = config.client_mac;
+    let gateway_mac = config.gateway_mac;
+    let guest_ip = config.client_ip;
+    let remote_ip = Ipv4Address::new(192, 0, 2, 1);
+    let (control, _) = Consomme::new(config, ConsommeParams::new().unwrap()).into_parts();
+    let mut frame = [0; 1514];
+    let len = build_ipv4_syn(&mut frame, guest_mac, gateway_mac, guest_ip, remote_ip);
+
+    assert_eq!(
+        control.flow_key(&frame[..len]),
+        Some(FlowKey::Tcp {
+            guest: SocketAddr::V4(SocketAddrV4::new(guest_ip, 44444)),
+            remote: SocketAddr::V4(SocketAddrV4::new(remote_ip, 80)),
+        })
+    );
+}
+
 /// Verify that traffic to IPv4 loopback (127.0.0.1) is blocked by default.
 #[pal_async::async_test]
 async fn ipv4_loopback_blocked_by_default(driver: DefaultDriver) {
@@ -676,6 +696,57 @@ fn build_ipv4_dns_query(
     udp.fill_checksum(&src_ip.into(), &dst_ip.into());
 
     ETHERNET_HEADER_LEN + ipv4.total_len() as usize
+}
+
+#[test]
+fn udp_steering_uses_guest_source_socket() {
+    let config = ConsommeConfig::new();
+    let guest_mac = config.client_mac;
+    let gateway_mac = config.gateway_mac;
+    let guest_ip = config.client_ip;
+    let gateway_ip = config.gateway_ip;
+    let (control, _) = Consomme::new(config, ConsommeParams::new().unwrap()).into_parts();
+    let query = build_dns_a_query(1, "example.com");
+    let mut first = [0; 1514];
+    let mut second = [0; 1514];
+    let first_len = build_ipv4_dns_query(
+        &mut first,
+        guest_mac,
+        gateway_mac,
+        guest_ip,
+        Ipv4Address::new(192, 0, 2, 1),
+        12345,
+        &query,
+    );
+    let second_len = build_ipv4_dns_query(
+        &mut second,
+        guest_mac,
+        gateway_mac,
+        guest_ip,
+        Ipv4Address::new(198, 51, 100, 1),
+        12345,
+        &query,
+    );
+
+    assert_eq!(
+        control.flow_key(&first[..first_len]),
+        control.flow_key(&second[..second_len])
+    );
+    assert_eq!(
+        control.shard_for_packet(&first[..first_len], 8),
+        control.shard_for_packet(&second[..second_len], 8)
+    );
+
+    let gateway_len = build_ipv4_dns_query(
+        &mut first,
+        guest_mac,
+        gateway_mac,
+        guest_ip,
+        gateway_ip,
+        12345,
+        &query,
+    );
+    assert_eq!(control.shard_for_packet(&first[..gateway_len], 8), 0);
 }
 
 /// A [`Client`] that records every frame consomme delivers to the guest.

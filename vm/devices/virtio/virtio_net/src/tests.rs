@@ -49,12 +49,17 @@ use crate::Device;
 
 use crate::NetworkFeaturesBank0;
 use crate::NetworkFeaturesBank1;
+use crate::VIRTIO_NET_CTRL_MQ;
+use crate::VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET;
+use crate::VIRTIO_NET_ERR;
+use crate::VIRTIO_NET_OK;
 use crate::VirtioNetHeader;
 use crate::VirtioNetHeaderFlags;
 use crate::VirtioNetHeaderGso;
 use crate::VirtioNetHeaderGsoProtocol;
 use crate::Worker;
 use crate::header_size;
+use crate::parse_control_request;
 
 // --- Constants ---
 
@@ -69,6 +74,12 @@ const RX_USED_ADDR: u64 = 0x2000;
 const TX_DESC_ADDR: u64 = 0x10000;
 const TX_AVAIL_ADDR: u64 = 0x11000;
 const TX_USED_ADDR: u64 = 0x12000;
+
+const CONTROL_DESC_ADDR: u64 = 0x28000;
+const CONTROL_AVAIL_ADDR: u64 = 0x29000;
+const CONTROL_USED_ADDR: u64 = 0x2a000;
+const CONTROL_REQUEST_ADDR: u64 = 0x2b000;
+const CONTROL_STATUS_ADDR: u64 = 0x2c000;
 
 // Data area for TX packet headers and payloads
 const DATA_BASE: u64 = 0x20000;
@@ -362,6 +373,7 @@ fn new_mock_queue() -> (MockQueue, MockQueueHandle) {
 struct MockEndpoint {
     queue_tx: mesh::Sender<MockQueueHandle>,
     is_ordered: bool,
+    max_queues: u16,
 }
 
 impl InspectMut for MockEndpoint {
@@ -378,13 +390,15 @@ impl Endpoint for MockEndpoint {
 
     async fn get_queues(
         &mut self,
-        _config: Vec<QueueConfig>,
+        config: Vec<QueueConfig>,
         _rss: Option<&RssConfig<'_>>,
         queues: &mut Vec<Box<dyn net_backend::Queue>>,
     ) -> anyhow::Result<()> {
-        let (queue, handle) = new_mock_queue();
-        self.queue_tx.send(handle);
-        queues.push(Box::new(queue));
+        for _ in config {
+            let (queue, handle) = new_mock_queue();
+            self.queue_tx.send(handle);
+            queues.push(Box::new(queue));
+        }
         Ok(())
     }
 
@@ -400,7 +414,7 @@ impl Endpoint for MockEndpoint {
 
     fn multiqueue_support(&self) -> MultiQueueSupport {
         MultiQueueSupport {
-            max_queues: 1,
+            max_queues: self.max_queues,
             indirection_table_size: 0,
         }
     }
@@ -471,6 +485,10 @@ struct TestHarness {
 
 impl TestHarness {
     fn new(driver: &DefaultDriver) -> Self {
+        Self::new_with_max_queues(driver, 1)
+    }
+
+    fn new_with_max_queues(driver: &DefaultDriver, max_queues: u16) -> Self {
         let mem = GuestMemory::allocate(TOTAL_MEM_SIZE);
 
         // Initialize RX queue rings
@@ -486,11 +504,13 @@ impl TestHarness {
         let endpoint = MockEndpoint {
             queue_tx,
             is_ordered: true,
+            max_queues,
         };
 
         let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver.clone()));
         let mac = MacAddress::new([0x00, 0x15, 0x5d, 0xaa, 0xbb, 0xcc]);
         let device = Device::builder()
+            .max_queues(max_queues)
             .build(&driver_source, Box::new(endpoint), mac)
             .unwrap();
 
@@ -870,6 +890,7 @@ async fn unordered_backend_rejected(driver: DefaultDriver) {
     let endpoint = MockEndpoint {
         queue_tx,
         is_ordered: false,
+        max_queues: 1,
     };
 
     let err = Device::builder()
@@ -1887,6 +1908,7 @@ async fn feature_negotiation_with_offloads(driver: DefaultDriver) {
             tso: true,
             uso: true,
         },
+        max_queues: 1,
     };
 
     let device = Device::builder()
@@ -1925,6 +1947,7 @@ async fn advertises_in_order(driver: DefaultDriver) {
     let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
     let endpoint = MockEndpointWithOffloads {
         offloads: TxOffloadSupport::default(),
+        max_queues: 1,
     };
     let device = Device::builder()
         .build(&driver_source, Box::new(endpoint), mac)
@@ -1963,6 +1986,7 @@ async fn feature_negotiation_no_offloads(driver: DefaultDriver) {
 
     let endpoint = MockEndpointWithOffloads {
         offloads: TxOffloadSupport::default(),
+        max_queues: 1,
     };
 
     let device = Device::builder()
@@ -1990,9 +2014,229 @@ async fn feature_negotiation_no_offloads(driver: DefaultDriver) {
     );
 }
 
+#[async_test]
+async fn feature_negotiation_multiqueue(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
+    let endpoint = MockEndpointWithOffloads {
+        offloads: TxOffloadSupport::default(),
+        max_queues: 4,
+    };
+
+    let device = Device::builder()
+        .max_queues(3)
+        .build(&driver_source, Box::new(endpoint), mac)
+        .unwrap();
+    let traits = device.traits();
+    let bank0 = NetworkFeaturesBank0::from(traits.device_features.bank(0));
+    let bank1 = NetworkFeaturesBank1::from(traits.device_features.bank(1));
+
+    assert!(bank0.ctrl_vq());
+    assert!(bank0.mq());
+    assert!(!bank1.rss());
+    assert!(!bank1.hash_report());
+    assert_eq!(device.registers.max_virtqueue_pairs, 3);
+    assert_eq!(traits.max_queues, 7);
+}
+
+#[async_test]
+async fn feature_negotiation_single_queue_has_no_control_queue(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
+    let endpoint = MockEndpointWithOffloads {
+        offloads: TxOffloadSupport::default(),
+        max_queues: 1,
+    };
+
+    let device = Device::builder()
+        .build(&driver_source, Box::new(endpoint), mac)
+        .unwrap();
+    let traits = device.traits();
+    let bank0 = NetworkFeaturesBank0::from(traits.device_features.bank(0));
+
+    assert!(!bank0.ctrl_vq());
+    assert!(!bank0.mq());
+    assert_eq!(device.registers.max_virtqueue_pairs, 1);
+    assert_eq!(traits.max_queues, 2);
+}
+
+#[test]
+fn parses_mq_control_request() {
+    assert_eq!(
+        parse_control_request(
+            &[VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 2, 0],
+            4,
+        )
+        .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn rejects_invalid_mq_control_requests() {
+    assert!(parse_control_request(&[VIRTIO_NET_CTRL_MQ, 0, 1], 4).is_err());
+    assert!(parse_control_request(&[0xff, 0, 1, 0], 4).is_err());
+    assert!(parse_control_request(&[VIRTIO_NET_CTRL_MQ, 1, 1, 0], 4).is_err());
+    assert!(
+        parse_control_request(
+            &[VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 0, 0],
+            4,
+        )
+        .is_err()
+    );
+    assert!(
+        parse_control_request(
+            &[VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 5, 0],
+            4,
+        )
+        .is_err()
+    );
+}
+
+#[async_test]
+async fn mq_control_queue_writes_status(driver: DefaultDriver) {
+    let mut harness = TestHarness::new_with_max_queues(&driver, 2);
+    let mq_features = VirtioDeviceFeatures::new().with_bank(
+        0,
+        NetworkFeaturesBank0::new()
+            .with_ctrl_vq(true)
+            .with_mq(true)
+            .into_bits(),
+    );
+
+    init_avail_ring(&harness.mem, CONTROL_AVAIL_ADDR);
+    init_used_ring(&harness.mem, CONTROL_USED_ADDR);
+    let control_event = Event::new();
+    let control_interrupt_event = Event::new();
+    harness
+        .device
+        .start_queue(
+            4,
+            QueueResources {
+                params: QueueParams {
+                    size: QUEUE_SIZE,
+                    enable: true,
+                    desc_addr: CONTROL_DESC_ADDR,
+                    avail_addr: CONTROL_AVAIL_ADDR,
+                    used_addr: CONTROL_USED_ADDR,
+                },
+                notify: Interrupt::from_event(control_interrupt_event.clone()),
+                event: control_event.clone(),
+                guest_memory: harness.mem.clone(),
+            },
+            &mq_features,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let cases = [
+        (
+            [VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 1, 0],
+            4,
+            VIRTIO_NET_ERR,
+        ),
+        (
+            [VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 2, 0],
+            4,
+            VIRTIO_NET_OK,
+        ),
+        ([0xff, 0, 1, 0], 4, VIRTIO_NET_ERR),
+        ([VIRTIO_NET_CTRL_MQ, 0xff, 1, 0], 4, VIRTIO_NET_ERR),
+        (
+            [VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 0, 0],
+            4,
+            VIRTIO_NET_ERR,
+        ),
+        ([VIRTIO_NET_CTRL_MQ, 0, 1, 0], 3, VIRTIO_NET_ERR),
+    ];
+    let mut avail_idx = 0;
+    let mut used_idx = 0;
+    for (request, request_len, expected_status) in cases {
+        harness
+            .mem
+            .write_at(CONTROL_REQUEST_ADDR, &request)
+            .unwrap();
+        harness.mem.write_at(CONTROL_STATUS_ADDR, &[0xff]).unwrap();
+        write_descriptor(
+            &harness.mem,
+            CONTROL_DESC_ADDR,
+            0,
+            CONTROL_REQUEST_ADDR,
+            request_len,
+            DescriptorFlags::new().with_next(true),
+            1,
+        );
+        write_descriptor(
+            &harness.mem,
+            CONTROL_DESC_ADDR,
+            1,
+            CONTROL_STATUS_ADDR,
+            1,
+            DescriptorFlags::new().with_write(true),
+            0,
+        );
+        make_available(
+            &harness.mem,
+            CONTROL_AVAIL_ADDR,
+            QUEUE_SIZE,
+            0,
+            &mut avail_idx,
+        );
+        control_event.signal();
+
+        let (used_id, used_len) = wait_for_used(
+            &driver,
+            &control_interrupt_event,
+            &harness.mem,
+            CONTROL_USED_ADDR,
+            QUEUE_SIZE,
+            &mut used_idx,
+        )
+        .await;
+        assert_eq!(used_id, 0);
+        assert_eq!(used_len, 1);
+        let mut status = [0xff];
+        harness
+            .mem
+            .read_at(CONTROL_STATUS_ADDR, &mut status)
+            .unwrap();
+        assert_eq!(status[0], expected_status);
+    }
+
+    write_descriptor(
+        &harness.mem,
+        CONTROL_DESC_ADDR,
+        0,
+        CONTROL_REQUEST_ADDR,
+        4,
+        DescriptorFlags::new(),
+        0,
+    );
+    make_available(
+        &harness.mem,
+        CONTROL_AVAIL_ADDR,
+        QUEUE_SIZE,
+        0,
+        &mut avail_idx,
+    );
+    control_event.signal();
+    let (_, used_len) = wait_for_used(
+        &driver,
+        &control_interrupt_event,
+        &harness.mem,
+        CONTROL_USED_ADDR,
+        QUEUE_SIZE,
+        &mut used_idx,
+    )
+    .await;
+    assert_eq!(used_len, 0);
+}
+
 // Mock endpoint that reports specific offload support.
 struct MockEndpointWithOffloads {
     offloads: TxOffloadSupport,
+    max_queues: u16,
 }
 
 impl InspectMut for MockEndpointWithOffloads {
@@ -2024,6 +2268,13 @@ impl Endpoint for MockEndpointWithOffloads {
 
     fn tx_offload_support(&self) -> TxOffloadSupport {
         self.offloads
+    }
+
+    fn multiqueue_support(&self) -> MultiQueueSupport {
+        MultiQueueSupport {
+            max_queues: self.max_queues,
+            indirection_table_size: 0,
+        }
     }
 
     async fn wait_for_endpoint_action(&mut self) -> EndpointAction {

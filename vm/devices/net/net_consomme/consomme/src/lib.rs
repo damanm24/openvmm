@@ -62,6 +62,11 @@ use smoltcp::wire::Ipv4Address;
 use smoltcp::wire::Ipv4Packet;
 use smoltcp::wire::Ipv6Address;
 use smoltcp::wire::Ipv6Packet;
+use smoltcp::wire::TcpPacket;
+use smoltcp::wire::UdpPacket;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -75,6 +80,23 @@ use thiserror::Error;
 struct FourTuple {
     src: SocketAddr,
     dst: SocketAddr,
+}
+
+/// Guest-visible transport identity used to select a Consomme shard.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FlowKey {
+    /// A guest-to-remote TCP flow.
+    Tcp {
+        /// Guest source socket.
+        guest: SocketAddr,
+        /// Remote destination socket.
+        remote: SocketAddr,
+    },
+    /// A guest UDP source socket.
+    Udp {
+        /// Guest source socket.
+        guest: SocketAddr,
+    },
 }
 
 impl core::fmt::Display for FourTuple {
@@ -121,12 +143,22 @@ impl core::fmt::Display for PortForwardKey {
 /// flow tables polled by a worker. This boundary allows transport flow state to
 /// be partitioned independently while all shards use the same endpoint-wide
 /// primary state.
+///
+/// TODO: Remove this single-shard compatibility wrapper after production code
+/// and tests construct `ConsommeControl` and `ConsommeShard` directly.
 #[derive(InspectMut)]
 pub struct Consomme {
     #[inspect(mut)]
     primary: ConsommePrimary,
     #[inspect(flatten, mut)]
     shard: ConsommeShard,
+}
+
+/// Endpoint-wide Consomme state shared by all data queues.
+#[derive(InspectMut)]
+pub struct ConsommeControl {
+    #[inspect(mut)]
+    primary: ConsommePrimary,
 }
 
 #[derive(InspectMut)]
@@ -137,8 +169,9 @@ struct ConsommePrimary {
     icmp: icmp::Icmp,
 }
 
+/// Queue-local Consomme packet-processing and transport state.
 #[derive(InspectMut)]
-struct ConsommeShard {
+pub struct ConsommeShard {
     #[inspect(skip)]
     buffer: Box<[u8]>,
     #[inspect(mut)]
@@ -548,8 +581,13 @@ impl ConsommePrimaryRuntime {
 
 /// An accessor for consomme.
 pub struct Access<'a, T> {
-    inner: &'a mut Consomme,
+    inner: ConsommeAccess<'a>,
     client: &'a mut T,
+}
+
+struct ConsommeAccess<'a> {
+    primary: &'a mut ConsommePrimary,
+    shard: &'a mut ConsommeShard,
 }
 
 /// A consomme client.
@@ -882,6 +920,16 @@ impl Consomme {
         }
     }
 
+    /// Separates endpoint-wide control state from the initial data shard.
+    pub fn into_parts(self) -> (ConsommeControl, ConsommeShard) {
+        (
+            ConsommeControl {
+                primary: self.primary,
+            },
+            self.shard,
+        )
+    }
+
     fn detect_ipv6_support(skip_ipv6_checks: bool) -> bool {
         if skip_ipv6_checks {
             true
@@ -989,21 +1037,217 @@ impl Consomme {
     /// Pairs the client with this instance to operate on the consomme instance.
     pub fn access<'a, T: Client>(&'a mut self, client: &'a mut T) -> Access<'a, T> {
         Access {
-            inner: self,
+            inner: ConsommeAccess {
+                primary: &mut self.primary,
+                shard: &mut self.shard,
+            },
+            client,
+        }
+    }
+}
+
+impl ConsommeControl {
+    /// Creates an empty data shard using the current endpoint parameters.
+    pub fn new_shard(&self) -> ConsommeShard {
+        ConsommeShard {
+            buffer: Box::new([0; 65536]),
+            tcp: tcp::Tcp::new(
+                self.primary.config.params.tcp_rx_buffer,
+                self.primary.config.params.tcp_tx_buffer,
+            ),
+            udp: udp::Udp::new(self.primary.config.params.udp_timeout),
+        }
+    }
+
+    /// Classifies a guest Ethernet frame without modifying protocol state.
+    ///
+    /// UDP intentionally uses only the guest source socket so all destinations
+    /// retain Consomme's endpoint-independent host-port mapping.
+    pub fn flow_key(&self, data: &[u8]) -> Option<FlowKey> {
+        let frame = EthernetFrame::new_checked(data).ok()?;
+        match frame.ethertype() {
+            EthernetProtocol::Ipv4 => {
+                let packet = Ipv4Packet::new_checked(frame.payload()).ok()?;
+                if packet.more_frags() || packet.frag_offset() != 0 {
+                    return None;
+                }
+                let payload = packet.payload();
+                match packet.next_header() {
+                    IpProtocol::Tcp => {
+                        let tcp = TcpPacket::new_checked(payload).ok()?;
+                        if packet.dst_addr() == self.primary.config.immutable.gateway_ip
+                            && tcp.dst_port() == DNS_PORT
+                        {
+                            return None;
+                        }
+                        Some(FlowKey::Tcp {
+                            guest: SocketAddr::V4(SocketAddrV4::new(
+                                packet.src_addr(),
+                                tcp.src_port(),
+                            )),
+                            remote: SocketAddr::V4(SocketAddrV4::new(
+                                packet.dst_addr(),
+                                tcp.dst_port(),
+                            )),
+                        })
+                    }
+                    IpProtocol::Udp => {
+                        let udp = UdpPacket::new_checked(payload).ok()?;
+                        if packet.dst_addr() == self.primary.config.immutable.gateway_ip {
+                            return None;
+                        }
+                        Some(FlowKey::Udp {
+                            guest: SocketAddr::V4(SocketAddrV4::new(
+                                packet.src_addr(),
+                                udp.src_port(),
+                            )),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            EthernetProtocol::Ipv6 => {
+                let packet = Ipv6Packet::new_checked(frame.payload()).ok()?;
+                let payload = packet.payload();
+                match packet.next_header() {
+                    IpProtocol::Tcp => {
+                        let tcp = TcpPacket::new_checked(payload).ok()?;
+                        if packet.dst_addr()
+                            == self.primary.config.immutable.gateway_link_local_ipv6
+                            && tcp.dst_port() == DNS_PORT
+                        {
+                            return None;
+                        }
+                        Some(FlowKey::Tcp {
+                            guest: SocketAddr::V6(SocketAddrV6::new(
+                                packet.src_addr(),
+                                tcp.src_port(),
+                                0,
+                                0,
+                            )),
+                            remote: SocketAddr::V6(SocketAddrV6::new(
+                                packet.dst_addr(),
+                                tcp.dst_port(),
+                                0,
+                                0,
+                            )),
+                        })
+                    }
+                    IpProtocol::Udp => {
+                        let udp = UdpPacket::new_checked(payload).ok()?;
+                        if packet.dst_addr()
+                            == self.primary.config.immutable.gateway_link_local_ipv6
+                        {
+                            return None;
+                        }
+                        Some(FlowKey::Udp {
+                            guest: SocketAddr::V6(SocketAddrV6::new(
+                                packet.src_addr(),
+                                udp.src_port(),
+                                0,
+                                0,
+                            )),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Selects a shard for a guest frame. Control and malformed traffic use
+    /// shard zero.
+    pub fn shard_for_packet(&self, data: &[u8], shard_count: usize) -> usize {
+        if shard_count <= 1 {
+            return 0;
+        }
+        let Some(key) = self.flow_key(data) else {
+            return 0;
+        };
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish() as usize % shard_count
+    }
+
+    /// Pairs one data shard and client with this endpoint-wide control state.
+    pub fn access<'a, T: Client>(
+        &'a mut self,
+        shard: &'a mut ConsommeShard,
+        client: &'a mut T,
+    ) -> Access<'a, T> {
+        Access {
+            inner: ConsommeAccess {
+                primary: &mut self.primary,
+                shard,
+            },
             client,
         }
     }
 }
 
 impl<T: Client> Access<'_, T> {
-    /// Gets the inner consomme object.
-    pub fn get(&self) -> &Consomme {
+    /// Updates endpoint parameters and reconciles this shard's dependent state.
+    pub fn update_params(&mut self, update: impl FnOnce(&mut ConsommeParams)) {
+        let host_local_access_was_allowed =
+            self.inner.primary.config.params.allow_host_local_access;
+        update(&mut self.inner.primary.config.params);
+
+        let (udp_timeout, tcp_rx_buffer, tcp_tx_buffer, clear_local_addr_map) = {
+            let params = &self.inner.primary.config.params;
+            (
+                params.udp_timeout,
+                params.tcp_rx_buffer,
+                params.tcp_tx_buffer,
+                host_local_access_was_allowed && !params.allow_host_local_access,
+            )
+        };
+
+        if clear_local_addr_map {
+            self.inner.primary.runtime.local_addr_map.clear();
+        }
+        self.inner.shard.udp.update_timeout(udp_timeout);
         self.inner
+            .shard
+            .tcp
+            .update_buffer_bounds(tcp_rx_buffer, tcp_tx_buffer);
     }
 
-    /// Gets the inner consomme object.
-    pub fn get_mut(&mut self) -> &mut Consomme {
-        self.inner
+    /// Adds a static DNS record to the endpoint control state.
+    pub fn add_dns_record(
+        &mut self,
+        record: StaticDnsRecord,
+        name: &str,
+    ) -> Result<(), StaticDnsRecordError> {
+        self.inner.primary.dns.add_static_record(record, name)
+    }
+
+    /// Allocates a guest-visible address for a host destination.
+    pub fn create_virtual_address(&mut self, destination: IpAddr) -> Option<IpAddr> {
+        let primary = &mut self.inner.primary;
+        match destination {
+            IpAddr::V4(destination) => {
+                let net_mask = primary.config.immutable.net_mask;
+                let gateway_ip = primary.config.immutable.gateway_ip;
+                let client_ip = primary.config.immutable.client_ip;
+                let subnet_base = Ipv4Addr::from(u32::from(gateway_ip) & u32::from(net_mask));
+                primary
+                    .runtime
+                    .local_addr_map
+                    .get_or_allocate_v4(destination, subnet_base, net_mask, gateway_ip, client_ip)
+                    .map(IpAddr::V4)
+            }
+            IpAddr::V6(destination) => {
+                let gateway_ll = primary.config.immutable.gateway_link_local_ipv6;
+                let client_ll = primary.runtime.client_ip_ipv6;
+                let client_routable = primary.runtime.client_ip_ipv6_routable;
+                primary
+                    .runtime
+                    .local_addr_map
+                    .get_or_allocate_v6(destination, gateway_ll, client_ll, client_routable)
+                    .map(IpAddr::V6)
+            }
+        }
     }
 
     /// Polls for work, transmitting any ready packets to the client.

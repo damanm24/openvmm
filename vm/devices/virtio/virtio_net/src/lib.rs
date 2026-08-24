@@ -4,9 +4,8 @@
 //! Virtio network device implementation.
 //!
 //! This crate implements a virtio-net device that connects a guest's virtual
-//! NIC to a pluggable [`net_backend::Endpoint`]. It currently operates with a
-//! single queue pair (one RX, one TX) and supports synchronous and asynchronous
-//! TX completion modes depending on the backend.
+//! NIC to a pluggable [`net_backend::Endpoint`]. It supports synchronous and
+//! asynchronous TX completion modes depending on the backend.
 
 #![expect(missing_docs)]
 #![forbid(unsafe_code)]
@@ -21,6 +20,7 @@ use crate::buffers::RxQueueError;
 use crate::buffers::VirtioWorkPool;
 use anyhow::Context as _;
 use bitfield_struct::bitfield;
+use futures::StreamExt;
 use guestmem::GuestMemory;
 use inspect::Inspect;
 use inspect::InspectMut;
@@ -141,8 +141,13 @@ struct NetStatus {
 
 const DEFAULT_MTU: u16 = 1514;
 
-#[expect(dead_code)]
 const VIRTIO_NET_MAX_QUEUES: u16 = 0x8000;
+const MAX_REPRESENTABLE_QUEUE_PAIRS: u16 = (u16::MAX - 1) / 2;
+
+const VIRTIO_NET_CTRL_MQ: u8 = 4;
+const VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET: u8 = 0;
+const VIRTIO_NET_OK: u8 = 0;
+const VIRTIO_NET_ERR: u8 = 1;
 
 #[repr(C)]
 struct NetConfig {
@@ -235,6 +240,38 @@ pub struct Device {
     driver_source: VmTaskDriverSource,
     /// Per-pair state tracking.
     pairs: Vec<QueuePairState>,
+    control_queue: TaskControl<ControlQueueTask, ControlQueueWorker>,
+}
+
+#[derive(Debug, Error)]
+enum ControlRequestError {
+    #[error("control request must contain exactly four readable bytes")]
+    Malformed,
+    #[error("unsupported control class {class} command {command}")]
+    Unsupported { class: u8, command: u8 },
+    #[error("queue pair count {requested} is outside 1..={maximum}")]
+    QueuePairCount { requested: u16, maximum: u16 },
+}
+
+fn parse_control_request(request: &[u8], max_queue_pairs: u16) -> Result<u16, ControlRequestError> {
+    let [class, command, low, high] = request else {
+        return Err(ControlRequestError::Malformed);
+    };
+    if *class != VIRTIO_NET_CTRL_MQ || *command != VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET {
+        return Err(ControlRequestError::Unsupported {
+            class: *class,
+            command: *command,
+        });
+    }
+
+    let requested = u16::from_le_bytes([*low, *high]);
+    if requested == 0 || requested > max_queue_pairs {
+        return Err(ControlRequestError::QueuePairCount {
+            requested,
+            maximum: max_queue_pairs,
+        });
+    }
+    Ok(requested)
 }
 
 /// Tracks the state of a queue pair through the start_queue lifecycle.
@@ -267,13 +304,16 @@ impl VirtioDevice for Device {
         // Linux kernels.
         let host_uso = offloads.uso && offloads.udp;
 
+        let multiqueue = self.adapter.max_queue_pairs > 1;
         let features_bank0 = NetworkFeaturesBank0::new()
             .with_mac(true)
             .with_status(true)
             .with_csum(csum)
             .with_guest_csum(true)
             .with_host_tso4(host_tso)
-            .with_host_tso6(host_tso);
+            .with_host_tso6(host_tso)
+            .with_ctrl_vq(multiqueue)
+            .with_mq(multiqueue);
 
         let features_bank1 = NetworkFeaturesBank1::new().with_host_uso(host_uso);
 
@@ -289,7 +329,12 @@ impl VirtioDevice for Device {
                 // don't yet take advantage of the ability to do batched
                 // completions, but we may in the future.
                 .with_in_order(true),
-            max_queues: 2 * self.registers.max_virtqueue_pairs,
+            max_queues: self
+                .registers
+                .max_virtqueue_pairs
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(u16::from(multiqueue)))
+                .expect("queue count was validated when the device was built"),
             device_register_length: size_of::<NetConfig>() as u32,
             shared_memory: DeviceTraitsSharedMemory { id: 0, size: 0 },
         }
@@ -339,6 +384,35 @@ impl VirtioDevice for Device {
 
         let negotiated_features = NetworkFeaturesBank0::from(features.bank(0));
         let negotiated_features_bank1 = NetworkFeaturesBank1::from(features.bank(1));
+        let control_queue_index = self
+            .adapter
+            .max_queue_pairs
+            .checked_mul(2)
+            .expect("queue count was validated when the device was built");
+
+        if self.adapter.max_queue_pairs > 1 && idx == control_queue_index {
+            if !negotiated_features.ctrl_vq() || !negotiated_features.mq() {
+                anyhow::bail!("virtio-net control queue started without MQ negotiation");
+            }
+            if self.control_queue.has_state() {
+                anyhow::bail!("virtio-net control queue is already active");
+            }
+            self.control_queue.insert(
+                &self.adapter.driver,
+                "virtio-net-control".to_string(),
+                ControlQueueWorker {
+                    queue,
+                    mem: guest_memory,
+                    max_queue_pairs: self.adapter.max_queue_pairs,
+                },
+            );
+            self.control_queue.start();
+            return Ok(());
+        }
+        if idx >= control_queue_index {
+            anyhow::bail!("invalid virtio-net queue index {idx}");
+        }
+
         let pair_idx = (idx / 2) as usize;
         let is_rx = idx.is_multiple_of(2);
 
@@ -385,7 +459,7 @@ impl VirtioDevice for Device {
                 };
 
                 if first_pair {
-                    self.insert_coordinator(self.pairs.len() as u16);
+                    self.insert_coordinator();
                 }
 
                 let virtio_state = VirtioState {
@@ -404,7 +478,11 @@ impl VirtioDevice for Device {
                     negotiated_features_bank1,
                 );
 
-                if first_pair {
+                if self
+                    .pairs
+                    .iter()
+                    .all(|pair| matches!(pair, QueuePairState::Active))
+                {
                     self.coordinator.start();
                 }
             }
@@ -416,6 +494,19 @@ impl VirtioDevice for Device {
     }
 
     async fn stop_queue(&mut self, idx: u16) -> Option<QueueState> {
+        let control_queue_index = self
+            .adapter
+            .max_queue_pairs
+            .checked_mul(2)
+            .expect("queue count was validated when the device was built");
+        if self.adapter.max_queue_pairs > 1 && idx == control_queue_index {
+            self.control_queue.stop().await;
+            if self.control_queue.has_state() {
+                let _ = self.control_queue.remove();
+            }
+            return None;
+        }
+
         let pair_idx = (idx / 2) as usize;
 
         if pair_idx < self.pairs.len() {
@@ -436,8 +527,10 @@ impl VirtioDevice for Device {
                         worker.stop().await;
                     }
                 }
-                let _ = self.coordinator.remove();
-                self.pairs[pair_idx] = QueuePairState::Empty;
+                if self.coordinator.has_state() {
+                    let _ = self.coordinator.remove();
+                }
+                self.pairs.fill_with(|| QueuePairState::Empty);
             }
         }
 
@@ -446,6 +539,19 @@ impl VirtioDevice for Device {
     }
 
     async fn reset(&mut self) {
+        self.control_queue.stop().await;
+        if self.control_queue.has_state() {
+            let _ = self.control_queue.remove();
+        }
+        self.coordinator.stop().await;
+        if let Some(coordinator) = self.coordinator.state_mut() {
+            for worker in &mut coordinator.workers {
+                worker.stop().await;
+            }
+        }
+        if self.coordinator.has_state() {
+            let _ = self.coordinator.remove();
+        }
         self.pairs.fill_with(|| QueuePairState::Empty);
     }
 
@@ -563,10 +669,21 @@ impl NicBuilder {
             );
         }
 
-        // TODO: Implement VIRTIO_NET_F_MQ and VIRTIO_NET_F_RSS logic based on mulitqueue support.
-        // let multiqueue = endpoint.multiqueue_support();
-        // let max_queue_pairs = self.max_queue_pairs.clamp(1, multiqueue.max_queues.min(VIRTIO_NET_MAX_QUEUES));
-        let max_queue_pairs = 1;
+        let endpoint_max_queue_pairs = endpoint
+            .multiqueue_support()
+            .max_queues
+            .min(VIRTIO_NET_MAX_QUEUES)
+            .min(MAX_REPRESENTABLE_QUEUE_PAIRS);
+        if endpoint_max_queue_pairs == 0 {
+            anyhow::bail!("network backend does not support any queues");
+        }
+        let max_queue_pairs = self.max_queue_pairs.max(1).min(endpoint_max_queue_pairs);
+        let data_queue_count = max_queue_pairs
+            .checked_mul(2)
+            .context("virtio-net data queue count overflow")?;
+        data_queue_count
+            .checked_add(u16::from(max_queue_pairs > 1))
+            .context("virtio-net queue count overflow")?;
 
         let driver = driver_source.simple();
         let tx_offload_support = endpoint.tx_offload_support();
@@ -603,15 +720,14 @@ impl NicBuilder {
             pairs: (0..max_queue_pairs)
                 .map(|_| QueuePairState::Empty)
                 .collect(),
+            control_queue: TaskControl::new(ControlQueueTask),
         })
     }
 }
 
 impl Device {
     pub fn builder() -> NicBuilder {
-        NicBuilder {
-            max_queue_pairs: !0,
-        }
+        NicBuilder { max_queue_pairs: 1 }
     }
 }
 
@@ -622,7 +738,7 @@ impl InspectMut for Device {
 }
 
 impl Device {
-    fn insert_coordinator(&mut self, num_queues: u16) {
+    fn insert_coordinator(&mut self) {
         self.coordinator.insert(
             &self.adapter.driver,
             "virtio-net-coordinator".to_string(),
@@ -630,7 +746,7 @@ impl Device {
                 workers: (0..self.adapter.max_queue_pairs)
                     .map(|_| TaskControl::new(NetQueue { state: None }))
                     .collect(),
-                num_queues,
+                num_queues: self.adapter.max_queue_pairs,
                 restart: true,
             },
         );
@@ -766,7 +882,8 @@ impl Coordinator {
             worker.task_mut().state = None;
         }
 
-        let queue_config = (0..self.workers.len())
+        let active_workers = &mut self.workers[..self.num_queues as usize];
+        let queue_config = (0..active_workers.len())
             .map(|_| QueueConfig {
                 driver: Box::new(c_state.adapter.driver.clone()),
             })
@@ -779,10 +896,18 @@ impl Coordinator {
             .await
             .map_err(WorkerError::Endpoint)?;
 
-        assert_eq!(queues.len(), self.workers.len());
+        if queues.len() != active_workers.len() {
+            return Err(WorkerError::BackendQueueCount {
+                expected: active_workers.len(),
+                actual: queues.len(),
+            });
+        }
 
-        for (worker, mut queue) in self.workers.iter_mut().zip(queues) {
-            let state = &mut worker.state_mut().unwrap().active_state;
+        for (idx, (worker, mut queue)) in active_workers.iter_mut().zip(queues).enumerate() {
+            let Some(worker_state) = worker.state_mut() else {
+                return Err(WorkerError::MissingQueuePair(idx));
+            };
+            let state = &mut worker_state.active_state;
             let n = state
                 .pending_rx_packets
                 .fill_ready(&mut state.data.rx_ready);
@@ -794,8 +919,111 @@ impl Coordinator {
     }
 
     fn start_workers(&mut self) {
-        for worker in &mut self.workers {
-            worker.start();
+        for worker in &mut self.workers[..self.num_queues as usize] {
+            if worker.has_state() {
+                worker.start();
+            }
+        }
+    }
+}
+
+struct ControlQueueTask;
+
+struct ControlQueueWorker {
+    queue: VirtioQueue,
+    mem: GuestMemory,
+    max_queue_pairs: u16,
+}
+
+impl InspectTaskMut<ControlQueueWorker> for ControlQueueTask {
+    fn inspect_mut(&mut self, req: inspect::Request<'_>, _worker: Option<&mut ControlQueueWorker>) {
+        req.ignore();
+    }
+}
+
+impl AsyncRun<ControlQueueWorker> for ControlQueueTask {
+    async fn run(
+        &mut self,
+        stop: &mut StopTask<'_>,
+        worker: &mut ControlQueueWorker,
+    ) -> Result<(), task_control::Cancelled> {
+        worker.process(stop).await
+    }
+}
+
+impl ControlQueueWorker {
+    async fn process(&mut self, stop: &mut StopTask<'_>) -> Result<(), task_control::Cancelled> {
+        loop {
+            let work = match stop.until_stopped(self.queue.next()).await? {
+                Some(Ok(work)) => work,
+                Some(Err(err)) => {
+                    tracing::error!(
+                        error = &err as &dyn std::error::Error,
+                        "virtio-net control queue failed"
+                    );
+                    return Ok(());
+                }
+                None => return Ok(()),
+            };
+
+            let mut status = VIRTIO_NET_ERR;
+            if work.get_payload_length(true) < 1 {
+                tracelimit::warn_ratelimited!(
+                    "virtio-net control request is missing a writable status byte"
+                );
+            } else if work.get_payload_length(false) != 4 {
+                tracelimit::warn_ratelimited!(
+                    readable_len = work.get_payload_length(false),
+                    "malformed virtio-net control request"
+                );
+            } else {
+                let mut request = [0; 4];
+                match work.read(&self.mem, &mut request) {
+                    Ok(4) => match parse_control_request(&request, self.max_queue_pairs) {
+                        Ok(num_queues) => {
+                            // TODO: Support changing the active queue-pair count
+                            // after device construction. Until then, only the
+                            // construction-time count can be selected.
+                            if num_queues == self.max_queue_pairs {
+                                status = VIRTIO_NET_OK;
+                            } else {
+                                tracelimit::warn_ratelimited!(
+                                    num_queues,
+                                    configured = self.max_queue_pairs,
+                                    "changing the virtio-net MQ queue count is not supported"
+                                );
+                            }
+                        }
+                        Err(err) => tracelimit::warn_ratelimited!(
+                            error = &err as &dyn std::error::Error,
+                            "invalid virtio-net control request"
+                        ),
+                    },
+                    Ok(_) => {
+                        tracelimit::warn_ratelimited!("short read from virtio-net control request")
+                    }
+                    Err(err) => tracelimit::warn_ratelimited!(
+                        error = &err as &dyn std::error::Error,
+                        "failed to read virtio-net control request"
+                    ),
+                }
+            }
+
+            let bytes_written = if work.get_payload_length(true) >= 1 {
+                match work.write(&self.mem, &[status]) {
+                    Ok(()) => 1,
+                    Err(err) => {
+                        tracelimit::warn_ratelimited!(
+                            error = &err as &dyn std::error::Error,
+                            "failed to write virtio-net control status"
+                        );
+                        0
+                    }
+                }
+            } else {
+                0
+            };
+            self.queue.complete(work, bytes_written);
         }
     }
 }
@@ -839,6 +1067,10 @@ enum WorkerError {
     Endpoint(#[source] anyhow::Error),
     #[error("guest submitted duplicate descriptor index {0}")]
     DuplicateDescriptor(u16),
+    #[error("queue pair {0} has not been started")]
+    MissingQueuePair(usize),
+    #[error("backend returned {actual} queues, expected {expected}")]
+    BackendQueueCount { expected: usize, actual: usize },
     #[error("cancelled")]
     Cancelled(task_control::Cancelled),
 }

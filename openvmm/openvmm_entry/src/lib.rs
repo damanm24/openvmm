@@ -1725,7 +1725,7 @@ async fn vm_config_from_command_line(
         }
         let vport = parse_endpoint(cli_cfg, &mut nic_index, &mut resources)?;
         let resource = virtio_resources::net::VirtioNetHandle {
-            max_queues: vport.max_queues,
+            max_queues: clamp_virtio_net_queues(vport.max_queues, opt.processors),
             mac_address: vport.mac_address,
             endpoint: vport.endpoint,
         }
@@ -2067,6 +2067,10 @@ async fn vm_config_from_command_line(
     resources.serial_driver = Some(serial_driver);
     validate_snp_config(&cfg)?;
     Ok((cfg, resources))
+}
+
+fn clamp_virtio_net_queues(max_queues: Option<u16>, processor_count: u32) -> Option<u16> {
+    max_queues.map(|queues| queues.min(u16::try_from(processor_count).unwrap_or(u16::MAX)))
 }
 
 fn validate_snp_config(cfg: &Config) -> anyhow::Result<()> {
@@ -3017,6 +3021,14 @@ mod tests {
     use super::*;
     use clap::Parser;
     use test_with_tracing::test;
+
+    #[test]
+    fn clamps_virtio_net_queues_to_processor_count() {
+        assert_eq!(clamp_virtio_net_queues(None, 4), None);
+        assert_eq!(clamp_virtio_net_queues(Some(2), 4), Some(2));
+        assert_eq!(clamp_virtio_net_queues(Some(4), 4), Some(4));
+        assert_eq!(clamp_virtio_net_queues(Some(8), 4), Some(4));
+    }
 
     #[test]
     fn maps_igvm_personalities_to_chipsets() {
