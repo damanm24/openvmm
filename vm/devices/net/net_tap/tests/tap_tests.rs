@@ -296,7 +296,11 @@ mod tap_tests {
         poll_fn(|cx| queue.poll_ready(cx, &mut pool)).await;
 
         let mut packets = [RxId(0); 128];
-        let n = queue.rx_poll(&mut pool, &mut packets).unwrap();
+        let completions = queue.rx_poll(&mut pool, &mut packets).unwrap();
+        let n = completions
+            .iter()
+            .map(|completion| completion.buffer_count.get() as usize)
+            .sum::<usize>();
         assert!(n >= 1, "should have received at least one packet");
 
         let mut found_arp = false;

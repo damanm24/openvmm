@@ -52,6 +52,7 @@ pub struct InOrderCompletion {
 struct Completed {
     completion: QueueCompletion,
     bytes_written: u32,
+    end_of_batch: bool,
 }
 
 impl InOrderCompletion {
@@ -142,22 +143,67 @@ impl InOrderCompletion {
         *slot = Some(Completed {
             completion,
             bytes_written,
+            end_of_batch: true,
         });
+    }
+
+    /// Records and atomically publishes an in-order group of completions.
+    pub fn complete_batch(
+        &mut self,
+        queue: &mut VirtioQueue,
+        completions: Vec<(QueueCompletion, u32)>,
+    ) {
+        let last = completions
+            .len()
+            .checked_sub(1)
+            .expect("empty completion batch");
+        for (offset, (completion, bytes_written)) in completions.into_iter().enumerate() {
+            let idx = completion.descriptor_index();
+            let slot = self
+                .completed
+                .get_mut(idx as usize)
+                .expect("completed descriptor index must be within the queue size");
+            assert!(
+                slot.is_none(),
+                "descriptor {idx} completed more than once while outstanding"
+            );
+            *slot = Some(Completed {
+                completion,
+                bytes_written,
+                end_of_batch: offset == last,
+            });
+        }
+        self.drain_completed_prefix(queue);
     }
 
     /// Publishes the longest run of already-completed descriptors at the front
     /// of the consumption order, in order.
     fn drain_completed_prefix(&mut self, queue: &mut VirtioQueue) {
-        while let Some(&front) = self.order.front() {
-            let Some(Completed {
-                completion,
-                bytes_written,
-            }) = self.completed[front as usize].take()
-            else {
+        let mut ready = Vec::new();
+        loop {
+            let mut batch_len = 0;
+            let mut complete_batch = false;
+            for &idx in &self.order {
+                let Some(completed) = &self.completed[idx as usize] else {
+                    break;
+                };
+                batch_len += 1;
+                if completed.end_of_batch {
+                    complete_batch = true;
+                    break;
+                }
+            }
+            if !complete_batch {
                 break;
-            };
-            self.order.pop_front();
-            queue.complete_prepared(completion, bytes_written);
+            }
+            for _ in 0..batch_len {
+                let idx = self.order.pop_front().unwrap();
+                let completed = self.completed[idx as usize].take().unwrap();
+                ready.push((completed.completion, completed.bytes_written));
+            }
+        }
+        if !ready.is_empty() {
+            queue.complete_prepared_batch(ready);
         }
     }
 

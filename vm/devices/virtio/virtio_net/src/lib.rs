@@ -215,9 +215,13 @@ struct VirtioNetHeader {
     pub padding_reserved: u16, // Only if VIRTIO_NET_F_HASH_REPORT negotiated
 }
 
-const fn header_size() -> usize {
+const fn header_size(mergeable_rx_buffers: bool) -> usize {
     // TODO: Verify hash flags are not set, since header size would be larger in that case.
-    offset_of!(VirtioNetHeader, hash_value)
+    if mergeable_rx_buffers {
+        offset_of!(VirtioNetHeader, hash_value)
+    } else {
+        offset_of!(VirtioNetHeader, num_buffers)
+    }
 }
 
 struct Adapter {
@@ -270,6 +274,7 @@ impl VirtioDevice for Device {
         let features_bank0 = NetworkFeaturesBank0::new()
             .with_mac(true)
             .with_status(true)
+            .with_mrg_rxbuf(true)
             .with_csum(csum)
             .with_guest_csum(true)
             .with_host_tso4(host_tso)
@@ -515,10 +520,15 @@ struct ActiveState {
 }
 
 impl ActiveState {
-    fn new(mem: GuestMemory, rx_queue_size: u16, tx_queue_size: u16) -> Self {
+    fn new(
+        mem: GuestMemory,
+        rx_queue_size: u16,
+        tx_queue_size: u16,
+        mergeable_rx_buffers: bool,
+    ) -> Self {
         Self {
             pending_tx_packets: (0..tx_queue_size).map(|_| None).collect(),
-            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size),
+            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size, mergeable_rx_buffers),
             data: ProcessingData::new(rx_queue_size, tx_queue_size),
             stats: Default::default(),
         }
@@ -661,6 +671,7 @@ impl Device {
             guest_memory.clone(),
             virtio_state.rx_queue_size,
             virtio_state.tx_queue_size,
+            negotiated_features.mrg_rxbuf(),
         );
         let worker = Worker {
             virtio_state,
@@ -1012,9 +1023,10 @@ impl Worker {
             return Err(TxPacketError::DuplicateIndex(idx));
         }
 
+        let header_size = header_size(self.negotiated_features.mrg_rxbuf());
         let total_readable = work.get_payload_length(false) as usize;
         let packet_len: u32 = total_readable
-            .checked_sub(header_size())
+            .checked_sub(header_size)
             .and_then(|len| u32::try_from(len).ok())
             .ok_or(TxPacketError::Empty)?;
 
@@ -1025,22 +1037,22 @@ impl Worker {
         let bytes_read = work
             .read(
                 self.active_state.pending_rx_packets.mem(),
-                &mut peek_buf[..header_size() + ETH_PEEK],
+                &mut peek_buf[..header_size + ETH_PEEK],
             )
             .map_err(TxPacketError::ReadHeader)?;
 
         let header = VirtioNetHeader::read_from_prefix(&peek_buf)
             .map(|(h, _)| h)
             .ok();
-        let packet_prefix = if bytes_read > header_size() {
-            &peek_buf[header_size()..bytes_read]
+        let packet_prefix = if bytes_read > header_size {
+            &peek_buf[header_size..bytes_read]
         } else {
             &[]
         };
 
         let segments = &mut self.active_state.data.tx_segments;
         let seg_start = segments.len();
-        let mut header_bytes_remaining = header_size() as u32;
+        let mut header_bytes_remaining = header_size as u32;
         for p in &work.payload {
             if p.writeable {
                 continue;
@@ -1328,24 +1340,36 @@ impl Worker {
         epqueue: &mut dyn net_backend::Queue,
     ) -> Result<bool, WorkerError> {
         let state = &mut self.active_state;
-        let n = epqueue
+        let completions = epqueue
             .rx_poll(&mut state.pending_rx_packets, &mut state.data.rx_ready)
             .map_err(WorkerError::Endpoint)?;
-        if n == 0 {
+        if completions.is_empty() {
             return Ok(false);
         }
 
-        for ready_id in state.data.rx_ready[..n].iter() {
+        let mut buffer_offset = 0;
+        for completion in &completions {
+            let buffer_count = completion.buffer_count.get() as usize;
+            let ready_ids = &state.data.rx_ready[buffer_offset..buffer_offset + buffer_count];
+            assert_eq!(ready_ids[0].0, completion.id.0);
+            let completions = ready_ids
+                .iter()
+                .map(|ready_id| {
+                    let (work, bytes) = state.pending_rx_packets.take_rx_work(*ready_id);
+                    (work.into_completion(), bytes)
+                })
+                .collect();
+            self.virtio_state
+                .rx_in_order
+                .complete_batch(&mut self.virtio_state.rx_queue, completions);
+            buffer_offset += buffer_count;
             state.stats.rx_packets.increment();
-            let (work, bytes) = state.pending_rx_packets.take_rx_work(*ready_id);
-            self.virtio_state.rx_in_order.complete(
-                &mut self.virtio_state.rx_queue,
-                work.into_completion(),
-                bytes,
-            );
         }
 
-        state.stats.rx_packets_per_wake.add_sample(n as u64);
+        state
+            .stats
+            .rx_packets_per_wake
+            .add_sample(completions.len() as u64);
         Ok(true)
     }
 

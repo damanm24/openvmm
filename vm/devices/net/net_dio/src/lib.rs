@@ -130,11 +130,11 @@ impl Queue for DioQueue {
         &mut self,
         pool: &mut dyn BufferAccess,
         packets: &mut [RxId],
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<Vec<net_backend::RxBufferCompletion>> {
         let mut n_packets = 0;
         if let Some(nic) = &mut self.nic {
             // Transmit incoming packets to the guest until there are no more available.
-            for done_id in packets {
+            for done_id in &mut *packets {
                 let id = if let Some(&id) = self.free.front() {
                     id
                 } else {
@@ -168,7 +168,11 @@ impl Queue for DioQueue {
                 n_packets += 1;
             }
         }
-        Ok(n_packets)
+        Ok(packets[..n_packets]
+            .iter()
+            .copied()
+            .map(net_backend::RxBufferCompletion::single)
+            .collect())
     }
 
     fn tx_avail(

@@ -5492,6 +5492,83 @@ async fn in_order_completion_publishes_in_avail_order(driver: DefaultDriver) {
     );
 }
 
+#[async_test]
+async fn in_order_completion_preserves_batch_boundaries(driver: DefaultDriver) {
+    use crate::in_order::InOrderCompletion;
+    use crate::test_helpers::init_avail_ring;
+    use crate::test_helpers::init_used_ring;
+    use crate::test_helpers::make_available;
+    use crate::test_helpers::read_used;
+    use crate::test_helpers::write_descriptor;
+
+    let mem = GuestMemory::allocate(0x10000);
+    let desc_addr = 0x1000;
+    let avail_addr = 0x2000;
+    let used_addr = 0x3000;
+    let data_addr = 0x4000;
+    let size: u16 = 8;
+
+    init_avail_ring(&mem, avail_addr);
+    init_used_ring(&mem, used_addr);
+    let params = QueueParams {
+        size,
+        enable: true,
+        desc_addr,
+        avail_addr,
+        used_addr,
+    };
+    let queue_event = PolledWait::new(&driver, Event::new()).unwrap();
+    let mut queue = VirtioQueue::new(
+        VirtioDeviceFeatures::new(),
+        params,
+        mem.clone(),
+        Interrupt::from_event(Event::new()),
+        queue_event,
+        None,
+    )
+    .unwrap();
+    let mut in_order = InOrderCompletion::new(size);
+
+    let mut avail_idx = 0;
+    for i in 0..3u16 {
+        write_descriptor(
+            &mem,
+            desc_addr,
+            i,
+            data_addr + i as u64 * 0x100,
+            0x100,
+            DescriptorFlags::new().with_write(true),
+            0,
+        );
+        make_available(&mem, avail_addr, size, i, &mut avail_idx);
+    }
+
+    let w0 = in_order.try_next(&mut queue).unwrap().unwrap();
+    let w1 = in_order.try_next(&mut queue).unwrap().unwrap();
+    let w2 = in_order.try_next(&mut queue).unwrap().unwrap();
+    in_order.complete_batch(
+        &mut queue,
+        vec![(w1.into_completion(), 11), (w2.into_completion(), 22)],
+    );
+
+    let mut used_idx = 0;
+    assert!(read_used(&mem, used_addr, size, &mut used_idx).is_none());
+
+    in_order.complete(&mut queue, w0.into_completion(), 10);
+    assert_eq!(
+        read_used(&mem, used_addr, size, &mut used_idx),
+        Some((0, 10))
+    );
+    assert_eq!(
+        read_used(&mem, used_addr, size, &mut used_idx),
+        Some((1, 11))
+    );
+    assert_eq!(
+        read_used(&mem, used_addr, size, &mut used_idx),
+        Some((2, 22))
+    );
+}
+
 /// Completing the same descriptor twice while it is still outstanding is an
 /// internal invariant violation (the device rejects guest-induced duplicates
 /// upstream), so the in-order helper must fail fast rather than silently

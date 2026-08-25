@@ -75,7 +75,7 @@ const DATA_BASE: u64 = 0x20000;
 const TOTAL_MEM_SIZE: usize = 0x30000;
 
 // Virtio-net header size, derived from the actual layout.
-const NET_HEADER_SIZE: u32 = header_size() as u32;
+const NET_HEADER_SIZE: u32 = header_size(false) as u32;
 
 // --- Simplified segment info for assertions ---
 
@@ -158,7 +158,7 @@ impl net_backend::Queue for MockQueue {
         &mut self,
         pool: &mut dyn net_backend::BufferAccess,
         packets: &mut [RxId],
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<Vec<net_backend::RxBufferCompletion>> {
         let mut ready = self.rx_ready.lock();
         let n = ready.len().min(packets.len());
         for packet in packets.iter_mut().take(n) {
@@ -166,7 +166,11 @@ impl net_backend::Queue for MockQueue {
             pool.write_packet(rx_id, &metadata, &data);
             *packet = rx_id;
         }
-        Ok(n)
+        Ok(packets[..n]
+            .iter()
+            .copied()
+            .map(net_backend::RxBufferCompletion::single)
+            .collect())
     }
 
     fn tx_avail(
@@ -1735,7 +1739,7 @@ async fn tx_offload_end_to_end_tcp_csum(driver: DefaultDriver) {
 /// Read the virtio-net header from guest memory at the given GPA.
 fn read_virtio_header(mem: &GuestMemory, gpa: u64) -> VirtioNetHeader {
     let mut buf = [0u8; size_of::<VirtioNetHeader>()];
-    mem.read_at(gpa, &mut buf[..header_size()]).unwrap();
+    mem.read_at(gpa, &mut buf[..header_size(false)]).unwrap();
     let (h, _) = VirtioNetHeader::read_from_prefix(&buf).unwrap();
     h
 }

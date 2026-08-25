@@ -258,4 +258,59 @@ impl PackedQueueCompleteWork {
         };
         Ok(send_signal)
     }
+
+    pub fn complete_descriptors(
+        &mut self,
+        completions: &[(&PackedQueueCompletionContext, u32)],
+    ) -> Result<bool, QueueError> {
+        if completions.is_empty() {
+            return Ok(false);
+        }
+
+        let mut index = self.next_index;
+        let mut wrapped_bit = self.wrapped_bit;
+        let mut positions = Vec::with_capacity(completions.len());
+        for &(context, bytes_written) in completions {
+            positions.push((index, wrapped_bit, context, bytes_written));
+            let raw = index + context.descriptor_count;
+            index = if raw >= self.queue_size {
+                wrapped_bit = !wrapped_bit;
+                raw - self.queue_size
+            } else {
+                raw
+            };
+        }
+
+        atomic::fence(atomic::Ordering::Release);
+        for &(index, wrapped_bit, context, bytes_written) in positions.iter().rev() {
+            let descriptor = PackedDescriptor::new()
+                .with_buffer_id(context.buffer_id)
+                .with_length(bytes_written)
+                .with_flags(
+                    DescriptorFlags::new()
+                        .with_available(wrapped_bit)
+                        .with_used(wrapped_bit),
+                );
+            self.queue_desc
+                .write_plain(descriptor_offset(index), &descriptor)
+                .map_err(QueueError::Memory)?;
+        }
+        self.next_index = index;
+        self.wrapped_bit = wrapped_bit;
+
+        atomic::fence(atomic::Ordering::SeqCst);
+        let driver_event: PackedEventSuppression = self
+            .driver_event
+            .read_plain(0)
+            .map_err(QueueError::Memory)?;
+        Ok(match driver_event.flags() {
+            EventSuppressionFlags::Disabled => false,
+            EventSuppressionFlags::DescriptorIndex if self.use_event_index => {
+                positions.iter().any(|&(index, wrapped_bit, _, _)| {
+                    driver_event.offset() == index && driver_event.wrap() == wrapped_bit
+                })
+            }
+            _ => true,
+        })
+    }
 }

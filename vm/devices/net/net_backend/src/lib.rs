@@ -56,6 +56,7 @@ use mesh::rpc::RpcSend;
 use null::NullEndpoint;
 use pal_async::driver::Driver;
 use std::future::pending;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -196,6 +197,22 @@ pub trait BackendQueueStats {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct RxBufferCompletion {
+    pub id: RxId,
+    /// The number of receive buffers occupied by this packet.
+    pub buffer_count: NonZeroU16,
+}
+
+impl RxBufferCompletion {
+    pub fn single(id: RxId) -> Self {
+        Self {
+            id,
+            buffer_count: NonZeroU16::MIN,
+        }
+    }
+}
+
 /// A single TX/RX data path for sending and receiving network packets.
 ///
 /// Created by [`Endpoint::get_queues`] and driven by the frontend in
@@ -229,8 +246,8 @@ pub trait Queue: Send + InspectMut {
     fn rx_poll(
         &mut self,
         pool: &mut dyn BufferAccess,
-        packets: &mut [RxId],
-    ) -> anyhow::Result<usize>;
+        buffers: &mut [RxId],
+    ) -> anyhow::Result<Vec<RxBufferCompletion>>;
 
     /// Posts transmits to the device.
     ///
@@ -277,6 +294,16 @@ pub trait BufferAccess {
     /// The capacity of the specified buffer in bytes.
     fn capacity(&self, id: RxId) -> u32;
 
+    /// Whether one receive packet may occupy multiple buffers.
+    fn supports_multiple_buffers(&self) -> bool {
+        false
+    }
+
+    /// The packet data capacity of a buffer at `buffer_index` within a packet.
+    fn packet_buffer_capacity(&self, id: RxId, _buffer_index: usize) -> u32 {
+        self.capacity(id)
+    }
+
     /// Sets the packet metadata for the receive.
     fn write_header(&mut self, id: RxId, metadata: &RxMetadata);
 
@@ -309,6 +336,19 @@ pub trait BufferAccess {
             data.extend_from_slice(segment);
         }
         self.write_packet(id, metadata, &data);
+    }
+
+    fn write_packet_across_multiple_buffers(
+        &mut self,
+        ids: &[RxId],
+        metadata: &RxMetadata,
+        segments: &[&[u8]],
+    ) -> bool {
+        let [id] = ids else {
+            return false;
+        };
+        self.write_packet_segments(*id, metadata, segments);
+        true
     }
 }
 

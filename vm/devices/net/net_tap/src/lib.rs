@@ -294,13 +294,17 @@ impl Queue for TapQueue {
         &mut self,
         _pool: &mut dyn BufferAccess,
         packets: &mut [RxId],
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<Vec<net_backend::RxBufferCompletion>> {
         // Send to the guest any packets that might have been read during poll_ready().
         let n = std::cmp::min(self.inner.rx_ready.len(), packets.len());
         for (done, id) in packets[..n].iter_mut().zip(self.inner.rx_ready.drain(..n)) {
             *done = id;
         }
-        Ok(n)
+        Ok(packets[..n]
+            .iter()
+            .copied()
+            .map(net_backend::RxBufferCompletion::single)
+            .collect())
     }
 
     fn tx_avail(

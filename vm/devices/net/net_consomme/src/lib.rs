@@ -24,6 +24,7 @@ use net_backend::BufferAccess;
 use net_backend::L4Protocol;
 use net_backend::QueueConfig;
 use net_backend::RssConfig;
+use net_backend::RxBufferCompletion;
 use net_backend::RxChecksumState;
 use net_backend::RxId;
 use net_backend::RxMetadata;
@@ -43,6 +44,7 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -776,13 +778,23 @@ impl net_backend::Queue for ConsommeQueue {
     fn rx_poll(
         &mut self,
         _pool: &mut dyn BufferAccess,
-        packets: &mut [RxId],
-    ) -> anyhow::Result<usize> {
-        let n = packets.len().min(self.state.rx_ready.len());
-        for (x, y) in packets.iter_mut().zip(self.state.rx_ready.drain(..n)) {
-            *x = y;
+        buffers: &mut [RxId],
+    ) -> anyhow::Result<Vec<RxBufferCompletion>> {
+        let mut completions = Vec::new();
+        let mut buffer_offset = 0;
+        while let Some(ids) = self.state.rx_ready.front() {
+            let Some(output) = buffers.get_mut(buffer_offset..buffer_offset + ids.len()) else {
+                break;
+            };
+            output.copy_from_slice(ids);
+            buffer_offset += ids.len();
+            completions.push(RxBufferCompletion {
+                id: ids[0],
+                buffer_count: NonZeroU16::new(ids.len() as u16).unwrap(),
+            });
+            self.state.rx_ready.pop_front();
         }
-        Ok(n)
+        Ok(completions)
     }
 
     fn tx_avail(
@@ -809,7 +821,7 @@ impl net_backend::Queue for ConsommeQueue {
 
 struct QueueState {
     rx_avail: VecDeque<RxId>,
-    rx_ready: VecDeque<RxId>,
+    rx_ready: VecDeque<Vec<RxId>>,
     tx_avail: VecDeque<TxSegment>,
     tx_ready: VecDeque<TxId>,
     /// Reusable scratch buffer for assembling outbound packets from guest memory.
@@ -869,37 +881,74 @@ impl consomme::Client for Client<'_> {
         };
         let max = self.pool.capacity(rx_id) as usize;
         let len: usize = segments.iter().map(|s| s.len()).sum();
+        let metadata = RxMetadata {
+            offset: 0,
+            len,
+            ip_checksum: if checksum.ipv4 {
+                RxChecksumState::Good
+            } else {
+                RxChecksumState::Unknown
+            },
+            l4_checksum: if checksum.tcp || checksum.udp {
+                RxChecksumState::Good
+            } else {
+                RxChecksumState::Unknown
+            },
+            l4_protocol: if checksum.tcp {
+                L4Protocol::Tcp
+            } else if checksum.udp {
+                L4Protocol::Udp
+            } else {
+                L4Protocol::Unknown
+            },
+            vlan: None,
+        };
+
         if len <= max {
-            self.pool.write_packet_segments(
-                rx_id,
-                &RxMetadata {
-                    offset: 0,
-                    len,
-                    ip_checksum: if checksum.ipv4 {
-                        RxChecksumState::Good
-                    } else {
-                        RxChecksumState::Unknown
-                    },
-                    l4_checksum: if checksum.tcp || checksum.udp {
-                        RxChecksumState::Good
-                    } else {
-                        RxChecksumState::Unknown
-                    },
-                    l4_protocol: if checksum.tcp {
-                        L4Protocol::Tcp
-                    } else if checksum.udp {
-                        L4Protocol::Udp
-                    } else {
-                        L4Protocol::Unknown
-                    },
-                    vlan: None,
-                },
-                segments,
-            );
-            self.state.rx_ready.push_back(rx_id);
+            self.pool.write_packet_segments(rx_id, &metadata, segments);
+            self.state.rx_ready.push_back(vec![rx_id]);
         } else {
-            tracing::warn!(len, max, "dropping rx packet: too large");
-            self.state.rx_avail.push_front(rx_id);
+            if !self.pool.supports_multiple_buffers() {
+                tracing::warn!(len, max, "dropping rx packet: packet exceeds rx buffer");
+                self.state.rx_avail.push_front(rx_id);
+                return;
+            }
+
+            let additional_count = self
+                .state
+                .rx_avail
+                .iter()
+                .enumerate()
+                .scan(max, |capacity, (index, &id)| {
+                    *capacity = capacity
+                        .saturating_add(self.pool.packet_buffer_capacity(id, index + 1) as usize);
+                    Some(*capacity)
+                })
+                .position(|capacity| capacity >= len)
+                .map(|index| index + 1);
+
+            let Some(additional_count) = additional_count else {
+                tracing::warn!(len, max, "dropping rx packet: insufficient rx buffers");
+                self.state.rx_avail.push_front(rx_id);
+                return;
+            };
+
+            let rx_ids: Vec<_> = std::iter::once(rx_id)
+                .chain(self.state.rx_avail.drain(..additional_count))
+                .collect();
+
+            if !self
+                .pool
+                .write_packet_across_multiple_buffers(&rx_ids, &metadata, segments)
+            {
+                tracing::warn!(len, max, "dropping rx packet: insufficient rx buffers");
+                for id in rx_ids.into_iter().rev() {
+                    self.state.rx_avail.push_front(id);
+                }
+                return;
+            }
+
+            self.state.rx_ready.push_back(rx_ids);
         }
     }
 
