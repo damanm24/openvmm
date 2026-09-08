@@ -883,11 +883,13 @@ options:
     #[clap(long_help = r#"
 Run as an RPC server on the specified Unix socket or Windows named pipe.
 
-syntax: path=<PATH>[,transport=<TRANSPORT>]
+syntax: path=<PATH>[,transport=<TRANSPORT>][,allow-sid=<SID>]
 
 options:
     `path=<PATH>`                  socket path or named pipe name (required)
     `transport=<TRANSPORT>`        wire transport to accept (default: auto)
+    `allow-sid=<SID>`              client SID to allow (Windows named pipes only)
+                                  omitted: use Windows default pipe security
 
 valid transports:
     `auto`                         auto-detect ttrpc vs. gRPC per connection
@@ -901,7 +903,7 @@ Examples:
 "#)]
     #[clap(
         long,
-        value_name = "path=PATH[,transport=TRANSPORT]",
+        value_name = "path=PATH[,transport=TRANSPORT][,allow-sid=SID]",
         conflicts_with("ttrpc"),
         conflicts_with("grpc")
     )]
@@ -2203,6 +2205,8 @@ pub struct RpcCli {
     pub path: PathBuf,
     /// Wire transport to accept.
     pub transport: RpcTransportCli,
+    /// Client SID to authorize on a Windows named pipe.
+    pub allow_sid: Option<String>,
 }
 
 impl FromStr for RpcCli {
@@ -2211,6 +2215,7 @@ impl FromStr for RpcCli {
     fn from_str(s: &str) -> anyhow::Result<Self> {
         let mut path = None;
         let mut transport = None;
+        let mut allow_sid = None;
         for part in s.split(',') {
             let (key, value) = part
                 .split_once('=')
@@ -2232,13 +2237,29 @@ impl FromStr for RpcCli {
                         ),
                     });
                 }
+                "allow-sid" => {
+                    anyhow::ensure!(allow_sid.is_none(), "duplicate option 'allow-sid'");
+                    anyhow::ensure!(!value.is_empty(), "'allow-sid' requires a value");
+                    allow_sid = Some(value.to_owned());
+                }
                 _ => anyhow::bail!("unknown rpc option '{key}'"),
             }
         }
 
+        let path = path.context("'path' is required")?;
+        #[cfg(windows)]
+        let is_named_pipe = mesh_rpc::is_named_pipe_path(&path);
+        #[cfg(not(windows))]
+        let is_named_pipe = false;
+        anyhow::ensure!(
+            allow_sid.is_none() || is_named_pipe,
+            "'allow-sid' requires a Windows named pipe"
+        );
+
         Ok(RpcCli {
-            path: path.context("'path' is required")?,
+            path,
             transport: transport.unwrap_or_default(),
+            allow_sid,
         })
     }
 }
@@ -3767,6 +3788,7 @@ mod tests {
         let rpc = RpcCli::from_str("path=/tmp/openvmm.sock").unwrap();
         assert_eq!(rpc.path, Path::new("/tmp/openvmm.sock"));
         assert_eq!(rpc.transport, RpcTransportCli::Auto);
+        assert_eq!(rpc.allow_sid, None);
 
         // explicit transport
         for (s, transport) in [
@@ -3781,6 +3803,18 @@ mod tests {
 
         let rpc = RpcCli::from_str(r"path=\\.\pipe\openvmm").unwrap();
         assert_eq!(rpc.path, Path::new(r"\\.\pipe\openvmm"));
+
+        let rpc = RpcCli::from_str(r"path=\\.\pipe\openvmm,allow-sid=S-1-5-18");
+        #[cfg(windows)]
+        assert_eq!(rpc.unwrap().allow_sid.as_deref(), Some("S-1-5-18"));
+        #[cfg(not(windows))]
+        assert!(rpc.is_err());
+        assert!(RpcCli::from_str("path=/tmp/s.sock,allow-sid=S-1-5-18").is_err());
+        assert!(RpcCli::from_str(r"path=\\.\pipe\openvmm,allow-sid=").is_err());
+        assert!(
+            RpcCli::from_str(r"path=\\.\pipe\openvmm,allow-sid=S-1-5-18,allow-sid=S-1-5-19")
+                .is_err()
+        );
 
         // errors
         assert!(RpcCli::from_str("").is_err());
