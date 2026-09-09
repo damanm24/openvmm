@@ -169,6 +169,9 @@ pub struct PetriVmBuilder<T: PetriVmmBackend> {
     openhcl_agent_image: Option<AgentImage>,
     /// The boot device type for the VM
     boot_device_type: BootDeviceType,
+    /// Override for the PCIe root port the boot NVMe controller is placed on
+    /// when [`BootDeviceType::PcieNvme`] is used. Defaults to `s0rc0rp0`.
+    pcie_boot_port: Option<String>,
 
     // Minimal mode: skip default devices, serial, save/restore.
     minimal_mode: bool,
@@ -182,8 +185,13 @@ pub struct PetriVmBuilder<T: PetriVmmBackend> {
     prebuilt_initrd: Option<PathBuf>,
     // Use virtio vsock instead of VMBus-based hvsocket for guest communication.
     use_virtio_vsock: bool,
+    // Use the Linux kernel vhost-vsock backend with this guest CID.
+    #[cfg(target_os = "linux")]
+    vhost_vsock_guest_cid: Option<u32>,
     // Disable VMBus entirely (no vmbus server, no vmbus storage controllers).
     no_vmbus: bool,
+    // Disable the hypervisor (HV#1) enlightenments. Implies `no_vmbus`.
+    no_hv: bool,
 }
 
 impl<T: PetriVmmBackend> Debug for PetriVmBuilder<T> {
@@ -200,12 +208,14 @@ impl<T: PetriVmmBackend> Debug for PetriVmBuilder<T> {
             .field("agent_image", &self.agent_image)
             .field("openhcl_agent_image", &self.openhcl_agent_image)
             .field("boot_device_type", &self.boot_device_type)
+            .field("pcie_boot_port", &self.pcie_boot_port)
             .field("minimal_mode", &self.minimal_mode)
             .field("enable_serial", &self.enable_serial)
             .field("enable_screenshots", &self.enable_screenshots)
             .field("prebuilt_initrd", &self.prebuilt_initrd)
             .field("use_virtio_vsock", &self.use_virtio_vsock)
             .field("no_vmbus", &self.no_vmbus)
+            .field("no_hv", &self.no_hv)
             .finish()
     }
 }
@@ -221,6 +231,8 @@ pub struct PetriVmConfig {
     pub host_log_levels: Option<OpenvmmLogConfig>,
     /// Firmware and/or OS to load into the VM and associated settings
     pub firmware: Firmware,
+    /// Whether to enable guest hibernation support.
+    pub hibernation_enabled: bool,
     /// The amount of memory, in bytes, to assign to the VM
     pub memory: MemoryConfig,
     /// The processor topology for the VM
@@ -233,6 +245,8 @@ pub struct PetriVmConfig {
     pub vmbus_storage_controllers: HashMap<Guid, VmbusStorageController>,
     /// PCIe NVMe drives.
     pub pcie_nvme_drives: Vec<PcieNvmeDrive>,
+    /// PCIe virtio-blk drives.
+    pub pcie_virtio_blk_drives: Vec<PcieVirtioBlkDrive>,
     /// Physical NVMe devices to attach
     pub physical_nvme_devices: HashMap<Guid, PhysicalNvmeDevice>,
 }
@@ -244,6 +258,15 @@ pub struct PcieNvmeDrive {
     pub port_name: String,
     /// NVMe namespace ID.
     pub nsid: u32,
+    /// The drive to attach.
+    pub drive: Drive,
+}
+
+/// PCIe virtio-blk drive configuration.
+#[derive(Debug)]
+pub struct PcieVirtioBlkDrive {
+    /// PCIe root port name (e.g. "s0rc0rp0").
+    pub port_name: String,
     /// The drive to attach.
     pub drive: Drive,
 }
@@ -289,8 +312,13 @@ pub struct PetriVmProperties {
     pub has_agent_disk: bool,
     /// Use virtio vsock instead of VMBus-based hvsocket
     pub use_virtio_vsock: bool,
+    /// Linux kernel vhost-vsock guest CID, when that backend is enabled.
+    #[cfg(target_os = "linux")]
+    pub vhost_vsock_guest_cid: Option<u32>,
     /// VMBus is entirely disabled
     pub no_vmbus: bool,
+    /// The hypervisor (HV#1) enlightenments are entirely disabled
+    pub no_hv: bool,
 }
 
 /// VM configuration that can be changed after the VM is created
@@ -432,6 +460,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
                 arch: artifacts.arch,
                 host_log_levels: None,
                 firmware: artifacts.firmware,
+                hibernation_enabled: false,
                 memory: Default::default(),
                 proc_topology: Default::default(),
 
@@ -439,6 +468,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
                 tpm: None,
                 vmbus_storage_controllers: HashMap::new(),
                 pcie_nvme_drives: Vec::new(),
+                pcie_virtio_blk_drives: Vec::new(),
                 physical_nvme_devices: HashMap::new(),
             },
             modify_vmm_config: None,
@@ -455,6 +485,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             agent_image: artifacts.agent_image,
             openhcl_agent_image: artifacts.openhcl_agent_image,
             boot_device_type,
+            pcie_boot_port: None,
 
             minimal_mode: false,
             pipette_binary: artifacts.pipette_binary,
@@ -462,7 +493,10 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             enable_screenshots: true,
             prebuilt_initrd: None,
             use_virtio_vsock: false,
+            #[cfg(target_os = "linux")]
+            vhost_vsock_guest_cid: None,
             no_vmbus: false,
+            no_hv: false,
         }
         .add_petri_scsi_controllers()
         .add_guest_crash_disk(params.post_test_hooks))
@@ -508,6 +542,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
                 arch: artifacts.arch,
                 host_log_levels: None,
                 firmware: artifacts.firmware,
+                hibernation_enabled: false,
                 memory: Default::default(),
                 proc_topology: Default::default(),
 
@@ -515,6 +550,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
                 tpm: None,
                 vmbus_storage_controllers: HashMap::new(),
                 pcie_nvme_drives: Vec::new(),
+                pcie_virtio_blk_drives: Vec::new(),
                 physical_nvme_devices: HashMap::new(),
             },
             modify_vmm_config: None,
@@ -531,6 +567,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             agent_image: artifacts.agent_image,
             openhcl_agent_image: artifacts.openhcl_agent_image,
             boot_device_type,
+            pcie_boot_port: None,
 
             minimal_mode: true,
             pipette_binary: artifacts.pipette_binary,
@@ -538,7 +575,10 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             enable_screenshots: true,
             prebuilt_initrd: None,
             use_virtio_vsock: false,
+            #[cfg(target_os = "linux")]
+            vhost_vsock_guest_cid: None,
             no_vmbus: false,
+            no_hv: false,
         })
     }
 
@@ -646,6 +686,27 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
     /// blacklist hv_sock instead of virtio_vsock.
     pub fn with_virtio_vsock(mut self) -> Self {
         self.use_virtio_vsock = true;
+        #[cfg(target_os = "linux")]
+        {
+            self.vhost_vsock_guest_cid = None;
+        }
+        self
+    }
+
+    /// Use the Linux kernel vhost-vsock backend for guest communication.
+    ///
+    /// The host connects directly to the guest's `AF_VSOCK` listener at
+    /// `guest_cid`. The OpenVMM backend automatically uses shared guest memory,
+    /// which is required by kernel vhost.
+    #[cfg(target_os = "linux")]
+    pub fn with_vhost_vsock(mut self, guest_cid: u32) -> Self {
+        assert!(
+            (3..u32::MAX).contains(&guest_cid),
+            "vhost-vsock guest CID must be between 3 and {}",
+            u32::MAX - 1
+        );
+        self.use_virtio_vsock = true;
+        self.vhost_vsock_guest_cid = Some(guest_cid);
         self
     }
 
@@ -654,8 +715,8 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
     /// This removes all VMBus storage controllers. For Linux guests,
     /// virtio-vsock is used for pipette communication. For Windows guests,
     /// the caller must also configure TCP pipette transport via
-    /// `modify_backend(|b| b.with_tcp_pipette_nic())`. The guest must boot
-    /// from a non-VMBus device (e.g. PCIe NVMe).
+    /// `modify_backend(|b| b.with_tcp_pipette_nic(port, mac_address))`. The
+    /// guest must boot from a non-VMBus device (e.g. PCIe NVMe).
     pub fn with_no_vmbus(mut self) -> Self {
         self.no_vmbus = true;
         if self.config.firmware.os_flavor() != OsFlavor::Windows {
@@ -663,6 +724,16 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
         }
         self.config.vmbus_storage_controllers.clear();
         self
+    }
+
+    /// Disable the hypervisor (HV#1) enlightenments.
+    ///
+    /// This also disables VMBus, since VMBus depends on the hypervisor. On
+    /// aarch64 UEFI this causes the loader to pass the generic SEC platform
+    /// type to the firmware. This mode is not supported on x86_64 UEFI.
+    pub fn with_no_hv(mut self) -> Self {
+        self.no_hv = true;
+        self.with_no_vmbus()
     }
 
     fn add_petri_scsi_controllers(self) -> Self {
@@ -922,9 +993,20 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
                 BootDeviceType::NvmeViaScsi => todo!(),
                 BootDeviceType::NvmeViaNvme => todo!(),
                 BootDeviceType::PcieNvme => {
+                    let port_name = self
+                        .pcie_boot_port
+                        .clone()
+                        .unwrap_or_else(|| "s0rc0rp0".into());
                     self.config.pcie_nvme_drives.push(PcieNvmeDrive {
-                        port_name: "s0rc0rp0".into(),
+                        port_name,
                         nsid: 1,
+                        drive: boot_drive,
+                    });
+                    self
+                }
+                BootDeviceType::PcieVirtioBlk => {
+                    self.config.pcie_virtio_blk_drives.push(PcieVirtioBlkDrive {
+                        port_name: "s0rc0rp0".into(),
                         drive: boot_drive,
                     });
                     self
@@ -963,7 +1045,10 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             prebuilt_initrd: self.prebuilt_initrd.clone(),
             has_agent_disk: self.has_agent_disk(),
             use_virtio_vsock: self.use_virtio_vsock,
+            #[cfg(target_os = "linux")]
+            vhost_vsock_guest_cid: self.vhost_vsock_guest_cid,
             no_vmbus: self.no_vmbus,
+            no_hv: self.no_hv,
         }
     }
 
@@ -1012,14 +1097,14 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
         // Auto-prepare the initrd with pipette injected if needed.
         // This centralizes the injection logic so backends only ever
         // receive a prebuilt_initrd path.
-        let _prepared_initrd_guard;
-        if self.uses_pipette_as_init() && self.prebuilt_initrd.is_none() {
-            let tmp = self.prepare_initrd()?;
-            self.prebuilt_initrd = Some(tmp.to_path_buf());
-            _prepared_initrd_guard = Some(tmp);
-        } else {
-            _prepared_initrd_guard = None;
-        }
+        let _prepared_initrd_guard =
+            if self.uses_pipette_as_init() && self.prebuilt_initrd.is_none() {
+                let tmp = self.prepare_initrd()?;
+                self.prebuilt_initrd = Some(tmp.to_path_buf());
+                Some(tmp)
+            } else {
+                None
+            };
 
         tracing::debug!(builder = ?self);
 
@@ -1121,7 +1206,7 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
                 tracing::warn!("Test timeout reached after {TIMEOUT_DURATION_MINUTES} minutes, collecting diagnostics.");
                 let mut timeout_tasks = Vec::new();
                 if let Some(inspector) = vmm_inspector {
-                    timeout_tasks.push(inspect_task.clone()("vmm", &driver, Box::pin(async move { inspector.inspect_all().await })) );
+                    timeout_tasks.push(inspect_task.clone()("vmm", &driver, Box::pin(async move { inspector.inspect("").await })) );
                 }
                 if let Some(openhcl_diag_handler) = openhcl_diag_handler {
                     timeout_tasks.push(inspect_task("openhcl", &driver, Box::pin(async move { openhcl_diag_handler.inspect("", None, None).await })));
@@ -1257,6 +1342,16 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             .uefi_config_mut()
             .expect("Secure boot is only supported for UEFI firmware.")
             .secure_boot_template = Some(SecureBootTemplate::MicrosoftUefiCertificateAuthority);
+        self
+    }
+
+    /// Apply a custom UEFI variable delta encoded as JSON.
+    pub fn with_custom_uefi_json(mut self, json: impl Into<Vec<u8>>) -> Self {
+        self.config
+            .firmware
+            .uefi_config_mut()
+            .expect("Custom UEFI variables are only supported for UEFI firmware.")
+            .custom_uefi_json = Some(json.into());
         self
     }
 
@@ -1438,6 +1533,16 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
         self
     }
 
+    /// Enable guest hibernation support.
+    ///
+    /// Applies to any firmware type: for OpenHCL this sets the DPS
+    /// `enable_hibernation` flag; for OpenVMM UEFI/PCAT firmware it enables the
+    /// firmware's hibernation support.
+    pub fn with_hibernation_enabled(mut self, enable: bool) -> Self {
+        self.config.hibernation_enabled = enable;
+        self
+    }
+
     /// Specify the guest state lifetime for the VM
     pub fn with_guest_state_lifetime(
         mut self,
@@ -1515,6 +1620,16 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
         self
     }
 
+    /// Override the PCIe root port that the boot NVMe controller is placed on
+    /// when using [`BootDeviceType::PcieNvme`].
+    ///
+    /// The named port must exist in the PCIe topology added via the backend's
+    /// `with_pcie_root_topology`. Defaults to `s0rc0rp0`.
+    pub fn with_pcie_boot_port(mut self, port_name: &str) -> Self {
+        self.pcie_boot_port = Some(port_name.to_string());
+        self
+    }
+
     /// Enable the TPM for the VM.
     pub fn with_tpm(mut self, enable: bool) -> Self {
         if enable {
@@ -1542,6 +1657,16 @@ impl<T: PetriVmmBackend> PetriVmBuilder<T> {
             .as_mut()
             .expect("hardware sealing policy requires a TPM")
             .hardware_sealing_policy = policy;
+        self
+    }
+
+    /// Select which TPM reference implementation version the VM's TPM runs.
+    pub fn with_tpm_version(mut self, version: PetriTpmVersion) -> Self {
+        self.config
+            .tpm
+            .as_mut()
+            .expect("TPM version requires a TPM")
+            .version = version;
         self
     }
 
@@ -1790,6 +1915,26 @@ impl<T: PetriVmmBackend> PetriVm<T> {
         self.inspect_openhcl("", None, None).await.map(|_| ())
     }
 
+    /// Invoke Inspect on the running VMM process itself (e.g. OpenVMM),
+    /// returning the inspect tree rooted at `path` (pass `""` for the whole
+    /// tree).
+    ///
+    /// Only backends that expose an inspect interface (currently OpenVMM)
+    /// support this; other backends return an error.
+    ///
+    /// IMPORTANT: As mentioned in the Guide, inspect output is *not* guaranteed
+    /// to be stable. Use this to verify that components are working as you
+    /// expect, not to assert on output that some other tool depends on.
+    pub async fn inspect_vmm(&self, path: &str) -> anyhow::Result<inspect::Node> {
+        use anyhow::Context;
+
+        let inspector = self
+            .runtime
+            .inspector()
+            .context("this VMM backend does not support inspect")?;
+        inspector.inspect(path).await
+    }
+
     /// Wait for VTL 2 to report that it is ready to respond to commands.
     /// Will fail if the VM is not running OpenHCL.
     ///
@@ -1866,27 +2011,25 @@ impl<T: PetriVmmBackend> PetriVm<T> {
     async fn wait_for_boot_event(&mut self) -> anyhow::Result<FirmwareEvent> {
         tracing::info!("Waiting for boot event...");
         let boot_event = loop {
-            match CancelContext::new()
-                .with_timeout(self.vmm_quirks.flaky_boot.unwrap_or(Duration::MAX))
-                .until_cancelled(self.runtime.wait_for_boot_event())
-                .await
+            if let Some(event) = self
+                .runtime
+                .wait_for_boot_event(self.vmm_quirks.flaky_boot)
+                .await?
             {
-                Ok(res) => break res?,
-                Err(_) => {
-                    tracing::error!("Did not get boot event in required time, resetting...");
-                    if let Some(inspector) = self.runtime.inspector() {
-                        save_inspect(
-                            "vmm",
-                            Box::pin(async move { inspector.inspect_all().await }),
-                            &self.resources.log_source,
-                        )
-                        .await;
-                    }
-
-                    self.runtime.reset().await?;
-                    continue;
-                }
+                break event;
             }
+
+            tracing::error!("Did not get boot event in required time, resetting...");
+            if let Some(inspector) = self.runtime.inspector() {
+                save_inspect(
+                    "vmm",
+                    Box::pin(async move { inspector.inspect("").await }),
+                    &self.resources.log_source,
+                )
+                .await;
+            }
+
+            self.runtime.reset().await?;
         };
         tracing::info!("Got boot event: {boot_event:?}");
         Ok(boot_event)
@@ -2082,8 +2225,11 @@ pub trait PetriVmRuntime: Send + Sync + 'static {
     /// Get an OpenHCL diagnostics handler for the VM
     fn openhcl_diag(&self) -> Option<OpenHclDiagHandler>;
     /// Waits for an event emitted by the firmware about its boot status, and
-    /// returns that status.
-    async fn wait_for_boot_event(&mut self) -> anyhow::Result<FirmwareEvent>;
+    /// returns that status. Returns `None` if `timeout` elapsed first.
+    async fn wait_for_boot_event(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> anyhow::Result<Option<FirmwareEvent>>;
     /// Waits for the Hyper-V shutdown IC to be ready
     // TODO: return a receiver that will be closed when it is no longer ready.
     async fn wait_for_enlightened_shutdown_ready(&mut self) -> anyhow::Result<()>;
@@ -2153,15 +2299,16 @@ pub trait PetriVmRuntime: Send + Sync + 'static {
 /// Interface for getting information about the state of the VM
 #[async_trait]
 pub trait PetriVmInspector: Send + Sync + 'static {
-    /// Get information about the state of the VM
-    async fn inspect_all(&self) -> anyhow::Result<inspect::Node>;
+    /// Get information about the state of the VM at the given inspect `path`.
+    /// Pass `""` to inspect the entire tree.
+    async fn inspect(&self, path: &str) -> anyhow::Result<inspect::Node>;
 }
 
 /// Use this for the associated type if not supported
 pub struct NoPetriVmInspector;
 #[async_trait]
 impl PetriVmInspector for NoPetriVmInspector {
-    async fn inspect_all(&self) -> anyhow::Result<inspect::Node> {
+    async fn inspect(&self, _path: &str) -> anyhow::Result<inspect::Node> {
         unreachable!()
     }
 }
@@ -2183,18 +2330,6 @@ pub trait PetriVmFramebufferAccess: Send + 'static {
     /// returning the dimensions and color type.
     async fn screenshot(&mut self, image: &mut Vec<u8>)
     -> anyhow::Result<Option<VmScreenshotMeta>>;
-}
-
-/// Use this for the associated type if not supported
-pub struct NoPetriVmFramebufferAccess;
-#[async_trait]
-impl PetriVmFramebufferAccess for NoPetriVmFramebufferAccess {
-    async fn screenshot(
-        &mut self,
-        _image: &mut Vec<u8>,
-    ) -> anyhow::Result<Option<VmScreenshotMeta>> {
-        unreachable!()
-    }
 }
 
 /// Common processor topology information for the VM.
@@ -2265,6 +2400,37 @@ pub struct MemoryConfig {
     /// Per-NUMA-node memory sizes. When set, RAM is distributed across
     /// vNUMA nodes instead of assigning all RAM to node 0.
     pub numa_mem_sizes: Option<Vec<u64>>,
+    /// Whether to back guest RAM with private anonymous memory rather than a
+    /// shared (file/memfd-backed) memory section.
+    ///
+    /// - `None` (the default) uses private memory whenever the configuration
+    ///   allows it, falling back to shared memory otherwise. Private anonymous
+    ///   memory is cheaper to set up and eligible for Transparent Huge Pages,
+    ///   so it is preferred for performance; this lets each VM get the best
+    ///   backing for its firmware without the test having to know the details.
+    /// - `Some(true)` explicitly requires private memory. This is an error if
+    ///   the configuration is incompatible with private memory (OpenHCL, which
+    ///   shares VTL0 RAM with VTL2 via a remote mapper, and PCAT/Gen1, which
+    ///   relies on x86 legacy support, both require shared memory), rather than
+    ///   silently downgrading to shared.
+    /// - `Some(false)` explicitly requires shared memory, for tests that need
+    ///   the guest RAM backing to be shareable with another process, such as
+    ///   vhost-user backends.
+    ///
+    /// Only applies to the OpenVMM backend; ignored by Hyper-V.
+    pub private_memory: Option<bool>,
+    /// Mark guest RAM as eligible for Transparent Huge Pages (THP),
+    /// improving performance for large allocations.
+    ///
+    /// Defaults to `true`. Applies to private anonymous guest RAM and to
+    /// shared memfd-backed RAM, on Linux (via `madvise`) and on Windows (via
+    /// soft large pages). It has no effect on explicit hugetlb/large-page
+    /// backings (see
+    /// [`with_hugepages`](crate::openvmm::PetriVmConfigOpenVmm::with_hugepages)),
+    /// which are already huge.
+    ///
+    /// Only applies to the OpenVMM backend; ignored by Hyper-V.
+    pub transparent_hugepages: bool,
 }
 
 impl Default for MemoryConfig {
@@ -2273,6 +2439,8 @@ impl Default for MemoryConfig {
             startup_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
             dynamic_memory_range: None,
             numa_mem_sizes: None,
+            private_memory: None,
+            transparent_hugepages: true,
         }
     }
 }
@@ -2284,6 +2452,8 @@ pub struct UefiConfig {
     pub secure_boot_enabled: bool,
     /// Secure boot template
     pub secure_boot_template: Option<SecureBootTemplate>,
+    /// Custom UEFI variable delta JSON
+    pub custom_uefi_json: Option<Vec<u8>>,
     /// Disable the UEFI frontpage which will cause the VM to shutdown instead when unable to boot.
     pub disable_frontpage: bool,
     /// Always attempt a default boot
@@ -2304,6 +2474,7 @@ impl Default for UefiConfig {
         Self {
             secure_boot_enabled: false,
             secure_boot_template: None,
+            custom_uefi_json: None,
             disable_frontpage: true,
             default_boot_always_attempt: false,
             enable_vpci_boot: false,
@@ -2433,6 +2604,8 @@ pub struct TpmConfig {
     pub no_persistent_secrets: bool,
     /// Hardware sealing policy for sealed secrets
     pub hardware_sealing_policy: PetriHardwareSealingPolicy,
+    /// TPM reference implementation version
+    pub version: PetriTpmVersion,
 }
 
 impl Default for TpmConfig {
@@ -2440,8 +2613,19 @@ impl Default for TpmConfig {
         Self {
             no_persistent_secrets: true,
             hardware_sealing_policy: PetriHardwareSealingPolicy::Default,
+            version: PetriTpmVersion::default(),
         }
     }
+}
+
+/// TPM reference implementation version used by the test infrastructure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PetriTpmVersion {
+    /// TPM reference implementation version 1.85
+    #[default]
+    V185,
+    /// TPM reference implementation version 1.38
+    V138,
 }
 
 /// Hardware sealing policy used by the test infrastructure.
@@ -2551,6 +2735,8 @@ pub enum BootDeviceType {
     NvmeViaNvme,
     /// Boot from NVMe attached to a PCIe root port.
     PcieNvme,
+    /// Boot from virtio-blk attached to a PCIe root port.
+    PcieVirtioBlk,
 }
 
 impl BootDeviceType {
@@ -2560,7 +2746,8 @@ impl BootDeviceType {
             | BootDeviceType::Ide
             | BootDeviceType::Scsi
             | BootDeviceType::Nvme
-            | BootDeviceType::PcieNvme => false,
+            | BootDeviceType::PcieNvme
+            | BootDeviceType::PcieVirtioBlk => false,
             BootDeviceType::IdeViaScsi
             | BootDeviceType::IdeViaNvme
             | BootDeviceType::ScsiViaScsi
@@ -2579,7 +2766,10 @@ impl BootDeviceType {
 
     fn requires_vmbus(&self) -> bool {
         match self {
-            BootDeviceType::None | BootDeviceType::Ide | BootDeviceType::PcieNvme => false,
+            BootDeviceType::None
+            | BootDeviceType::Ide
+            | BootDeviceType::PcieNvme
+            | BootDeviceType::PcieVirtioBlk => false,
             BootDeviceType::IdeViaScsi
             | BootDeviceType::IdeViaNvme
             | BootDeviceType::Scsi

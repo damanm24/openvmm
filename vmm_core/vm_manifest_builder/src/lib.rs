@@ -38,12 +38,13 @@ use chipset_resources::pm::DEFAULT_PM_PIO_BASE;
 use chipset_resources::pm::HyperVPowerManagementDeviceHandle;
 use chipset_resources::pm::PIIX4_PM_BDF;
 use chipset_resources::pm::Piix4PowerManagementDeviceHandle;
-use firmware_uefi_custom_vars::CustomVars;
+use firmware_uefi_resources::BaseTemplate;
 use firmware_uefi_resources::HclCompatNvramQuirks;
 use firmware_uefi_resources::LogLevel;
 use firmware_uefi_resources::UefiCommandSet;
 use firmware_uefi_resources::UefiConfig;
 use firmware_uefi_resources::UefiDeviceHandle;
+use firmware_uefi_resources::UefiVarsDeltaJson;
 use input_core::MultiplexedInputHandle;
 use missing_dev_resources::MissingDevHandle;
 use serial_16550_resources::Serial16550DeviceHandle;
@@ -71,6 +72,7 @@ pub struct VmManifestBuilder {
     arch: MachineArch,
     serial: Option<[Option<Resource<SerialBackendHandle>>; 4]>,
     serial_wait_for_rts: bool,
+    serial_debugger_mode: [bool; 4],
     proxy_vga: bool,
     stub_floppy: bool,
     battery_status_recv: Option<mesh::Receiver<HostBatteryUpdate>>,
@@ -112,7 +114,8 @@ impl UefiManifest {
     /// [`SystemTimeClockHandle`]: chipset_resources::cmos_rtc_time_source::SystemTimeClockHandle
     pub fn new(
         arch: MachineArch,
-        custom_uefi_vars: CustomVars,
+        base_template: Option<BaseTemplate>,
+        custom_uefi_json: Option<UefiVarsDeltaJson>,
         secure_boot: bool,
         diagnostics_log_level: LogLevel,
         diagnostics_rate_limit: Option<u32>,
@@ -123,7 +126,8 @@ impl UefiManifest {
         getrandom::fill(&mut initial_generation_id).expect("rng failure");
         Self {
             config: UefiConfig {
-                custom_uefi_vars,
+                base_template,
+                custom_uefi_json,
                 secure_boot,
                 initial_generation_id,
                 use_mmio: !matches!(arch, MachineArch::X86_64),
@@ -164,6 +168,8 @@ pub enum BaseChipsetType {
     HclHost,
     /// Unenlightened Linux VM, with basic architectural devices.
     UnenlightenedLinuxDirect,
+    /// Enlightened Linux VM with a minimal emulated chipset for direct boot.
+    EnlightenedLinuxDirect,
 }
 
 /// The machine architecture of the VM.
@@ -206,6 +212,68 @@ enum ErrorInner {
     WaitForRtsNotSupported,
 }
 
+fn serial_16550_devices(
+    wait_for_rts: bool,
+    debugger_mode: [bool; 4],
+    backends: [Option<Resource<SerialBackendHandle>>; 4],
+) -> [Serial16550DeviceHandle; 4] {
+    let [d0, d1, d2, d3] = Serial16550DeviceHandle::com_ports(
+        backends.map(|r| r.unwrap_or_else(|| DisconnectedSerialBackendHandle.into_resource())),
+    );
+    [
+        Serial16550DeviceHandle {
+            wait_for_rts,
+            debugger_mode: debugger_mode[0],
+            ..d0
+        },
+        Serial16550DeviceHandle {
+            wait_for_rts,
+            debugger_mode: debugger_mode[1],
+            ..d1
+        },
+        Serial16550DeviceHandle {
+            wait_for_rts,
+            debugger_mode: debugger_mode[2],
+            ..d2
+        },
+        Serial16550DeviceHandle {
+            wait_for_rts,
+            debugger_mode: debugger_mode[3],
+            ..d3
+        },
+    ]
+}
+
+fn serial_pl011_devices(
+    debugger_mode: [bool; 4],
+    backends: [Option<Resource<SerialBackendHandle>>; 4],
+) -> Result<[SerialPl011DeviceHandle; 2], ErrorInner> {
+    const PL011_SERIAL0_BASE: u64 = 0xEFFEC000;
+    const PL011_SERIAL0_IRQ: u32 = 1;
+    const PL011_SERIAL1_BASE: u64 = 0xEFFEB000;
+    const PL011_SERIAL1_IRQ: u32 = 2;
+
+    let [backend0, backend1, backend2, backend3] = backends;
+    if backend2.is_some() || backend3.is_some() {
+        return Err(ErrorInner::UnsupportedSerialCount);
+    }
+
+    Ok([
+        SerialPl011DeviceHandle {
+            base: PL011_SERIAL0_BASE,
+            irq: PL011_SERIAL0_IRQ,
+            io: backend0.unwrap_or_else(|| DisconnectedSerialBackendHandle.into_resource()),
+            debugger_mode: debugger_mode[0],
+        },
+        SerialPl011DeviceHandle {
+            base: PL011_SERIAL1_BASE,
+            irq: PL011_SERIAL1_IRQ,
+            io: backend1.unwrap_or_else(|| DisconnectedSerialBackendHandle.into_resource()),
+            debugger_mode: debugger_mode[1],
+        },
+    ])
+}
+
 impl VmManifestBuilder {
     /// Create a new VM manifest builder for the given chipset type and
     /// architecture.
@@ -216,6 +284,7 @@ impl VmManifestBuilder {
             arch,
             serial: None,
             serial_wait_for_rts: false,
+            serial_debugger_mode: [false; 4],
             proxy_vga: false,
             stub_floppy: false,
             battery_status_recv: None,
@@ -248,6 +317,19 @@ impl VmManifestBuilder {
     /// until the guest has raised the RTS line.
     pub fn with_serial_wait_for_rts(mut self) -> Self {
         self.serial_wait_for_rts = true;
+        self
+    }
+
+    /// Enable serial debugger mode per COM port, for WinDbg / KD-over-serial.
+    ///
+    /// Each element enables debugger mode for the corresponding COM port
+    /// (index 0 = COM1, .., index 3 = COM4; for PL011, index 0 and 1). In
+    /// debugger mode the serial backend is kept drained and may drop bytes
+    /// instead of applying backpressure so the kernel debugger transport does
+    /// not deadlock. Ports are independent: one COM port can run in debugger
+    /// mode while another behaves normally.
+    pub fn with_serial_debugger_mode(mut self, debugger_mode: [bool; 4]) -> Self {
+        self.serial_debugger_mode = debugger_mode;
         self
     }
 
@@ -365,9 +447,10 @@ impl VmManifestBuilder {
                 with_i440bx_host_pci_bridge: false,
             },
         };
+        let is_x86 = matches!(self.arch, MachineArch::X86_64);
 
         if let Some((backend, port)) = self.debugcon {
-            if matches!(self.arch, MachineArch::X86_64) {
+            if is_x86 {
                 result.attach_debugcon(port, backend);
             } else {
                 return Err(ErrorInner::UnsupportedDebugconArch.into());
@@ -387,6 +470,7 @@ impl VmManifestBuilder {
                 // This chipset always has a serial port even if not requested.
                 result.attach_serial_16550(
                     self.serial_wait_for_rts,
+                    self.serial_debugger_mode,
                     self.serial.unwrap_or_else(|| [(); 4].map(|_| None)),
                 );
                 result.chipset = BaseChipsetManifest {
@@ -414,7 +498,6 @@ impl VmManifestBuilder {
                 }
             }
             BaseChipsetType::UnenlightenedLinuxDirect => {
-                let is_x86 = matches!(self.arch, MachineArch::X86_64);
                 result.chipset = BaseChipsetManifest {
                     with_generic_cmos_rtc: is_x86,
                     with_generic_isa_floppy: false,
@@ -443,6 +526,7 @@ impl VmManifestBuilder {
                     .maybe_attach_arch_serial(
                         self.arch,
                         self.serial_wait_for_rts,
+                        self.serial_debugger_mode,
                         true,
                         self.serial,
                     )?
@@ -454,8 +538,53 @@ impl VmManifestBuilder {
                     result.attach_guest_watchdog();
                 }
             }
+            BaseChipsetType::EnlightenedLinuxDirect => {
+                result.chipset = BaseChipsetManifest {
+                    // HACK: The current SNP direct-boot repro kernel requires
+                    // a CMOS RTC. Remove or gate this when it no longer does.
+                    with_generic_cmos_rtc: is_x86,
+                    ..BaseChipsetManifest::empty()
+                };
+                result.capabilities.with_ioapic = is_x86;
+                result.capabilities.with_psp = self.psp;
+                if is_x86 {
+                    // TODO: This is a bring-up workaround for SNP Linux direct
+                    // boot. Without these legacy-ish x86 platform devices,
+                    // the current repro kernel reaches early TSC calibration
+                    // and then fails all reference paths:
+                    // "Fast TSC calibration failed", "Unable to calibrate
+                    // against PIT", and "HPET/PMTIMER calibration failed".
+                    //
+                    // Cloud Hypervisor avoids a similar Linux
+                    // pit_calibrate_tsc() hang with a much narrower platform
+                    // surface: IOAPIC, ACPI PM timer, and an i8042/port 0x61
+                    // stub that returns bit 5 set. We should investigate
+                    // whether OpenVMM can expose a similarly minimal
+                    // enlightened timer/interrupt surface for direct-boot
+                    // Linux instead of attaching full PIC/PIT/PM devices here.
+                    result.attach_generic_ioapic();
+                    result.attach_pic();
+                    result.attach_pit();
+                    result.attach_hyperv_power_management(self.platform_pm_timer_assist);
+                }
+                result
+                    .maybe_attach_arch_serial(
+                        self.arch,
+                        self.serial_wait_for_rts,
+                        self.serial_debugger_mode,
+                        false,
+                        self.serial,
+                    )?
+                    .attach_missing_arch_ports(self.arch, false)
+                    // Linux probes legacy PCI configuration ports even when
+                    // PCIe ECAM is available. Absorb those probes as missing
+                    // devices instead of tracing them as unknown PIO.
+                    .attach_missing_pci_config_ports(self.arch);
+                if self.guest_watchdog {
+                    result.attach_guest_watchdog();
+                }
+            }
             BaseChipsetType::HypervGen2Uefi | BaseChipsetType::HyperVGen2LinuxDirect => {
-                let is_x86 = matches!(self.arch, MachineArch::X86_64);
                 result.chipset = BaseChipsetManifest {
                     with_generic_cmos_rtc: is_x86,
                     with_generic_isa_floppy: false,
@@ -481,6 +610,7 @@ impl VmManifestBuilder {
                     .maybe_attach_arch_serial(
                         self.arch,
                         self.serial_wait_for_rts,
+                        self.serial_debugger_mode,
                         true,
                         self.serial,
                     )?
@@ -506,6 +636,7 @@ impl VmManifestBuilder {
                 result.maybe_attach_arch_serial(
                     self.arch,
                     self.serial_wait_for_rts,
+                    self.serial_debugger_mode,
                     false,
                     self.serial,
                 )?;
@@ -535,7 +666,8 @@ impl VmManifestBuilder {
             BaseChipsetType::HypervGen1
             | BaseChipsetType::HypervGen2Uefi
             | BaseChipsetType::HyperVGen2LinuxDirect
-            | BaseChipsetType::UnenlightenedLinuxDirect => LayoutConfig {
+            | BaseChipsetType::UnenlightenedLinuxDirect
+            | BaseChipsetType::EnlightenedLinuxDirect => LayoutConfig {
                 chipset_low_mmio_size: default_low,
                 chipset_high_mmio_size: if self.vmbus { default_high } else { 0 },
                 vtl2_chipset_mmio_size: 0,
@@ -724,19 +856,20 @@ impl VmChipsetResult {
         &mut self,
         arch: MachineArch,
         wait_for_rts: bool,
+        debugger_mode: [bool; 4],
         register_missing: bool,
         serial: Option<[Option<Resource<SerialBackendHandle>>; 4]>,
     ) -> Result<&mut Self, ErrorInner> {
         if let Some(serial) = serial {
             match arch {
                 MachineArch::X86_64 => {
-                    self.attach_serial_16550(wait_for_rts, serial);
+                    self.attach_serial_16550(wait_for_rts, debugger_mode, serial);
                 }
                 MachineArch::Aarch64 => {
                     if wait_for_rts {
                         return Err(ErrorInner::WaitForRtsNotSupported);
                     }
-                    self.attach_serial_pl011(serial)?;
+                    self.attach_serial_pl011(debugger_mode, serial)?;
                 }
             }
         } else if register_missing && arch == MachineArch::X86_64 {
@@ -764,18 +897,10 @@ impl VmChipsetResult {
     fn attach_serial_16550(
         &mut self,
         wait_for_rts: bool,
+        debugger_mode: [bool; 4],
         backends: [Option<Resource<SerialBackendHandle>>; 4],
     ) -> &mut Self {
-        let mut devices = Serial16550DeviceHandle::com_ports(
-            backends.map(|r| r.unwrap_or_else(|| DisconnectedSerialBackendHandle.into_resource())),
-        );
-
-        if wait_for_rts {
-            devices = devices.map(|d| Serial16550DeviceHandle {
-                wait_for_rts: true,
-                ..d
-            });
-        }
+        let devices = serial_16550_devices(wait_for_rts, debugger_mode, backends);
 
         self.chipset_devices.extend(
             zip(
@@ -792,35 +917,18 @@ impl VmChipsetResult {
 
     fn attach_serial_pl011(
         &mut self,
+        debugger_mode: [bool; 4],
         backends: [Option<Resource<SerialBackendHandle>>; 4],
     ) -> Result<&mut Self, ErrorInner> {
-        const PL011_SERIAL0_BASE: u64 = 0xEFFEC000;
-        const PL011_SERIAL0_IRQ: u32 = 1;
-        const PL011_SERIAL1_BASE: u64 = 0xEFFEB000;
-        const PL011_SERIAL1_IRQ: u32 = 2;
-
-        let [backend0, backend1, backend2, backend3] = backends;
-        if backend2.is_some() || backend3.is_some() {
-            return Err(ErrorInner::UnsupportedSerialCount);
-        }
+        let [serial0, serial1] = serial_pl011_devices(debugger_mode, backends)?;
         self.chipset_devices.extend([
             ChipsetDeviceHandle {
                 name: "com1".to_string(),
-                resource: SerialPl011DeviceHandle {
-                    base: PL011_SERIAL0_BASE,
-                    irq: PL011_SERIAL0_IRQ,
-                    io: backend0.unwrap_or_else(|| DisconnectedSerialBackendHandle.into_resource()),
-                }
-                .into_resource(),
+                resource: serial0.into_resource(),
             },
             ChipsetDeviceHandle {
                 name: "com2".to_string(),
-                resource: SerialPl011DeviceHandle {
-                    base: PL011_SERIAL1_BASE,
-                    irq: PL011_SERIAL1_IRQ,
-                    io: backend1.unwrap_or_else(|| DisconnectedSerialBackendHandle.into_resource()),
-                }
-                .into_resource(),
+                resource: serial1.into_resource(),
             },
         ]);
         Ok(self)
@@ -851,6 +959,16 @@ impl VmChipsetResult {
                 name: "missing-gameport".to_owned(),
                 resource: MissingDevHandle::new()
                     .claim_pio("gameport", 0x201..=0x201)
+                    .into_resource(),
+            },
+            // Guests probe for an 8-bit SuperIO chip at the legacy index/data
+            // pair. These ports alias the top of the Hyper-V firmware devices'
+            // register window, which only decodes dword accesses, so the
+            // firmware devices leave them unclaimed.
+            ChipsetDeviceHandle {
+                name: "missing-superio".to_owned(),
+                resource: MissingDevHandle::new()
+                    .claim_pio("superio", 0x2e..=0x2f)
                     .into_resource(),
             },
         ]);
@@ -889,5 +1007,66 @@ impl VmChipsetResult {
             ]);
         }
         self
+    }
+
+    fn attach_missing_pci_config_ports(&mut self, arch: MachineArch) -> &mut Self {
+        if arch == MachineArch::X86_64 {
+            self.chipset_devices.push(ChipsetDeviceHandle {
+                name: "missing-pci".to_owned(),
+                resource: MissingDevHandle::new()
+                    .claim_pio("address", 0xcf8..=0xcfb)
+                    .claim_pio("data", 0xcfc..=0xcff)
+                    .into_resource(),
+            });
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use test_with_tracing::test;
+
+    fn no_serial_backends() -> [Option<Resource<SerialBackendHandle>>; 4] {
+        [(); 4].map(|_| None)
+    }
+
+    #[test]
+    fn serial_debugger_mode_builder_flag_defaults_false_and_can_enable() {
+        let builder = VmManifestBuilder::new(BaseChipsetType::HypervGen1, MachineArch::X86_64);
+        assert_eq!(builder.serial_debugger_mode, [false; 4]);
+
+        let builder = builder.with_serial_debugger_mode([true, false, false, true]);
+        assert_eq!(builder.serial_debugger_mode, [true, false, false, true]);
+    }
+
+    #[test]
+    fn serial_debugger_mode_defaults_false_on_generated_handles() {
+        let serial_16550 = serial_16550_devices(false, [false; 4], no_serial_backends());
+        assert!(serial_16550.iter().all(|handle| !handle.debugger_mode));
+
+        let serial_pl011 = serial_pl011_devices([false; 4], no_serial_backends()).unwrap();
+        assert!(serial_pl011.iter().all(|handle| !handle.debugger_mode));
+    }
+
+    #[test]
+    fn serial_debugger_mode_is_independent_per_port() {
+        // One COM port in debugger mode, the rest normal.
+        let serial_16550 =
+            serial_16550_devices(true, [false, true, false, false], no_serial_backends());
+        assert!(serial_16550.iter().all(|handle| handle.wait_for_rts));
+        assert_eq!(
+            serial_16550.map(|handle| handle.debugger_mode),
+            [false, true, false, false]
+        );
+
+        // PL011 uses the first two entries independently.
+        let serial_pl011 =
+            serial_pl011_devices([true, false, false, false], no_serial_backends()).unwrap();
+        assert_eq!(
+            serial_pl011.map(|handle| handle.debugger_mode),
+            [true, false]
+        );
     }
 }
