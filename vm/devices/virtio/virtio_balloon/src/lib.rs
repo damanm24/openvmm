@@ -24,6 +24,7 @@
 pub mod resolver;
 
 use anyhow::Context as _;
+use bitfield_struct::bitfield;
 use futures::StreamExt;
 use guestmem::GuestMemory;
 use inspect::InspectMut;
@@ -46,14 +47,42 @@ use virtio::VirtioQueueCallbackWork;
 use virtio::queue::QueueState;
 use virtio::resolve::VirtioMemoryReclaim;
 use virtio::spec::VirtioDeviceFeatures;
-use virtio::spec::balloon;
 use virtio_resources::balloon::BalloonRequest;
 use vmcore::vm_task::VmTaskDriver;
 use vmcore::vm_task::VmTaskDriverSource;
+use zerocopy::FromBytes;
+use zerocopy::Immutable;
+use zerocopy::IntoBytes;
+use zerocopy::KnownLayout;
+
+#[bitfield(u32)]
+#[derive(IntoBytes, Immutable, KnownLayout, FromBytes)]
+struct BalloonFeatureBank {
+    pub must_tell_host: bool,
+    pub stats_vq: bool,
+    pub deflate_on_oom: bool,
+    pub free_page_hint: bool,
+    pub page_poison: bool,
+    pub page_reporting: bool,
+    #[bits(26)]
+    _unavailable: u32,
+}
+
+const INFLATE_QUEUE: u16 = 0;
+const DEFLATE_QUEUE: u16 = 1;
+const STATS_QUEUE: u16 = 2;
+const FREE_PAGE_QUEUE: u16 = 3;
+const REPORTING_QUEUE: u16 = 4;
+
+const CONFIG_OFFSET_NUM_PAGES: u16 = 0;
+const CONFIG_OFFSET_ACTUAL: u16 = 4;
+
+const VIRTIO_BALLOON_PFN_SHIFT: u32 = 12;
+const VIRTIO_BALLOON_PAGE_SIZE: u64 = 1 << VIRTIO_BALLOON_PFN_SHIFT;
 
 /// Shared, mutable balloon config-space state.
-#[derive(Debug, Default)]
-struct BalloonState {
+#[repr(C)]
+struct BalloonConfig {
     /// Target number of 4KiB balloon pages (device-owned; read by the guest
     /// from config offset 0).
     num_pages: u32,
@@ -65,7 +94,7 @@ struct BalloonState {
 /// Convert a target size in bytes to a 4KiB balloon page count, saturating
 /// at `u32::MAX`.
 fn bytes_to_pages(bytes: u64) -> u32 {
-    (bytes / balloon::VIRTIO_BALLOON_PAGE_SIZE).min(u32::MAX as u64) as u32
+    (bytes / VIRTIO_BALLOON_PAGE_SIZE).min(u32::MAX as u64) as u32
 }
 
 /// Virtio memory balloon device.
@@ -74,7 +103,7 @@ pub struct VirtioBalloonDevice {
     #[inspect(skip)]
     driver: VmTaskDriver,
     #[inspect(skip)]
-    state: Arc<Mutex<BalloonState>>,
+    registers: Arc<Mutex<BalloonConfig>>,
     #[inspect(skip)]
     reclaim: Option<Arc<dyn VirtioMemoryReclaim>>,
     #[inspect(skip)]
@@ -101,7 +130,7 @@ impl VirtioBalloonDevice {
         reclaim: Option<Arc<dyn VirtioMemoryReclaim>>,
     ) -> Self {
         let driver = driver_source.simple();
-        let state = Arc::new(Mutex::new(BalloonState {
+        let registers = Arc::new(Mutex::new(BalloonConfig {
             num_pages: bytes_to_pages(initial_target_bytes),
             actual: 0,
         }));
@@ -109,15 +138,15 @@ impl VirtioBalloonDevice {
         let (config_change_send, config_change_recv) = mesh::channel();
 
         let control_task = control_recv.map(|recv| {
-            let state = state.clone();
+            let registers = registers.clone();
             driver.spawn("virtio-balloon-control", async move {
-                run_control_task(recv, state, config_change_send).await;
+                run_control_task(recv, registers, config_change_send).await;
             })
         });
 
         Self {
             driver,
-            state,
+            registers,
             reclaim,
             config_change_recv: Some(config_change_recv),
             _control_task: control_task,
@@ -127,7 +156,7 @@ impl VirtioBalloonDevice {
     }
 
     fn worker_mut(&mut self, idx: u16) -> &mut TaskControl<BalloonWorker, BalloonQueue> {
-        if idx == balloon::INFLATE_QUEUE {
+        if idx == INFLATE_QUEUE {
             &mut self.inflate_worker
         } else {
             &mut self.deflate_worker
@@ -137,22 +166,27 @@ impl VirtioBalloonDevice {
 
 impl VirtioDevice for VirtioBalloonDevice {
     fn traits(&self) -> DeviceTraits {
+        let features_bank = BalloonFeatureBank::new()
+            .with_must_tell_host(true)
+            .with_deflate_on_oom(true)
+            .with_page_reporting(true);
         DeviceTraits {
             device_id: virtio::spec::VirtioDeviceType::BALLOON,
             device_features: VirtioDeviceFeatures::new()
+                .with_bank(0, features_bank.into_bits())
                 .with_ring_event_idx(true)
                 .with_ring_indirect_desc(true),
-            max_queues: 2,
+            max_queues: 3,
             device_register_length: 8,
             shared_memory: DeviceTraitsSharedMemory::default(),
         }
     }
 
     async fn read_registers_u32(&mut self, offset: u16) -> u32 {
-        let state = self.state.lock();
+        let registers = self.registers.lock();
         match offset {
-            balloon::CONFIG_OFFSET_NUM_PAGES => state.num_pages,
-            balloon::CONFIG_OFFSET_ACTUAL => state.actual,
+            CONFIG_OFFSET_NUM_PAGES => registers.num_pages,
+            CONFIG_OFFSET_ACTUAL => registers.actual,
             _ => 0,
         }
     }
@@ -160,8 +194,8 @@ impl VirtioDevice for VirtioBalloonDevice {
     async fn write_registers_u32(&mut self, offset: u16, val: u32) {
         // The only writable config field is `actual`, which the guest driver
         // updates to reflect the balloon's current size.
-        if offset == balloon::CONFIG_OFFSET_ACTUAL {
-            self.state.lock().actual = val;
+        if offset == CONFIG_OFFSET_ACTUAL {
+            self.registers.lock().actual = val;
         }
     }
 
@@ -172,7 +206,7 @@ impl VirtioDevice for VirtioBalloonDevice {
         features: &VirtioDeviceFeatures,
         initial_state: Option<QueueState>,
     ) -> anyhow::Result<()> {
-        assert!(idx == balloon::INFLATE_QUEUE || idx == balloon::DEFLATE_QUEUE);
+        assert!(idx == INFLATE_QUEUE || idx == DEFLATE_QUEUE);
 
         let queue_event = PolledWait::new(&self.driver, resources.event)
             .context("failed to create polled wait")?;
@@ -186,7 +220,7 @@ impl VirtioDevice for VirtioBalloonDevice {
         )
         .context("failed to create virtio queue")?;
 
-        let kind = if idx == balloon::INFLATE_QUEUE {
+        let kind = if idx == INFLATE_QUEUE {
             QueueKind::Inflate
         } else {
             QueueKind::Deflate
@@ -235,7 +269,7 @@ impl VirtioDevice for VirtioBalloonDevice {
 /// Handle runtime balloon target-change requests.
 async fn run_control_task(
     mut recv: mesh::Receiver<BalloonRequest>,
-    state: Arc<Mutex<BalloonState>>,
+    state: Arc<Mutex<BalloonConfig>>,
     config_change: mesh::Sender<()>,
 ) {
     while let Some(req) = recv.next().await {
@@ -350,8 +384,8 @@ fn process_request(state: &BalloonQueue, work: &VirtioQueueCallbackWork) {
     let mut run_start: Option<u64> = None;
     let mut run_end: u64 = 0;
     let flush = |start: u64, end: u64| {
-        let gpa = start << balloon::VIRTIO_BALLOON_PFN_SHIFT;
-        let len = (end - start) << balloon::VIRTIO_BALLOON_PFN_SHIFT;
+        let gpa = start << VIRTIO_BALLOON_PFN_SHIFT;
+        let len = (end - start) << VIRTIO_BALLOON_PFN_SHIFT;
         if let Err(err) = reclaim.reclaim(gpa, len) {
             tracelimit::warn_ratelimited!(
                 err = &err as &dyn std::error::Error,

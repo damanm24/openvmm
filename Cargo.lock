@@ -9898,6 +9898,7 @@ name = "virtio_balloon"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bitfield-struct 0.11.0",
  "futures",
  "guestmem",
  "inspect",
@@ -9912,6 +9913,7 @@ dependencies = [
  "virtio_resources",
  "vm_resource",
  "vmcore",
+ "zerocopy",
 ]
 
 [[package]]

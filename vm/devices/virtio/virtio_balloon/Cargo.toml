@@ -16,12 +16,14 @@ vm_resource.workspace = true
 task_control.workspace = true
 
 anyhow.workspace = true
+bitfield-struct.workspace = true
 futures.workspace = true
 inspect.workspace = true
 mesh.workspace = true
 pal_async.workspace = true
 parking_lot.workspace = true
 tracelimit.workspace = true
+zerocopy.workspace = true
 
 [dev-dependencies]
 pal_event.workspace = true
