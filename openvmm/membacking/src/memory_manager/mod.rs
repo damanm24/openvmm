@@ -769,11 +769,27 @@ impl GuestMemoryManager {
     /// Returns a handle for reclaiming physical memory backing guest RAM
     /// (e.g. for virtio-balloon inflation).
     ///
-    /// Reclaim is only supported for private (anonymous) RAM; use
+    /// Reclaim requires local private RAM without pinning or aliases; Windows
+    /// additionally requires fault resolution and disables soft large pages. Use
     /// [`GuestMemoryReclaim::is_supported`] to check.
     pub fn memory_reclaim(&self) -> GuestMemoryReclaim {
         GuestMemoryReclaim {
             va_mapper: self.va_mapper.clone(),
+            reclaim_guard: self.region_manager.reclaim_guard(),
+            supported: (cfg!(target_os = "linux")
+                || (cfg!(windows) && self.supports_memory_fault_resolution))
+                && !self.pin_mappings
+                && self.vtl0_alias_map_offset.is_none()
+                && !self.guest_ram.is_empty()
+                && self
+                    .guest_ram
+                    .iter()
+                    .all(|backing| backing.mappable.is_none())
+                && !self.ram_regions.is_empty()
+                && self
+                    .ram_regions
+                    .iter()
+                    .all(|region| self.va_mapper.is_reclaimable_range(region.range)),
         }
     }
 
@@ -870,17 +886,31 @@ pub struct RamVisibilityControl {
 /// A handle for reclaiming physical memory backing guest RAM.
 ///
 /// Used by device-driven memory management (e.g. virtio-balloon) to release
-/// physical pages back to the host. Only private (anonymous) RAM can be
-/// reclaimed.
+/// physical pages back to the host. Limited to private anonymous RAM on Linux
+/// or fault-resolving Windows, without mixed backing, pinning, or aliases.
+/// Windows soft-large-page mappings are not reclaimable.
 #[derive(Clone)]
 pub struct GuestMemoryReclaim {
     va_mapper: Arc<VaMapper>,
+    reclaim_guard: Arc<crate::region_manager::ReclaimGuard>,
+    supported: bool,
 }
 
 impl GuestMemoryReclaim {
-    /// Returns true if reclaim is supported (the VM has private RAM).
+    /// Returns whether all RAM is reclaimable on this host without pinning or aliases.
     pub fn is_supported(&self) -> bool {
-        self.va_mapper.has_private_ranges()
+        self.supported
+    }
+
+    /// Enables reclaim and excludes physical DMA registration for this VM.
+    pub fn enable(&self) -> Result<(), io::Error> {
+        if !self.is_supported() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "reclaim requires private anonymous RAM on Linux or fault-resolving Windows without mixed backing, pinning, aliases, or soft large pages",
+            ));
+        }
+        self.reclaim_guard.enable_reclaim()
     }
 
     /// Reclaims the physical memory backing guest-physical range
@@ -890,6 +920,7 @@ impl GuestMemoryReclaim {
     /// panicking if the range is not backed by reclaimable private RAM, so
     /// it is safe to call with ranges derived from untrusted guest input.
     pub fn reclaim(&self, gpa: u64, len: u64) -> Result<(), io::Error> {
+        self.enable()?;
         self.va_mapper.try_reclaim(gpa, len)
     }
 }
@@ -984,6 +1015,106 @@ mod tests {
         let mgr = builder.build(max_addr).await.unwrap();
         let gm = mgr.client().guest_memory().await.unwrap();
         (mgr, gm)
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[async_test]
+    async fn test_reclaim_private_page_reuse() {
+        const PAGE_SIZE: usize = 4096;
+        let manager = GuestMemoryBuilder::new()
+            .supports_memory_fault_resolution(true)
+            .add_backing(
+                RamBackingRequest::new(vec![MemoryRange::new(0..0x10000)]).private_memory(true),
+            )
+            .build(0x10000)
+            .await
+            .unwrap();
+        let memory = manager.client().guest_memory().await.unwrap();
+        let reclaim = manager.memory_reclaim();
+        memory.write_at(0, &[0xAB; 3 * PAGE_SIZE]).unwrap();
+        for guest_write in [None, Some(false), Some(true), None] {
+            reclaim.reclaim(PAGE_SIZE as u64, PAGE_SIZE as u64).unwrap();
+            if let Some(write) = guest_write {
+                let fault = MemoryRange::new(PAGE_SIZE as u64..2 * PAGE_SIZE as u64);
+                assert_eq!(
+                    manager
+                        .memory_fault_resolver()
+                        .resolve(fault, write)
+                        .unwrap(),
+                    fault
+                );
+            }
+            let mut contents = [0xFF; 3 * PAGE_SIZE];
+            memory.read_at(0, &mut contents).unwrap();
+            assert_eq!(&contents[..PAGE_SIZE], &[0xAB; PAGE_SIZE]);
+            assert_eq!(&contents[PAGE_SIZE..2 * PAGE_SIZE], &[0; PAGE_SIZE]);
+            assert_eq!(&contents[2 * PAGE_SIZE..], &[0xAB; PAGE_SIZE]);
+            memory
+                .write_at(PAGE_SIZE as u64, &[0xCD; PAGE_SIZE])
+                .unwrap();
+        }
+    }
+
+    #[async_test]
+    #[cfg(windows)]
+    async fn test_reclaim_requires_plain_fault_resolving_windows_ram() {
+        for (fault_resolution, thp) in [(false, false), (true, true)] {
+            let manager = GuestMemoryBuilder::new()
+                .supports_memory_fault_resolution(fault_resolution)
+                .add_backing(
+                    RamBackingRequest::new(vec![MemoryRange::new(0..0x200000)])
+                        .private_memory(true)
+                        .transparent_hugepages(thp),
+                )
+                .build(0x200000)
+                .await
+                .unwrap();
+            assert!(!manager.memory_reclaim().is_supported());
+            assert_eq!(
+                manager.memory_reclaim().enable().unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+    }
+
+    #[async_test]
+    async fn test_reclaim_configuration_support() {
+        const SIZE: u64 = 0x10000;
+        for (private, mixed, pinned) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let mut builder = GuestMemoryBuilder::new()
+                .supports_memory_fault_resolution(true)
+                .pin_mappings(pinned)
+                .add_backing(
+                    RamBackingRequest::new(vec![MemoryRange::new(0..SIZE)]).private_memory(private),
+                );
+            if mixed {
+                builder = builder.add_backing(RamBackingRequest::new(vec![MemoryRange::new(
+                    SIZE..2 * SIZE,
+                )]));
+            }
+            let manager = builder.build(2 * SIZE).await.unwrap();
+            let reclaim = manager.memory_reclaim();
+            let supported = cfg!(any(target_os = "linux", windows)) && private && !mixed && !pinned;
+            assert_eq!(reclaim.is_supported(), supported);
+            if !supported {
+                assert_eq!(
+                    reclaim.reclaim(0, 4096).unwrap_err().kind(),
+                    io::ErrorKind::Unsupported
+                );
+            } else {
+                for (gpa, len) in [(1, 4096), (0, 1), (SIZE, 4096), (u64::MAX - 4095, 4096)] {
+                    assert_eq!(
+                        reclaim.reclaim(gpa, len).unwrap_err().kind(),
+                        io::ErrorKind::InvalidInput
+                    );
+                }
+            }
+        }
     }
 
     #[async_test]

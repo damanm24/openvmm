@@ -25,6 +25,7 @@ use mesh::rpc::FailableRpc;
 use mesh::rpc::Rpc;
 use mesh::rpc::RpcSend;
 use pal_async::task::Spawn;
+use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::sync::Arc;
 use thiserror::Error;
@@ -181,6 +182,46 @@ pub struct RegionManager {
         with = "|x| inspect::send(&x.req_send, RegionRequest::Inspect)"
     )]
     client: RegionManagerClient,
+    #[inspect(skip)]
+    reclaim_guard: Arc<ReclaimGuard>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum MemoryUse {
+    #[default]
+    Unrestricted,
+    Dma,
+    Reclaim,
+}
+
+/// Excludes physical DMA and reclaim for the remainder of the VM lifetime.
+#[derive(Debug, Default)]
+pub(crate) struct ReclaimGuard(Mutex<MemoryUse>);
+
+impl ReclaimGuard {
+    pub(crate) fn enable_reclaim(&self) -> std::io::Result<()> {
+        let mut mode = self.0.lock();
+        if *mode == MemoryUse::Dma {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "memory reclaim is unavailable after physical DMA registration",
+            ));
+        }
+        *mode = MemoryUse::Reclaim;
+        Ok(())
+    }
+
+    fn enable_dma(&self) -> std::io::Result<()> {
+        let mut mode = self.0.lock();
+        if *mode == MemoryUse::Reclaim {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "physical DMA registration conflicts with enabled memory reclaim",
+            ));
+        }
+        *mode = MemoryUse::Dma;
+        Ok(())
+    }
 }
 
 /// Provides access to the region manager.
@@ -286,6 +327,7 @@ struct RegionManagerTaskInner {
     dma_mappers: Vec<DmaMapper>,
     next_dma_mapper_id: u64,
     mapping_manager: MappingManagerClient,
+    reclaim_guard: Arc<ReclaimGuard>,
 }
 
 #[derive(MeshPayload)]
@@ -338,6 +380,7 @@ impl RegionManagerTask {
             next_region_id: 1,
             inner: RegionManagerTaskInner {
                 mapping_manager,
+                reclaim_guard: Arc::new(ReclaimGuard::default()),
                 partitions: Vec::new(),
                 dma_mappers: Vec::new(),
                 next_dma_mapper_id: 0,
@@ -410,6 +453,7 @@ impl RegionManagerTask {
         target: Arc<dyn DmaTarget>,
         needs_fd: bool,
     ) -> anyhow::Result<DmaMapperId> {
+        self.inner.reclaim_guard.enable_dma()?;
         // A host VA is always available and free to hand out, so always
         // maintain an eager VaMapper for this target.
         let va_mapper = self.inner.mapping_manager.new_mapper(true).await?;
@@ -900,9 +944,10 @@ impl RegionManager {
     /// Returns a new region manager that sends mappings to `mapping_manager`.
     pub fn new(spawn: impl Spawn, mapping_manager: MappingManagerClient) -> Self {
         let (req_send, mut req_recv) = mesh::mpsc_channel();
+        let mut task = RegionManagerTask::new(mapping_manager);
+        let reclaim_guard = task.inner.reclaim_guard.clone();
         spawn
             .spawn("region_manager", {
-                let mut task = RegionManagerTask::new(mapping_manager);
                 async move {
                     task.run(&mut req_recv).await;
                 }
@@ -910,7 +955,12 @@ impl RegionManager {
             .detach();
         Self {
             client: RegionManagerClient { req_send },
+            reclaim_guard,
         }
+    }
+
+    pub(crate) fn reclaim_guard(&self) -> Arc<ReclaimGuard> {
+        self.reclaim_guard.clone()
     }
 
     /// Gets access to the region manager.
@@ -1133,6 +1183,25 @@ impl Drop for RegionHandle {
 
 #[cfg(test)]
 mod tests {
+    #[async_test]
+    async fn reclaim_excludes_dma_in_both_orders() {
+        let guard = super::ReclaimGuard::default();
+        guard.enable_reclaim().unwrap();
+        guard.enable_reclaim().unwrap();
+        assert_eq!(
+            guard.enable_dma().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+
+        let guard = super::ReclaimGuard::default();
+        guard.enable_dma().unwrap();
+        guard.enable_dma().unwrap();
+        assert_eq!(
+            guard.enable_reclaim().unwrap_err().kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
+
     use super::MapParams;
     use super::RegionManagerTask;
     use crate::mapping_manager::Mappable;

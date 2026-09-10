@@ -84,6 +84,10 @@ pub struct MemoryCli {
     /// Whether to prefetch guest RAM.
     #[kv(flag)]
     pub prefetch: bool,
+    /// Enable guest free-page reporting through a balloon with memory reclaim support.
+    /// Requires shared=off and private anonymous RAM; defaults to disabled.
+    #[kv(flag)]
+    pub cold_discard_hint: bool,
     /// Whether to use transparent huge pages. When unset, defaults to enabled
     /// unless `hugepages` is set.
     #[kv(flag, key = "thp")]
@@ -100,6 +104,20 @@ pub struct MemoryCli {
 impl MemoryCli {
     /// Validate cross-field constraints shared by `--memory` and `--numa`.
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.cold_discard_hint {
+            anyhow::ensure!(
+                self.shared == Some(false),
+                "cold_discard_hint=on requires shared=off"
+            );
+            anyhow::ensure!(
+                self.file.is_none(),
+                "cold_discard_hint=on conflicts with file=...; private anonymous RAM is required"
+            );
+            anyhow::ensure!(
+                !self.hugepages,
+                "cold_discard_hint=on conflicts with hugepages=on"
+            );
+        }
         if self.hugepage_size.is_some() && !self.hugepages {
             anyhow::bail!("hugepage_size requires hugepages=on");
         }
@@ -176,11 +194,21 @@ Options:
     hugepage_size=<SIZE>     hugepage size, default 2MB; requires hugepages=on
     file=<PATH>              use an existing file as guest RAM backing
 
+    cold_discard_hint[=on|off]
+        enable free-page reporting, default off; requires shared=off;
+        conflicts with file and hugepages=on. Adds a virtio-balloon with
+        target zero unless --virtio-balloon sets a target. Requires host
+        memory reclaim support and a guest driver supporting page reporting.
+        Supports non-isolated x86_64 KVM (Linux) or WHP (Windows), without
+        VTL2, mixed backing, pinning, aliases, or physical DMA assignment.
+        Windows also requires thp=off on every node.
+
 Examples:
     --memory 4G
     --memory size=64GB,hugepages=on,hugepage_size=2MB
     --memory size=4G,file=path/to/memory.bin
-    --memory size=4G,thp=off"#
+    --memory size=4G,thp=off
+    --memory size=4G,shared=off,thp=off,cold_discard_hint=on"#
     )]
     pub memory: MemoryCli,
 
@@ -206,6 +234,16 @@ Options:
     hugepage_size=<SIZE>     hugepage size, default 2MB; requires hugepages=on
     host_numa_node=<N>       bind allocation to host NUMA node N
     vps=<LIST>               explicit VP indices (e.g. "[0,1,2,3]")
+
+    cold_discard_hint[=on|off]
+        enable free-page reporting, default off; requires shared=off and
+        conflicts with hugepages=on. Enabling on any node adds one VM-wide
+        virtio-balloon, using --virtio-balloon's target or zero. Requires
+        host memory reclaim support and a guest page-reporting driver;
+        all nodes must use private anonymous RAM. Currently limited to
+        non-isolated x86_64 KVM (Linux) or WHP (Windows) without VTL2,
+        pinning, aliases, or physical DMA assignment. Windows also
+        requires thp=off on every node.
 
   VP lists use bracket syntax with comma-separated indices and dash
   ranges: vps=[0,1] or vps=[0-3] or vps=[0,1,4-5]. An empty list, vps=[],
@@ -1402,6 +1440,22 @@ Syntax: id=<name>
 }
 
 impl Options {
+    /// Returns whether guest free-page reporting requires memory reclaim support.
+    pub fn cold_discard_hint(&self) -> bool {
+        self.memory.cold_discard_hint
+            || self
+                .numa
+                .iter()
+                .flatten()
+                .any(|node| node.memory.cold_discard_hint)
+    }
+
+    /// Returns the explicit balloon target or an empty balloon for free-page reporting.
+    pub fn balloon_target(&self) -> Option<u64> {
+        self.virtio_balloon
+            .or_else(|| self.cold_discard_hint().then_some(0))
+    }
+
     /// Returns the effective guest RAM size.
     pub fn memory_size(&self) -> u64 {
         self.memory.size.map(|m| m.0).unwrap_or(DEFAULT_MEMORY_SIZE)
@@ -1664,7 +1718,7 @@ pub enum TpmVersionCli {
     V185,
 }
 
-fn parse_memory(s: &str) -> anyhow::Result<u64> {
+pub(crate) fn parse_memory(s: &str) -> anyhow::Result<u64> {
     if s == "VMGS_DEFAULT" {
         Ok(vmgs_format::VMGS_DEFAULT_CAPACITY)
     } else {
@@ -5109,6 +5163,88 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn test_cold_discard_hint_balloon_target() {
+        for (args, enabled, target) in [
+            (vec!["openvmm"], false, None),
+            (
+                vec!["openvmm", "--memory", "cold_discard_hint=off"],
+                false,
+                None,
+            ),
+            (
+                vec!["openvmm", "--memory", "shared=off,cold_discard_hint=on"],
+                true,
+                Some(0),
+            ),
+            (
+                vec![
+                    "openvmm",
+                    "--memory",
+                    "size=1G,shared=off,cold_discard_hint",
+                ],
+                true,
+                Some(0),
+            ),
+            (
+                vec![
+                    "openvmm",
+                    "--memory",
+                    "shared=off,cold_discard_hint=on",
+                    "--virtio-balloon",
+                    "4M",
+                ],
+                true,
+                Some(4 * 1024 * 1024),
+            ),
+            (
+                vec!["openvmm", "--virtio-balloon", "4M"],
+                false,
+                Some(4 * 1024 * 1024),
+            ),
+            (
+                vec![
+                    "openvmm",
+                    "--numa",
+                    "size=1G,shared=off,cold_discard_hint=on",
+                ],
+                true,
+                Some(0),
+            ),
+        ] {
+            let options = Options::try_parse_from(args).unwrap();
+            assert_eq!(options.cold_discard_hint(), enabled);
+            assert_eq!(options.balloon_target(), target);
+        }
+    }
+
+    #[test]
+    fn test_cold_discard_hint_requires_private_anonymous_memory() {
+        for (memory, expected_error) in [
+            ("size=1G,cold_discard_hint=on", "requires shared=off"),
+            (
+                "size=1G,shared=on,cold_discard_hint=on",
+                "requires shared=off",
+            ),
+            (
+                "size=1G,shared=off,hugepages=on,cold_discard_hint=on",
+                "conflicts with hugepages",
+            ),
+        ] {
+            for flag in ["--memory", "--numa"] {
+                let error = Options::try_parse_from(["openvmm", flag, memory])
+                    .err()
+                    .expect("incompatible backing must be rejected");
+                assert!(error.to_string().contains(expected_error), "{error}");
+            }
+        }
+        let error =
+            parse_memory_config("shared=off,file=memory.bin,cold_discard_hint=on").unwrap_err();
+        assert!(error.to_string().contains("conflicts with file"));
+        assert!(parse_memory_config("shared=off,thp=on,cold_discard_hint=on").is_ok());
+        assert!(parse_memory_config("shared=on,cold_discard_hint=off").is_ok());
     }
 
     #[test]

@@ -117,6 +117,13 @@ pub trait Hypervisor: 'static {
         false
     }
 
+    /// Whether non-isolated guest RAM supports host discard and safe refault,
+    /// either through the host kernel or the partition's memory fault resolver.
+    /// Memory backing and DMA restrictions must also be checked by the caller.
+    fn supports_memory_reclaim(&self) -> bool {
+        false
+    }
+
     /// Returns a new prototype partition from the given configuration.
     fn new_partition<'a>(
         &'a mut self,

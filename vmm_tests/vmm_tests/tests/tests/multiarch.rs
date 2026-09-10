@@ -516,6 +516,7 @@ async fn virtio_balloon_grow_shrink(
                     for node in &mut c.numa.nodes {
                         if let Some(mem) = &mut node.mem {
                             mem.private_memory = true;
+                            mem.transparent_hugepages = false;
                         }
                     }
                 })

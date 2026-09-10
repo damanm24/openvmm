@@ -1925,13 +1925,14 @@ async fn vm_config_from_command_line(
         }
     }
 
-    if let Some(initial_target_bytes) = opt.virtio_balloon {
+    if let Some(initial_target_bytes) = opt.balloon_target() {
         let (send, recv) = mesh::channel();
         resources.balloon_rpc = Some(send);
         let resource: Resource<VirtioDeviceHandle> =
             virtio_resources::balloon::VirtioBalloonHandle {
                 initial_target_bytes,
                 recv: Some(recv),
+                require_memory_reclaim: opt.cold_discard_hint(),
             }
             .into_resource();
         add_virtio_device(VirtioBusCli::Pci, resource);

@@ -147,6 +147,10 @@ impl virt::Hypervisor for Kvm {
         true
     }
 
+    fn supports_memory_reclaim(&self) -> bool {
+        true
+    }
+
     fn new_partition<'a>(
         &mut self,
         mut config: ProtoPartitionConfig<'a>,

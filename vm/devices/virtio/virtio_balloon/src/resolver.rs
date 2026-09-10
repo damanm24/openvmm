@@ -4,6 +4,7 @@
 //! Defines the resource resolver for virtio-balloon devices.
 
 use crate::VirtioBalloonDevice;
+use anyhow::Context as _;
 use virtio::resolve::ResolvedVirtioDevice;
 use virtio::resolve::VirtioResolveInput;
 use virtio_resources::balloon::VirtioBalloonHandle;
@@ -28,11 +29,17 @@ impl ResolveResource<VirtioDeviceHandle, VirtioBalloonHandle> for VirtioBalloonR
         resource: VirtioBalloonHandle,
         input: VirtioResolveInput<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        let reclaim = input.memory_reclaim.context(
+            "virtio-balloon requires MemoryReclaim support: use non-isolated x86_64 KVM (Linux) or WHP (Windows), without VTL2, with all RAM private anonymous and no pinning, aliases, or physical DMA; Windows also requires thp=off",
+        )?;
+        reclaim
+            .enable()
+            .context("failed to enable virtio-balloon memory reclaim")?;
         let device = VirtioBalloonDevice::new(
             input.driver_source,
             resource.initial_target_bytes,
             resource.recv,
-            input.memory_reclaim,
+            Some(reclaim),
         );
         Ok(device.into())
     }

@@ -754,11 +754,12 @@ mod x86 {
                             }
                             Ok(_) => {}
                             Err(err) => {
-                                tracelimit::warn_ratelimited!(
-                                    gpa = access.Gpa,
-                                    error = ?err,
-                                    "memory fault resolver failed; populating single page"
-                                );
+                                return Err(dev.fatal_error(
+                                    anyhow::anyhow!(
+                                        "failed to resolve WHP guest memory backing: {err:?}"
+                                    )
+                                    .into(),
+                                ));
                             }
                         }
                     }

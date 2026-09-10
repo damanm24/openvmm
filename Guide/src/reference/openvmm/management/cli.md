@@ -39,6 +39,30 @@ describes the source definitions.
     `on`; `off` uses private anonymous memory.
   * `prefetch[=on|off]` - pre-populate guest RAM mappings up front.
     Only has an effect under WHP; a no-op on KVM/mshv.
+  * `cold_discard_hint[=on|off]` - enable guest free-page reporting. Defaults
+    to `off`. Requires explicit `shared=off` and private anonymous RAM;
+    incompatible with `file` and `hugepages=on`. Transparent huge pages
+    (`thp=on`) are allowed on Linux; Windows requires `thp=off` on every
+    node because soft-large-page reclaim is not supported.
+    Adds one virtio-balloon device with an initial
+    target of zero, or reuses the target supplied by `--virtio-balloon`.
+    Startup fails if the host cannot supply a `MemoryReclaim` backend.
+    The current backend allowlist is non-isolated x86_64 KVM on Linux or
+    WHP on Windows, without VTL2. All guest RAM must be private anonymous
+    memory; mixed backing,
+    pinned RAM, aliases, and physical DMA assignment are rejected.
+    Physical DMA registration and reclaim are mutually exclusive for the
+    VM lifetime, including hot-added devices. Virtio-over-VPCI alone is not
+    physical DMA assignment. Windows releases commit with exact-page
+    decommit and recommits pages on host or guest access, preserving the
+    mapping's NUMA preference. Recommit failures are reported as memory
+    access errors; guest resolver failures stop the VM. These restrictions
+    also apply to
+    explicitly requested `--virtio-balloon` devices.
+    Reclaiming reported pages requires a guest driver with page-reporting
+    support. The same option is accepted by `--numa`: enabling it on any
+    node adds one VM-wide balloon, and every node's RAM must be private
+    anonymous memory.
   * `thp[=on|off]` - mark guest RAM (shared or private) as Transparent Huge
     Page eligible. Linux-only, best-effort, and on by default; pass `thp=off` to
     opt out.
@@ -58,6 +82,7 @@ describes the source definitions.
   --memory size=64GB,hugepages=on,hugepage_size=2MB
   --memory size=4G,file=path/to/memory.bin
   --memory size=4G,thp=off
+  --memory size=4G,shared=off,thp=off,cold_discard_hint=on
   ```
 * `--hv`: Exposes Hyper-V enlightenments. VMBus is enabled by default
   when `--hv` is active; pass `--no-vmbus` to suppress VMBus while keeping

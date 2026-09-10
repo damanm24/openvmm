@@ -131,6 +131,9 @@ struct MappingProps {
     /// Backed by private anonymous memory (committed up front) rather than a
     /// shared file/section mapping.
     private: bool,
+    writable: bool,
+    #[cfg(windows)]
+    numa_node: Option<u32>,
     /// General per-mapping fault counters, always present. See [`FaultStats`].
     stats: FaultStats,
     /// Soft-large-page (Windows THP) state, or `None` when the scheme does not
@@ -302,11 +305,12 @@ impl MapperTask {
             match req {
                 MapperRequest::Unmap(rpc) => rpc.handle_sync(|range| {
                     tracing::debug!(%range, "invalidate received");
+                    let mut mappings = self.inner.mappings.write();
                     self.inner
                         .mapping
                         .unmap(range.start() as usize, range.len() as usize)
                         .expect("invalidate request should be valid");
-                    self.inner.remove_mapping(range);
+                    MapperInner::remove_mapping(&mut mappings, range);
                 }),
                 MapperRequest::MapEager(rpc) => {
                     rpc.handle_failable_sync(|params| {
@@ -344,11 +348,15 @@ impl MapperTask {
         // Don't allow more waiters.
         *self.inner.waiters.lock() = None;
         // Invalidate everything.
+        let mut mappings = self.inner.mappings.write();
         let _ = self.inner.mapping.unmap(0, self.inner.mapping.len());
+        *mappings = RangeMap::new();
     }
 
     /// Establishes a mapping in the VA space, dispatching on how it is backed.
     fn map(&self, params: MappingParams) -> Result<(), MappingError> {
+        let mut mappings = self.inner.mappings.write();
+        MapperInner::remove_mapping(&mut mappings, params.range);
         // Soft large pages apply only to writable THP-eligible RAM on the primary
         // mapper (Windows); `SoftLp::new` returns `None` otherwise. See the
         // `soft_lp` module. They also depend on the partition delivering write
@@ -383,10 +391,14 @@ impl MapperTask {
                 true
             }
         };
-        self.inner.record_mapping(
+        MapperInner::record_mapping(
+            &mut mappings,
             params.range,
             MappingProps {
                 private,
+                writable: params.writable,
+                #[cfg(windows)]
+                numa_node: params.policy.numa_node,
                 stats: FaultStats::default(),
                 soft_lp,
             },
@@ -617,11 +629,14 @@ pub struct NoMapping(MemoryRange);
 impl MapperInner {
     /// Records an established mapping in the index, replacing any stale entry
     /// for the same range.
-    fn record_mapping(&self, range: MemoryRange, props: MappingProps) {
+    fn record_mapping(
+        mappings: &mut RangeMap<u64, MappingProps>,
+        range: MemoryRange,
+        props: MappingProps,
+    ) {
         if range.is_empty() {
             return;
         }
-        let mut mappings = self.mappings.write();
         mappings.remove_range(range.start()..=range.end() - 1);
         let inserted = mappings.insert(range.start()..=range.end() - 1, props);
         assert!(
@@ -631,13 +646,11 @@ impl MapperInner {
     }
 
     /// Removes a mapping from the index.
-    fn remove_mapping(&self, range: MemoryRange) {
+    fn remove_mapping(mappings: &mut RangeMap<u64, MappingProps>, range: MemoryRange) {
         if range.is_empty() {
             return;
         }
-        self.mappings
-            .write()
-            .remove_range(range.start()..=range.end() - 1);
+        mappings.remove_range(range.start()..=range.end() - 1);
     }
 
     /// Request that the mapping manager send mappings for the given range.
@@ -856,17 +869,25 @@ impl VaMapper {
         self.process.as_ref()
     }
 
-    /// Returns true if this mapper has any private (reclaimable) RAM ranges.
-    pub fn has_private_ranges(&self) -> bool {
-        !self.private_ranges.is_empty()
+    /// Returns whether a range is covered by an active private mapping.
+    pub(crate) fn is_reclaimable_range(&self, range: MemoryRange) -> bool {
+        if range.is_empty() || self.process.is_some() || self.inner.host_access.get().is_some() {
+            return false;
+        }
+        let mappings = self.inner.mappings.read();
+        mappings
+            .get_entry(&range.start())
+            .is_some_and(|&(_, end, ref props)| {
+                props.private && props.writable && props.soft_lp.is_none() && range.end() - 1 <= end
+            })
     }
 
     /// Reclaims (decommits) a guest-physical range backed by private RAM,
     /// releasing its physical pages to the host. The next guest access
     /// faults in fresh zero pages.
     ///
-    /// Unlike [`Self::decommit`], this validates the range against the
-    /// declared private ranges and returns an error rather than panicking.
+    /// Validates against active private mappings and holds the mapping lock
+    /// across discard, returning an error rather than panicking.
     /// It is safe to call with ranges derived from untrusted guest input
     /// (e.g. virtio-balloon PFNs).
     pub fn try_reclaim(&self, offset: u64, len: u64) -> Result<(), std::io::Error> {
@@ -874,7 +895,7 @@ impl VaMapper {
         if len == 0 {
             return Ok(());
         }
-        if offset % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 {
+        if !offset.is_multiple_of(PAGE_SIZE) || !len.is_multiple_of(PAGE_SIZE) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "reclaim range is not page-aligned",
@@ -883,32 +904,39 @@ impl VaMapper {
         let end = offset.checked_add(len).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "reclaim range overflow")
         })?;
-        if !self
-            .private_ranges
-            .iter()
-            .any(|r| offset >= r.start() && end <= r.end())
+        if !cfg!(any(target_os = "linux", windows))
+            || self.process.is_some()
+            || self.inner.host_access.get().is_some()
         {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "reclaim range is not backed by private RAM",
+                std::io::ErrorKind::Unsupported,
+                "reclaim requires local Linux or Windows RAM without restricted host access",
             ));
         }
-        self.decommit(offset as usize, len as usize)
-    }
-
-    /// Decommits a range of private RAM, releasing physical pages back to the
-    /// host.
-    ///
-    /// The caller must ensure this is only called on ranges backed by
-    /// private anonymous memory. Prefer [`Self::try_reclaim`] for ranges
-    /// that may come from untrusted input.
-    pub fn decommit(&self, offset: usize, len: usize) -> Result<(), std::io::Error> {
-        assert!(
-            self.private_ranges
-                .iter()
-                .any(|r| r.contains(&MemoryRange::new(offset as u64..offset as u64 + len as u64))),
-            "decommit called on non-private range"
-        );
+        let mappings = self.inner.mappings.write();
+        let valid = mappings
+            .get_entry(&offset)
+            .is_some_and(|&(_, mapping_end, ref props)| {
+                props.private && props.writable && props.soft_lp.is_none() && end - 1 <= mapping_end
+            });
+        if !valid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reclaim range is not covered by an active reclaimable private mapping",
+            ));
+        }
+        let offset = usize::try_from(offset).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reclaim address exceeds host address space",
+            )
+        })?;
+        let len = usize::try_from(len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reclaim length exceeds host address space",
+            )
+        })?;
         self.inner.mapping.decommit(offset, len)
     }
 }
@@ -938,6 +966,44 @@ unsafe impl GuestMemoryAccess for VaMapper {
         bitmap_failure: bool,
     ) -> PageFaultAction {
         assert!(!bitmap_failure, "bitmaps are not used");
+
+        #[cfg(windows)]
+        {
+            let mappings = self.inner.mappings.read();
+            if let Some(&(start, end, ref props)) = mappings.get_entry(&address) {
+                if props.private
+                    && props.writable
+                    && props.soft_lp.is_none()
+                    && self.inner.host_access.get().is_none()
+                    && self.inner.supports_memory_fault_resolution
+                {
+                    let fault_start = address & !(hvdef::HV_PAGE_SIZE - 1);
+                    let fault_end = address
+                        .checked_add(len as u64)
+                        .and_then(|end| end.checked_add(hvdef::HV_PAGE_SIZE - 1))
+                        .map(|end| end & !(hvdef::HV_PAGE_SIZE - 1));
+                    if let Some(fault_end) = fault_end.filter(|&fault_end| {
+                        fault_start >= start && fault_end > fault_start && fault_end - 1 <= end
+                    }) {
+                        return match self.inner.mapping.commit_numa(
+                            fault_start as usize,
+                            (fault_end - fault_start) as usize,
+                            props.numa_node,
+                        ) {
+                            Ok(()) => PageFaultAction::Retry,
+                            Err(err) => PageFaultAction::Fail(PageFaultError::new(
+                                GuestMemoryErrorKind::Other,
+                                err,
+                            )),
+                        };
+                    }
+                    return PageFaultAction::Fail(PageFaultError::new(
+                        GuestMemoryErrorKind::OutOfRange,
+                        UnexpectedPageFault,
+                    ));
+                }
+            }
+        }
 
         // Soft large pages (Windows): THP-eligible ranges on the primary mapper
         // are committed/mapped read-only, so the first *write* traps here (reads
@@ -1067,6 +1133,25 @@ impl ResolveMemoryFault for VaMapper {
             ));
         }
         props.stats.guest_faults.increment();
+
+        #[cfg(windows)]
+        if props.private
+            && props.writable
+            && props.soft_lp.is_none()
+            && self.inner.host_access.get().is_none()
+            && self.inner.supports_memory_fault_resolution
+        {
+            self.inner
+                .mapping
+                .commit_numa(
+                    fault.start() as usize,
+                    fault.len() as usize,
+                    props.numa_node,
+                )
+                .map_err(|err| {
+                    GuestMemoryBackingError::new(GuestMemoryErrorKind::Other, fault.start(), err)
+                })?;
+        }
 
         // Soft large pages (Windows) raise the covering 2 MB window on the first
         // write and may resolve to the whole window; every other mapping (and

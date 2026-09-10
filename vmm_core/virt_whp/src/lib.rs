@@ -877,6 +877,10 @@ impl virt::Hypervisor for Whp {
         cfg!(guest_arch = "x86_64")
     }
 
+    fn supports_memory_reclaim(&self) -> bool {
+        cfg!(guest_arch = "x86_64")
+    }
+
     fn new_partition<'a>(
         &mut self,
         config: ProtoPartitionConfig<'a>,

@@ -249,6 +249,7 @@ impl PetriVmConfigOpenVmm {
                 virtio_resources::balloon::VirtioBalloonHandle {
                     initial_target_bytes,
                     recv: Some(recv),
+                    require_memory_reclaim: false,
                 }
                 .into_resource(),
             )

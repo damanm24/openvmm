@@ -16,8 +16,8 @@
 //! pages from the balloon; the device simply acknowledges them (the pages
 //! fault back in on next guest access).
 //!
-//! Only the base inflate/deflate feature set is implemented; the optional
-//! stats, free-page-hint, and page-reporting virtqueues are not offered.
+//! Page-reporting requests reclaim the free memory ranges described by
+//! writable descriptors. Stats and free-page-hint virtqueues are not offered.
 
 #![forbid(unsafe_code)]
 
@@ -70,9 +70,7 @@ struct BalloonFeatureBank {
 
 const INFLATE_QUEUE: u16 = 0;
 const DEFLATE_QUEUE: u16 = 1;
-const STATS_QUEUE: u16 = 2;
-const FREE_PAGE_QUEUE: u16 = 3;
-const REPORTING_QUEUE: u16 = 4;
+const REPORTING_QUEUE: u16 = 2;
 
 const CONFIG_OFFSET_NUM_PAGES: u16 = 0;
 const CONFIG_OFFSET_ACTUAL: u16 = 4;
@@ -114,6 +112,8 @@ pub struct VirtioBalloonDevice {
     inflate_worker: TaskControl<BalloonWorker, BalloonQueue>,
     #[inspect(mut)]
     deflate_worker: TaskControl<BalloonWorker, BalloonQueue>,
+    #[inspect(mut)]
+    reporting_worker: TaskControl<BalloonWorker, BalloonQueue>,
 }
 
 impl VirtioBalloonDevice {
@@ -152,14 +152,16 @@ impl VirtioBalloonDevice {
             _control_task: control_task,
             inflate_worker: TaskControl::new(BalloonWorker),
             deflate_worker: TaskControl::new(BalloonWorker),
+            reporting_worker: TaskControl::new(BalloonWorker),
         }
     }
 
-    fn worker_mut(&mut self, idx: u16) -> &mut TaskControl<BalloonWorker, BalloonQueue> {
-        if idx == INFLATE_QUEUE {
-            &mut self.inflate_worker
-        } else {
-            &mut self.deflate_worker
+    fn worker_mut(&mut self, idx: u16) -> Option<&mut TaskControl<BalloonWorker, BalloonQueue>> {
+        match idx {
+            INFLATE_QUEUE => Some(&mut self.inflate_worker),
+            DEFLATE_QUEUE => Some(&mut self.deflate_worker),
+            REPORTING_QUEUE => Some(&mut self.reporting_worker),
+            _ => None,
         }
     }
 }
@@ -206,7 +208,13 @@ impl VirtioDevice for VirtioBalloonDevice {
         features: &VirtioDeviceFeatures,
         initial_state: Option<QueueState>,
     ) -> anyhow::Result<()> {
-        assert!(idx == INFLATE_QUEUE || idx == DEFLATE_QUEUE);
+        let features_bank = BalloonFeatureBank::from_bits(features.bank(0));
+        let kind = match idx {
+            INFLATE_QUEUE => QueueKind::Inflate,
+            DEFLATE_QUEUE => QueueKind::Deflate,
+            REPORTING_QUEUE if features_bank.page_reporting() => QueueKind::Reporting,
+            _ => anyhow::bail!("unsupported balloon queue index {idx}"),
+        };
 
         let queue_event = PolledWait::new(&self.driver, resources.event)
             .context("failed to create polled wait")?;
@@ -220,14 +228,11 @@ impl VirtioDevice for VirtioBalloonDevice {
         )
         .context("failed to create virtio queue")?;
 
-        let kind = if idx == INFLATE_QUEUE {
-            QueueKind::Inflate
-        } else {
-            QueueKind::Deflate
-        };
         let reclaim = self.reclaim.clone();
         let driver = self.driver.clone();
-        let worker = self.worker_mut(idx);
+        let worker = self
+            .worker_mut(idx)
+            .context("invalid balloon queue index")?;
         worker.insert(
             driver,
             "virtio-balloon-queue",
@@ -243,7 +248,7 @@ impl VirtioDevice for VirtioBalloonDevice {
     }
 
     async fn stop_queue(&mut self, idx: u16) -> Option<QueueState> {
-        let worker = self.worker_mut(idx);
+        let worker = self.worker_mut(idx)?;
         if !worker.has_state() {
             return None;
         }
@@ -292,6 +297,7 @@ async fn run_control_task(
 enum QueueKind {
     Inflate,
     Deflate,
+    Reporting,
 }
 
 #[derive(InspectMut)]
@@ -330,7 +336,10 @@ impl AsyncRun<BalloonQueue> for BalloonWorker {
             let Some(work) = work else { break };
             match work {
                 Ok(work) => {
-                    process_request(state, &work);
+                    match state.kind {
+                        QueueKind::Reporting => process_reporting_queue(state, &work),
+                        QueueKind::Inflate | QueueKind::Deflate => process_request(state, &work),
+                    }
                     state.queue.complete(work, 0);
                 }
                 Err(err) => {
@@ -354,7 +363,7 @@ impl AsyncRun<BalloonQueue> for BalloonWorker {
 fn process_request(state: &BalloonQueue, work: &VirtioQueueCallbackWork) {
     // Deflate never reclaims memory — the guest is taking pages back, and
     // they fault in on next access.
-    if state.kind == QueueKind::Deflate {
+    if state.kind != QueueKind::Inflate {
         return;
     }
     let Some(reclaim) = &state.reclaim else {
@@ -377,12 +386,11 @@ fn process_request(state: &BalloonQueue, work: &VirtioQueueCallbackWork) {
     }
 
     // Coalesce consecutive PFNs into runs to minimize reclaim calls.
-    let pfns = buf
+    let mut pfns = buf
         .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u64);
+        .map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64)
+        .peekable();
 
-    let mut run_start: Option<u64> = None;
-    let mut run_end: u64 = 0;
     let flush = |start: u64, end: u64| {
         let gpa = start << VIRTIO_BALLOON_PFN_SHIFT;
         let len = (end - start) << VIRTIO_BALLOON_PFN_SHIFT;
@@ -396,24 +404,41 @@ fn process_request(state: &BalloonQueue, work: &VirtioQueueCallbackWork) {
         }
     };
 
-    for pfn in pfns {
-        match run_start {
-            Some(_) if pfn == run_end => {
-                run_end = pfn + 1;
-            }
-            Some(start) => {
-                flush(start, run_end);
-                run_start = Some(pfn);
-                run_end = pfn + 1;
-            }
-            None => {
-                run_start = Some(pfn);
-                run_end = pfn + 1;
-            }
+    while let Some(start) = pfns.next() {
+        let mut end = start + 1;
+        while pfns.next_if(|&pfn| pfn == end).is_some() {
+            end += 1;
         }
+        flush(start, end);
     }
-    if let Some(start) = run_start {
-        flush(start, run_end);
+}
+
+fn process_reporting_queue(state: &BalloonQueue, work: &VirtioQueueCallbackWork) {
+    let Some(reclaim) = &state.reclaim else {
+        return;
+    };
+
+    for payload in &work.payload {
+        let gpa = payload.address;
+        let len = u64::from(payload.length);
+        if !payload.writeable
+            || len == 0
+            || !gpa.is_multiple_of(VIRTIO_BALLOON_PAGE_SIZE)
+            || !len.is_multiple_of(VIRTIO_BALLOON_PAGE_SIZE)
+            || gpa.checked_add(len).is_none()
+        {
+            tracelimit::warn_ratelimited!(gpa, len, "invalid balloon reporting range");
+            continue;
+        }
+
+        if let Err(err) = reclaim.reclaim(gpa, len) {
+            tracelimit::warn_ratelimited!(
+                err = &err as &dyn std::error::Error,
+                gpa,
+                len,
+                "failed to reclaim balloon reporting range"
+            );
+        }
     }
 }
 
@@ -522,7 +547,7 @@ mod tests {
     ) {
         device
             .start_queue(
-                balloon::INFLATE_QUEUE,
+                INFLATE_QUEUE,
                 QueueResources {
                     params: QueueParams {
                         size: QUEUE_SIZE,
@@ -540,6 +565,54 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[async_test]
+    async fn queue_dispatch_checks_negotiation_and_isolates_workers(driver: DefaultDriver) {
+        let mut device = VirtioBalloonDevice::new(&driver_source(&driver), 0, None, None);
+
+        for (idx, reporting, expected_success) in [
+            (REPORTING_QUEUE, false, false),
+            (3, true, false),
+            (4, true, false),
+            (INFLATE_QUEUE, false, true),
+            (DEFLATE_QUEUE, false, true),
+            (REPORTING_QUEUE, true, true),
+        ] {
+            let result = device
+                .start_queue(
+                    idx,
+                    QueueResources {
+                        params: QueueParams {
+                            size: QUEUE_SIZE,
+                            enable: true,
+                            desc_addr: DESC_ADDR,
+                            avail_addr: AVAIL_ADDR,
+                            used_addr: USED_ADDR,
+                        },
+                        notify: Interrupt::from_event(Event::new()),
+                        event: Event::new(),
+                        guest_memory: GuestMemory::allocate(TOTAL_MEM_SIZE),
+                    },
+                    &VirtioDeviceFeatures::new().with_bank(
+                        0,
+                        BalloonFeatureBank::new()
+                            .with_page_reporting(reporting)
+                            .into_bits(),
+                    ),
+                    None,
+                )
+                .await;
+            assert_eq!(result.is_ok(), expected_success, "queue {idx}: {result:?}");
+        }
+
+        assert!(device.stop_queue(3).await.is_none());
+        assert!(device.stop_queue(REPORTING_QUEUE).await.is_some());
+        assert!(device.inflate_worker.has_state());
+        assert!(device.deflate_worker.has_state());
+        assert!(device.stop_queue(REPORTING_QUEUE).await.is_none());
+        assert!(device.stop_queue(DEFLATE_QUEUE).await.is_some());
+        assert!(device.stop_queue(INFLATE_QUEUE).await.is_some());
     }
 
     #[async_test]
@@ -599,32 +672,18 @@ mod tests {
 
         let traits = device.traits();
         assert_eq!(traits.device_id, virtio::spec::VirtioDeviceType::BALLOON);
-        assert_eq!(traits.max_queues, 2);
+        assert_eq!(traits.max_queues, 3);
         assert_eq!(traits.device_register_length, 8);
 
         assert_eq!(
-            device
-                .read_registers_u32(balloon::CONFIG_OFFSET_NUM_PAGES)
-                .await,
+            device.read_registers_u32(CONFIG_OFFSET_NUM_PAGES).await,
             2048
         );
-        assert_eq!(
-            device
-                .read_registers_u32(balloon::CONFIG_OFFSET_ACTUAL)
-                .await,
-            0
-        );
+        assert_eq!(device.read_registers_u32(CONFIG_OFFSET_ACTUAL).await, 0);
 
         // The guest driver reports the current balloon size via `actual`.
-        device
-            .write_registers_u32(balloon::CONFIG_OFFSET_ACTUAL, 1000)
-            .await;
-        assert_eq!(
-            device
-                .read_registers_u32(balloon::CONFIG_OFFSET_ACTUAL)
-                .await,
-            1000
-        );
+        device.write_registers_u32(CONFIG_OFFSET_ACTUAL, 1000).await;
+        assert_eq!(device.read_registers_u32(CONFIG_OFFSET_ACTUAL).await, 1000);
     }
 
     #[async_test]
@@ -640,9 +699,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            device
-                .read_registers_u32(balloon::CONFIG_OFFSET_NUM_PAGES)
-                .await,
+            device.read_registers_u32(CONFIG_OFFSET_NUM_PAGES).await,
             1024
         );
 

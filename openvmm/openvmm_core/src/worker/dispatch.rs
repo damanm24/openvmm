@@ -205,6 +205,10 @@ async fn wait_for_vpci_eject(
 struct MemoryReclaimAdapter(GuestMemoryReclaim);
 
 impl VirtioMemoryReclaim for MemoryReclaimAdapter {
+    fn enable(&self) -> std::io::Result<()> {
+        self.0.enable()
+    }
+
     fn reclaim(&self, gpa: u64, len: u64) -> std::io::Result<()> {
         self.0.reclaim(gpa, len)
     }
@@ -477,6 +481,7 @@ pub(crate) struct InitializedVm {
     vmtime_keeper: VmTimeKeeper,
     vmtime_source: VmTimeSource,
     memory_manager: GuestMemoryManager,
+    supports_memory_reclaim: bool,
     gm: GuestMemory,
     cfg: Manifest,
     mem_layout: MemoryLayout,
@@ -1067,6 +1072,9 @@ impl InitializedVm {
         } else {
             None
         };
+        let supports_memory_reclaim = hypervisor.supports_memory_reclaim()
+            && !partition_isolation.is_isolated()
+            && cfg.hypervisor.with_vtl2.is_none();
         let proto_partition_isolation = match partition_isolation {
             virt::IsolationType::Snp => virt::ProtoPartitionIsolation::Snp(
                 igvm_file
@@ -1487,6 +1495,7 @@ impl InitializedVm {
             vmtime_keeper,
             vmtime_source,
             memory_manager,
+            supports_memory_reclaim,
             gm,
             cfg,
             mem_layout,
@@ -1518,6 +1527,7 @@ impl InitializedVm {
             vmtime_keeper,
             vmtime_source,
             memory_manager,
+            supports_memory_reclaim,
             gm,
             cfg,
             mem_layout,
@@ -1635,8 +1645,7 @@ impl InitializedVm {
         // backed by reclaimable private memory.
         let memory_reclaim: Option<Arc<dyn VirtioMemoryReclaim>> = {
             let reclaim = memory_manager.memory_reclaim();
-            reclaim
-                .is_supported()
+            (supports_memory_reclaim && reclaim.is_supported())
                 .then(|| Arc::new(MemoryReclaimAdapter(reclaim)) as Arc<dyn VirtioMemoryReclaim>)
         };
         #[cfg_attr(not(guest_arch = "x86_64"), expect(unused_mut))]
@@ -4026,6 +4035,7 @@ impl LoadedVm {
                                         .clone()
                                         .into_doorbell_registration(Vtl::Vtl0),
                                     shared_mem_mapper: None,
+                                    memory_reclaim: None,
                                 },
                                 vmbus.control(),
                                 &self.inner.chipset_devices,

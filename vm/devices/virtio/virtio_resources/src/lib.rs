@@ -135,6 +135,9 @@ pub mod balloon {
         /// Optional channel for runtime target changes after the device
         /// starts.
         pub recv: Option<mesh::Receiver<BalloonRequest>>,
+        /// Legacy opt-in flag retained for resource compatibility.
+        /// The balloon resolver now requires reclaim support regardless of this value.
+        pub require_memory_reclaim: bool,
     }
 
     impl ResourceId<VirtioDeviceHandle> for VirtioBalloonHandle {

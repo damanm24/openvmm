@@ -100,6 +100,7 @@ pub async fn build_dynamic_vpci_device(
                             driver_source,
                             doorbell_registration: ctx.doorbell_registration,
                             shared_mem_mapper: ctx.shared_mem_mapper,
+                            memory_reclaim: ctx.memory_reclaim,
                         },
                     )
                     .await

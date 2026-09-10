@@ -2706,6 +2706,12 @@ pub trait DoorbellRegistration: Send + Sync {
 /// to release physical pages back to the host. The next guest access to a
 /// reclaimed range faults in fresh zero pages.
 pub trait MemoryReclaim: Send + Sync {
+    /// Validates and enables reclaim before a device starts using it.
+    /// Backends with incompatible memory users must exclude them here.
+    fn enable(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// Reclaim the physical memory backing guest-physical range
     /// `[gpa, gpa + len)`. `gpa` and `len` must be page-aligned.
     ///
