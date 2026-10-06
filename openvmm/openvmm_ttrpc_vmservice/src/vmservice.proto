@@ -210,7 +210,11 @@ message DevicesConfig {
     // housed.
     repeated WindowsPCIDevice windows_device = 4;
     repeated VirtioFs virtiofs_config = 5;
+    // Legacy kernel console. Retained for wire compatibility.
     VirtioConsoleConfig virtio_console = 6;
+    // Additional single-port console devices, enumerated by the guest as
+    // hvc1, hvc2, and so on in list order.
+    repeated VirtioConsoleConfig virtio_consoles = 7;
 }
 
 // An endpoint PCIe device function. Attached behind a port in the topology
@@ -625,6 +629,9 @@ message VMConfig {
         RESTART = 1;
         // Leave the virtual machine halted.
         HALT = 2;
+        // Exit the VMM process. Shutdown exits successfully; failure events
+        // such as crashes and watchdog expiration exit unsuccessfully.
+        EXIT = 3;
     }
 
     // Actions for the VMM to take on guest power events.

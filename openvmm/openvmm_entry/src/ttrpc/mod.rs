@@ -1179,19 +1179,20 @@ impl VmService {
 
             let requested = req_config.guest_power_actions.unwrap_or_default();
             let defaults = GuestPowerActions::default();
-            let action = |value: i32, default| -> anyhow::Result<GuestPowerAction> {
+            let action = |value: i32, default, exit_code| -> anyhow::Result<GuestPowerAction> {
                 Ok(match ProtoAction::from_i32(value) {
                     Some(ProtoAction::Default) => default,
                     Some(ProtoAction::Restart) => GuestPowerAction::Reset,
                     Some(ProtoAction::Halt) => GuestPowerAction::Halt,
+                    Some(ProtoAction::Exit) => GuestPowerAction::Exit(exit_code),
                     None => bail!("unknown guest power action {value}"),
                 })
             };
             GuestPowerActions {
-                shutdown: action(requested.shutdown, defaults.shutdown)?,
-                reset: action(requested.reset, defaults.reset)?,
-                crash: action(requested.crash, defaults.crash)?,
-                watchdog: action(requested.watchdog, defaults.watchdog)?,
+                shutdown: action(requested.shutdown, defaults.shutdown, 0)?,
+                reset: action(requested.reset, defaults.reset, 1)?,
+                crash: action(requested.crash, defaults.crash, 1)?,
+                watchdog: action(requested.watchdog, defaults.watchdog, 1)?,
             }
         };
 
@@ -1255,7 +1256,11 @@ impl VmService {
                 }
             }
 
-            if let Some(virtio_console) = devices_config.virtio_console {
+            for virtio_console in devices_config
+                .virtio_console
+                .into_iter()
+                .chain(devices_config.virtio_consoles)
+            {
                 if !virtio_console.socket_path.is_empty() {
                     let (serial_fn, action) = open_socket_backend(virtio_console.connect);
                     let backend =
@@ -1463,10 +1468,8 @@ impl VmService {
                 }
             }
             VmControllerEvent::ExitRequested { code } => {
-                // The protocol has no `exit` power action, so this should not
-                // occur in ttrpc/grpc mode; log rather than exiting the server
-                // out from under its clients.
-                tracing::warn!(code, "unexpected exit request in server mode");
+                tracing::info!(code, "exiting on guest power event");
+                std::process::exit(code);
             }
             VmControllerEvent::WorkerStopped { error } => {
                 if let Some(err) = &error {
