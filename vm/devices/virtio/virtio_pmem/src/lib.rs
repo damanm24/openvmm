@@ -47,7 +47,7 @@ impl Device {
     ) -> anyhow::Result<Self> {
         let metadata = file.metadata().context("failed to get metadata")?;
         let len = metadata.len();
-        let mappable = sparse_mmap::new_mappable_from_file(&file, writable, true)
+        let mappable = sparse_mmap::new_mappable_from_file(&file, writable, false)
             .context("failed to create file mapping")?;
         Ok(Self {
             driver: driver_source.simple(),

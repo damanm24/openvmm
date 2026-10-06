@@ -2373,6 +2373,21 @@ async fn build_virtio_device(
         }
         Kind::VhostUser(vhost_user) => build_vhost_user_device(vhost_user)?,
         Kind::Fs(config) => build_virtio_fs(config)?.into_resource(),
+        Kind::Pmem(config) => {
+            anyhow::ensure!(
+                !config.host_path.is_empty(),
+                "virtio-pmem host path must not be empty"
+            );
+            anyhow::ensure!(
+                !config.host_path.contains('\0'),
+                "virtio-pmem host path must not contain NUL bytes"
+            );
+            virtio_resources::pmem::VirtioPmemHandle {
+                path: config.host_path,
+                read_only: config.read_only,
+            }
+            .into_resource()
+        }
     })
 }
 
