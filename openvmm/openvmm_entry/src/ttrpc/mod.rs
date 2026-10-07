@@ -1073,6 +1073,7 @@ impl VmService {
             ));
         }
         let layout_config = chipset_builder.layout_config();
+        let layout_config = apply_mmio_overrides(layout_config, req_config.memory_config.as_ref())?;
         let chipset = chipset_builder
             .build()
             .context("failed to build vm configuration")?;
@@ -1875,6 +1876,38 @@ async fn make_disk_config(disk: vmservice::ScsiDisk) -> anyhow::Result<ScsiDevic
         }
         .into_resource(),
     })
+}
+
+/// Applies the MMIO gap sizes from the request's `MemoryConfig` to the
+/// chipset's default layout. A zero-sized request field leaves the chipset
+/// default in place.
+fn apply_mmio_overrides(
+    mut layout: vmm_core_defs::LayoutConfig,
+    memory_config: Option<&vmservice::MemoryConfig>,
+) -> anyhow::Result<vmm_core_defs::LayoutConfig> {
+    const MB: u64 = 0x100000;
+
+    if let Some(memory_config) = memory_config {
+        anyhow::ensure!(
+            memory_config.high_mmio_base_in_mb == 0,
+            "high_mmio_base_in_mb is not supported; the high MMIO range is allocated dynamically"
+        );
+        if memory_config.low_mmio_gap_in_mb != 0 {
+            layout.chipset_low_mmio_size = memory_config
+                .low_mmio_gap_in_mb
+                .checked_mul(MB)
+                .and_then(|v| u32::try_from(v).ok())
+                .context("invalid low MMIO gap size")?;
+        }
+        if memory_config.high_mmio_gap_in_mb != 0 {
+            layout.chipset_high_mmio_size = memory_config
+                .high_mmio_gap_in_mb
+                .checked_mul(MB)
+                .context("invalid high MMIO gap size")?;
+        }
+    }
+
+    Ok(layout)
 }
 
 /// Builds a [`NumaTopology`] from the proto `NumaConfig`, returning the
