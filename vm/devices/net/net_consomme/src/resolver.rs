@@ -48,6 +48,7 @@ impl ResolveResource<NetEndpointHandleKind, ConsommeHandle> for ConsommeResolver
     ) -> Result<Self::Output, Self::Error> {
         let mut state = ConsommeParams::new().map_err(ResolveConsommeError::Consomme)?;
         state.client_mac.0 = input.mac_address.to_bytes();
+        state.disable_internal_dns = resource.disable_internal_dns;
         if let Some(cidr) = &resource.cidr {
             state
                 .set_cidr(cidr)

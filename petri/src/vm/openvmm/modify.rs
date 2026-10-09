@@ -117,6 +117,7 @@ impl PetriVmConfigOpenVmm {
         let endpoint = net_backend_resources::consomme::ConsommeHandle {
             cidr: None,
             ports: Vec::new(),
+            disable_internal_dns: false,
             recv: None,
         }
         .into_resource();
@@ -182,6 +183,7 @@ impl PetriVmConfigOpenVmm {
                 endpoint: net_backend_resources::consomme::ConsommeHandle {
                     cidr: None,
                     ports: Vec::new(),
+                    disable_internal_dns: false,
                     recv: None,
                 }
                 .into_resource(),
@@ -212,6 +214,7 @@ impl PetriVmConfigOpenVmm {
         let endpoint = net_backend_resources::consomme::ConsommeHandle {
             cidr: None,
             ports: Vec::new(),
+            disable_internal_dns: false,
             recv: None,
         }
         .into_resource();
@@ -262,6 +265,7 @@ impl PetriVmConfigOpenVmm {
         let endpoint = net_backend_resources::consomme::ConsommeHandle {
             cidr: None,
             ports: Vec::new(),
+            disable_internal_dns: false,
             recv: None,
         }
         .into_resource();
@@ -301,6 +305,7 @@ impl PetriVmConfigOpenVmm {
                 host_port: net_backend_resources::consomme::HostPort::Dynamic(port_send),
                 guest_port: pipette_client::PIPETTE_PORT as u16,
             }],
+            disable_internal_dns: false,
             recv: None,
         }
         .into_resource();

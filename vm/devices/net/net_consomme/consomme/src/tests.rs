@@ -659,6 +659,17 @@ async fn static_dns_a_record_answered(driver: DefaultDriver) {
     );
 }
 
+/// Disabling the internal DNS resolver keeps the host nameservers.
+#[test]
+fn disable_internal_dns_keeps_host_nameservers() {
+    let mut params = ConsommeParams::new().unwrap();
+    let host_nameservers = params.nameservers.clone();
+    params.disable_internal_dns = true;
+    let mut consomme = Consomme::new(params);
+    assert!(!consomme.dns.is_available());
+    assert_eq!(consomme.params_mut().nameservers, host_nameservers);
+}
+
 /// Static records are still inspected when the platform resolver backend is
 /// unavailable and the guest is using the advertised external DNS server.
 #[pal_async::async_test]

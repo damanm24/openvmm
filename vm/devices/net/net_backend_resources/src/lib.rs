@@ -90,13 +90,27 @@ pub mod consomme {
         pub guest_port: u16,
     }
 
-    /// A runtime request to bind or unbind a port on a running Consomme endpoint.
+    /// A static DNS `A` record answered directly by Consomme.
+    #[derive(Debug, MeshPayload)]
+    pub struct DnsRecordConfig {
+        /// The query name in presentation form (e.g. `"example.com"`).
+        pub name: String,
+        /// The IPv4 address returned for the name.
+        pub address: std::net::Ipv4Addr,
+    }
+
+    /// A runtime request to modify a running Consomme endpoint.
     #[derive(MeshPayload)]
     pub enum ConsommeRequest {
         /// Bind a host port to forward traffic to the guest.
         Bind(mesh::rpc::FailableRpc<HostPortConfig, ()>),
         /// Unbind a previously forwarded port.
         Unbind(mesh::rpc::FailableRpc<HostPortConfig, ()>),
+        /// Add a static DNS record.
+        AddDnsRecord(mesh::rpc::FailableRpc<DnsRecordConfig, ()>),
+        /// Allocate a virtual address in the guest subnet that routes to the
+        /// given host address, and return it.
+        CreateVirtualAddress(mesh::rpc::FailableRpc<HostIpAddress, HostIpAddress>),
     }
 
     /// Handle to a Consomme network endpoint.
@@ -106,6 +120,9 @@ pub mod consomme {
         pub cidr: Option<String>,
         /// Ports to forward from the host into the guest at creation time.
         pub ports: Vec<HostPortConfig>,
+        /// If true, the guest uses the host's DNS servers instead of the
+        /// built-in DNS resolver.
+        pub disable_internal_dns: bool,
         /// Optional channel for runtime port bind/unbind after the endpoint starts.
         pub recv: Option<mesh::Receiver<ConsommeRequest>>,
     }

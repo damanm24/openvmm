@@ -58,6 +58,15 @@ service VM {
     // an unknown or previously removed instance ID returns an error.
     rpc RemoveVpciDevice(RemoveVpciDeviceRequest) returns (google.protobuf.Empty);
 
+    // CreateVirtualAddress allocates an address in the consomme NIC's guest
+    // subnet and routes guest traffic sent to it to a host address. Repeating
+    // the call for the same destination returns the same virtual address.
+    rpc CreateVirtualAddress(CreateVirtualAddressRequest) returns (CreateVirtualAddressResponse);
+
+    // AddDnsRecord adds a static DNS record that the consomme NIC answers
+    // directly, without forwarding the query to the host resolver.
+    rpc AddDnsRecord(AddDnsRecordRequest) returns (google.protobuf.Empty);
+
     // Quit will shutdown the process hosting the ttrpc server.
     rpc Quit(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
@@ -698,6 +707,8 @@ message VMConfig {
     bool disable_hv = 17;
     // Confidential-computing isolation mode.
     IsolationConfig isolation_config = 19;
+    // Expose hardware virtualization extensions to the guest.
+    bool nested_virt = 20;
 }
 
 // WindowsOptions contains virtual machine configurations that are only present on a Windows host.
@@ -916,6 +927,32 @@ message ConsommeBackend {
     // Ports to forward from the host into the guest.
     // Used during initial creation and for dynamic add/remove via ModifyResource.
     repeated PortConfig ports = 2;
+    // If true, the guest resolves names through the host's DNS servers
+    // instead of consomme's built-in DNS resolver on the gateway address.
+    // Only honored when the NIC is created.
+    bool disable_internal_dns = 3;
+}
+
+message CreateVirtualAddressRequest {
+    // The consomme NIC. Only the VM's consomme NIC is addressable today.
+    string nic_id = 1; // GUID
+    // The host address (IPv4 or IPv6) that guest traffic to the virtual
+    // address is routed to, e.g. "127.0.0.1".
+    string destination = 2;
+}
+
+message CreateVirtualAddressResponse {
+    // The allocated guest-visible address, in the same family as the destination.
+    string virtual_address = 1;
+}
+
+message AddDnsRecordRequest {
+    // The consomme NIC. Only the VM's consomme NIC is addressable today.
+    string nic_id = 1; // GUID
+    // The name the guest resolves, e.g. "host.wsl.internal".
+    string name = 2;
+    // The IPv4 address returned for the name (A record).
+    string address = 3;
 }
 
 message WindowsPCIDevice {

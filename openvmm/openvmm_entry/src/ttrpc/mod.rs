@@ -49,6 +49,7 @@ use mesh_worker::Worker;
 use mesh_worker::WorkerId;
 use mesh_worker::WorkerRpc;
 use net_backend_resources::consomme::ConsommeRequest;
+use net_backend_resources::consomme::DnsRecordConfig;
 use net_backend_resources::consomme::HostPort;
 use net_backend_resources::consomme::HostPortConfig;
 use net_backend_resources::consomme::HostPortProtocol;
@@ -683,6 +684,20 @@ struct VmService {
     registry: FdRegistry,
 }
 
+/// Maps Consomme port bind/unbind failures to definite gRPC rejections. The
+/// mesh RPC boundary serializes the error, so the cause is recognized by text.
+fn port_error(err: anyhow::Error) -> anyhow::Error {
+    let message = format!("{err:#}");
+    let code = if message.contains("already bound") || message.contains("os error 10048") {
+        Code::AlreadyExists
+    } else if message.contains("not bound") {
+        Code::NotFound
+    } else {
+        return err;
+    };
+    anyhow::Error::new(code).context(message)
+}
+
 fn grpc_error(err: anyhow::Error) -> Status {
     let root_cause = err.root_cause();
     let code = if let Some(code) = root_cause.downcast_ref::<Code>() {
@@ -695,6 +710,7 @@ fn grpc_error(err: anyhow::Error) -> Status {
     } else {
         Code::Unknown
     };
+    tracing::warn!(?code, error = format!("{:#}", err), "ttrpc request failed");
     Status {
         code: code.into(),
         message: format!("{:#}", err),
@@ -779,6 +795,14 @@ impl VmService {
             }
             vmservice::Vm::RemoveVpciDevice(request, response) => {
                 let r = self.remove_vpci_device(request);
+                self.start_rpc(response, r);
+            }
+            vmservice::Vm::CreateVirtualAddress(request, response) => {
+                let r = self.create_virtual_address(request);
+                self.start_rpc(response, r);
+            }
+            vmservice::Vm::AddDnsRecord(request, response) => {
+                let r = self.add_dns_record(request);
                 self.start_rpc(response, r);
             }
         }
@@ -1150,6 +1174,7 @@ impl VmService {
             hypervisor: HypervisorConfig {
                 with_hv: !req_config.disable_hv,
                 with_isolation: isolation,
+                nested_virt: req_config.nested_virt,
                 ..Default::default()
             },
             #[cfg(windows)]
@@ -1519,6 +1544,63 @@ impl VmService {
         })
     }
 
+    fn create_virtual_address(
+        &self,
+        request: vmservice::CreateVirtualAddressRequest,
+    ) -> anyhow::Result<
+        impl Future<Output = anyhow::Result<vmservice::CreateVirtualAddressResponse>> + use<>,
+    > {
+        let destination: std::net::IpAddr = request
+            .destination
+            .parse()
+            .context("invalid destination address")?;
+        let consomme_rpc = self
+            .vm
+            .as_ref()
+            .context("VM not created yet")?
+            .consomme_rpc
+            .as_ref()
+            .context("no consomme port channel")?
+            .clone();
+        Ok(async move {
+            let virtual_address = consomme_rpc
+                .call_failable(ConsommeRequest::CreateVirtualAddress, destination.into())
+                .await
+                .map_err(anyhow::Error::from)?;
+            Ok(vmservice::CreateVirtualAddressResponse {
+                virtual_address: std::net::IpAddr::from(virtual_address).to_string(),
+            })
+        })
+    }
+
+    fn add_dns_record(
+        &self,
+        request: vmservice::AddDnsRecordRequest,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+        let address: std::net::Ipv4Addr = request
+            .address
+            .parse()
+            .context("invalid IPv4 address for A record")?;
+        let consomme_rpc = self
+            .vm
+            .as_ref()
+            .context("VM not created yet")?
+            .consomme_rpc
+            .as_ref()
+            .context("no consomme port channel")?
+            .clone();
+        let record = DnsRecordConfig {
+            name: request.name,
+            address,
+        };
+        Ok(async move {
+            consomme_rpc
+                .call_failable(ConsommeRequest::AddDnsRecord, record)
+                .await
+                .map_err(anyhow::Error::from)
+        })
+    }
+
     fn remove_pcie_device(
         &self,
         request: vmservice::RemovePcieDeviceRequest,
@@ -1643,7 +1725,7 @@ impl VmService {
                             consomme_rpc
                                 .call_failable(ConsommeRequest::Bind, cfg)
                                 .await
-                                .map_err(anyhow::Error::from)?;
+                                .map_err(|e| port_error(anyhow::Error::from(e)))?;
                         }
                         Ok(())
                     }
@@ -1664,7 +1746,7 @@ impl VmService {
                             consomme_rpc
                                 .call_failable(ConsommeRequest::Unbind, cfg)
                                 .await
-                                .map_err(anyhow::Error::from)?;
+                                .map_err(|e| port_error(anyhow::Error::from(e)))?;
                         }
                         Ok(())
                     }
@@ -1827,6 +1909,7 @@ fn parse_nic_config(
         #[cfg(target_os = "linux")]
         Backend::Tap(tap) => build_tap_backend(tap, registry)?,
         Backend::Consomme(consomme) => net_backend_resources::consomme::ConsommeHandle {
+            disable_internal_dns: consomme.disable_internal_dns,
             cidr: if consomme.cidr.is_empty() {
                 None
             } else {
@@ -2488,17 +2571,20 @@ fn build_nic_backend(
     let _ = registry;
     let vmservice::NicBackend { kind } = backend;
     Ok(match kind.context("missing network backend")? {
-        Kind::Consomme(vmservice::ConsommeBackend { cidr, ports }) => {
-            net_backend_resources::consomme::ConsommeHandle {
-                cidr: (!cidr.is_empty()).then_some(cidr),
-                ports: ports
-                    .into_iter()
-                    .map(parse_port_config)
-                    .collect::<anyhow::Result<_>>()?,
-                recv: None,
-            }
-            .into_resource()
+        Kind::Consomme(vmservice::ConsommeBackend {
+            cidr,
+            ports,
+            disable_internal_dns,
+        }) => net_backend_resources::consomme::ConsommeHandle {
+            cidr: (!cidr.is_empty()).then_some(cidr),
+            disable_internal_dns,
+            ports: ports
+                .into_iter()
+                .map(parse_port_config)
+                .collect::<anyhow::Result<_>>()?,
+            recv: None,
         }
+        .into_resource(),
         #[cfg(target_os = "linux")]
         Kind::Tap(tap) => build_tap_backend(tap, registry)?,
         #[cfg(windows)]

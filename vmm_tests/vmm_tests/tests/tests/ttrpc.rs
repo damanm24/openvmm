@@ -466,6 +466,7 @@ async fn test_ttrpc_interface(
                                         vmservice::ConsommeBackend {
                                             cidr: String::new(),
                                             ports: vec![],
+                                            disable_internal_dns: false,
                                         },
                                     )),
                                 }),
@@ -607,6 +608,7 @@ async fn test_ttrpc_interface(
                                             protocol: vmservice::IpProtocol::Tcp as i32,
                                             host_address: host_address.to_string(),
                                         }],
+                                        disable_internal_dns: false,
                                     },
                                 )),
                                 ..Default::default()
@@ -715,6 +717,7 @@ async fn test_ttrpc_interface(
                                                     protocol,
                                                     host_address: host_address.to_string(),
                                                 }],
+                                                disable_internal_dns: false,
                                             },
                                         )),
                                         ..Default::default()
