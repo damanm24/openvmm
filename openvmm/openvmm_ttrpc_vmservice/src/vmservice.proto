@@ -964,6 +964,7 @@ message VirtioFs {
     string tag = 1;
     string root_path = 2;
     bool read_only = 3;
+    string mount_options = 4;
 }
 
 message VirtioConsoleConfig {

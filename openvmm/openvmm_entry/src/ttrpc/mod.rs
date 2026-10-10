@@ -2514,6 +2514,7 @@ fn build_virtio_fs(
         tag,
         root_path,
         read_only,
+        mut mount_options,
     } = config;
     const VIRTIO_FS_TAG_LEN: usize = 36;
     anyhow::ensure!(!tag.is_empty(), "virtio-fs tag must not be empty");
@@ -2533,15 +2534,21 @@ fn build_virtio_fs(
         !root_path.contains('\0'),
         "virtio-fs root path must not contain NUL bytes"
     );
+    anyhow::ensure!(
+        !mount_options.contains('\0'),
+        "virtio-fs mount options must not contain NUL bytes"
+    );
+    if read_only {
+        if !mount_options.is_empty() {
+            mount_options.push(';');
+        }
+        mount_options.push_str("ro");
+    }
     Ok(virtio_resources::fs::VirtioFsHandle {
         tag,
         fs: virtio_resources::fs::VirtioFsBackend::HostFs {
             root_path,
-            mount_options: if read_only {
-                "ro".to_string()
-            } else {
-                String::new()
-            },
+            mount_options,
         },
     })
 }
