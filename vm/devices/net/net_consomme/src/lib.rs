@@ -105,6 +105,9 @@ pub struct PortForwardConfig {
     pub socket: socket2::Socket,
     /// The port traffic is forwarded to on the guest.
     pub guest_port: u16,
+    /// The guest address traffic is forwarded to, or `None` to use the
+    /// client address.
+    pub guest_address: Option<IpAddr>,
 }
 
 struct EndpointState {
@@ -267,6 +270,7 @@ impl ConsommeControl {
                     protocol,
                     socket,
                     guest_port,
+                    guest_address: None,
                 },
             )
             .await
@@ -387,11 +391,16 @@ impl net_backend::Endpoint for ConsommeEndpoint {
             for fwd in port_forwards {
                 let protocol = fwd.protocol;
                 let guest_port = fwd.guest_port;
+                let guest_address = fwd.guest_address;
                 let result = match socket_family(&fwd.socket) {
                     Ok(family) => {
                         let result = match protocol {
-                            IpProtocol::Tcp => c.bind_tcp_port(fwd.socket, guest_port),
-                            IpProtocol::Udp => c.bind_udp_port(fwd.socket, guest_port),
+                            IpProtocol::Tcp => {
+                                c.bind_tcp_port_to_address(fwd.socket, guest_port, guest_address)
+                            }
+                            IpProtocol::Udp => {
+                                c.bind_udp_port_to_address(fwd.socket, guest_port, guest_address)
+                            }
                         };
                         result.map(|()| (protocol, family, guest_port))
                     }
@@ -570,6 +579,7 @@ fn execute_bind(
     };
     let protocol: IpProtocol = cfg.protocol.clone().into();
     let ip_addr = cfg.host_address.as_ref().map(|a| IpAddr::from(a.clone()));
+    let guest_address = cfg.guest_address.as_ref().map(|a| IpAddr::from(a.clone()));
     let socket = create_bound_socket(&protocol, ip_addr, bind_port)
         .context("failed to create and bind socket")?;
     let dynamic_port = match dynamic_sender {
@@ -580,8 +590,8 @@ fn execute_bind(
         None => None,
     };
     let result = match protocol {
-        IpProtocol::Tcp => consomme.bind_tcp_port(socket, cfg.guest_port),
-        IpProtocol::Udp => consomme.bind_udp_port(socket, cfg.guest_port),
+        IpProtocol::Tcp => consomme.bind_tcp_port_to_address(socket, cfg.guest_port, guest_address),
+        IpProtocol::Udp => consomme.bind_udp_port_to_address(socket, cfg.guest_port, guest_address),
     };
     result.context("failed to bind port")?;
     if let Some((sender, port)) = dynamic_port {
@@ -672,12 +682,16 @@ fn process_message(
     match message {
         ConsommeMessage::BindPort(rpc) => {
             rpc.handle_sync(|bind_message| match bind_message.protocol {
-                IpProtocol::Tcp => {
-                    consomme.bind_tcp_port(bind_message.socket, bind_message.guest_port)
-                }
-                IpProtocol::Udp => {
-                    consomme.bind_udp_port(bind_message.socket, bind_message.guest_port)
-                }
+                IpProtocol::Tcp => consomme.bind_tcp_port_to_address(
+                    bind_message.socket,
+                    bind_message.guest_port,
+                    bind_message.guest_address,
+                ),
+                IpProtocol::Udp => consomme.bind_udp_port_to_address(
+                    bind_message.socket,
+                    bind_message.guest_port,
+                    bind_message.guest_address,
+                ),
             });
         }
         ConsommeMessage::UnbindPort(rpc) => {

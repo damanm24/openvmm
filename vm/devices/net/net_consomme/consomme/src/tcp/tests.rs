@@ -22,7 +22,7 @@ use smoltcp::wire::EthernetAddress;
 use smoltcp::wire::Ipv4Address;
 use smoltcp::wire::Ipv4Repr;
 use socket2::SockRef;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddrV4;
@@ -1671,6 +1671,195 @@ async fn test_tcp_port_forward_loopback_adapter_src_not_rewritten(driver: Defaul
         src_ip.is_loopback(),
         "forwarded SYN source IP should remain loopback, got {src_ip}"
     );
+}
+
+/// Test that a port forward with an explicit guest address delivers the
+/// connection to that address (here the guest's loopback address) instead of
+/// the client address, and that the guest's replies from that address
+/// complete the connection.
+#[pal_async::async_test]
+async fn test_tcp_port_forward_to_guest_address(driver: DefaultDriver) {
+    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut client = TestClient::new(driver.clone());
+
+    let guest_mac = consomme.params_mut().client_mac;
+    let gateway_mac = consomme.params_mut().gateway_mac;
+    let client_ip = consomme.params_mut().client_ip;
+    let guest_loopback = Ipv4Address::new(127, 0, 0, 1);
+    let guest_port = 9999;
+    let received = client.received_packets.clone();
+
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        .unwrap();
+    let host_addr = socket.local_addr().unwrap().as_socket().unwrap();
+
+    consomme
+        .access(&mut client)
+        .bind_tcp_port_to_address(socket, guest_port, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+        .expect("bind should succeed");
+
+    let mut connector = std::net::TcpStream::connect(host_addr).unwrap();
+    connector.set_nonblocking(true).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let syn_packet = loop {
+        std::future::poll_fn(|cx| {
+            consomme.access(&mut client).poll(cx);
+            Poll::Ready(())
+        })
+        .await;
+
+        if let Some(packet) = received.lock().iter().find_map(|packet| {
+            TcpTestHarness::is_tcp_packet(packet)
+                .is_some_and(|tcp| tcp.control == TcpControl::Syn && tcp.dst_port == guest_port)
+                .then(|| packet.clone())
+        }) {
+            break packet;
+        }
+
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for forwarded TCP SYN"
+        );
+        pal_async::timer::PolledTimer::new(&driver)
+            .sleep(Duration::from_millis(10))
+            .await;
+    };
+
+    let (src_ip, dst_ip, syn) = parse_tcp_packet(&syn_packet);
+    assert_eq!(dst_ip, guest_loopback);
+    assert_eq!(syn.dst_port, guest_port);
+    // The host loopback source must still be rewritten to a virtual subnet
+    // address so the guest routes its reply back through the adapter.
+    assert!(
+        !src_ip.is_loopback(),
+        "forwarded SYN source IP should not be loopback, got {src_ip}"
+    );
+    assert_ne!(src_ip, client_ip);
+    received.lock().clear();
+
+    // Complete the handshake from the guest's loopback address.
+    let guest_isn = TcpSeqNumber(5000);
+    let syn_ack = TcpRepr {
+        src_port: guest_port,
+        dst_port: syn.src_port,
+        control: TcpControl::Syn,
+        seq_number: guest_isn,
+        ack_number: Some(syn.seq_number + 1),
+        window_len: 64240,
+        window_scale: None,
+        max_seg_size: Some(1460),
+        sack_permitted: false,
+        sack_ranges: [None, None, None],
+        timestamp: None,
+        payload: &[],
+    };
+    let mut buf = vec![0u8; 1514];
+    let len = build_tcp_packet(
+        &mut buf,
+        guest_mac,
+        gateway_mac,
+        guest_loopback,
+        src_ip,
+        &syn_ack,
+    );
+    consomme
+        .access(&mut client)
+        .send(&buf[..len], &ChecksumState::NONE)
+        .unwrap();
+
+    {
+        let packets = received.lock();
+        let (_, ack_dst_ip, ack) = parse_tcp_packet(
+            packets
+                .iter()
+                .find(|packet| TcpTestHarness::is_tcp_packet(packet).is_some())
+                .expect("SYN-ACK should be acknowledged"),
+        );
+        assert_eq!(ack_dst_ip, guest_loopback);
+        assert_eq!(ack.control, TcpControl::None);
+        assert_eq!(ack.ack_number, Some(guest_isn + 1));
+    }
+
+    // Send data from the guest and verify it reaches the host connection.
+    let payload = b"hello";
+    let data = TcpRepr {
+        src_port: guest_port,
+        dst_port: syn.src_port,
+        control: TcpControl::Psh,
+        seq_number: guest_isn + 1,
+        ack_number: Some(syn.seq_number + 1),
+        window_len: 64240,
+        window_scale: None,
+        max_seg_size: None,
+        sack_permitted: false,
+        sack_ranges: [None, None, None],
+        timestamp: None,
+        payload,
+    };
+    let len = build_tcp_packet(
+        &mut buf,
+        guest_mac,
+        gateway_mac,
+        guest_loopback,
+        src_ip,
+        &data,
+    );
+    consomme
+        .access(&mut client)
+        .send(&buf[..len], &ChecksumState::NONE)
+        .unwrap();
+
+    let mut read_buf = [0u8; 16];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let n = loop {
+        std::future::poll_fn(|cx| {
+            consomme.access(&mut client).poll(cx);
+            Poll::Ready(())
+        })
+        .await;
+
+        match connector.read(&mut read_buf) {
+            Ok(n) => break n,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+            Err(err) => panic!("host read failed: {err}"),
+        }
+
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for guest data on the host connection"
+        );
+        pal_async::timer::PolledTimer::new(&driver)
+            .sleep(Duration::from_millis(10))
+            .await;
+    };
+    assert_eq!(&read_buf[..n], payload);
+}
+
+/// Test that binding with a guest address of a different family than the host
+/// socket fails.
+#[pal_async::async_test]
+async fn test_tcp_bind_guest_address_family_mismatch(driver: DefaultDriver) {
+    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut client = TestClient::new(driver);
+
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        .unwrap();
+
+    let result = consomme.access(&mut client).bind_tcp_port_to_address(
+        socket,
+        9999,
+        Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+    );
+    assert!(
+        matches!(result, Err(BindError::GuestAddressFamilyMismatch(_))),
+        "family mismatch should be rejected"
+    );
+    assert!(consomme.tcp.listeners.is_empty());
 }
 
 /// Test that binding the same guest port twice returns `PortAlreadyBound`.

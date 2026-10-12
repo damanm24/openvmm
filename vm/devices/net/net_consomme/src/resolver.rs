@@ -94,6 +94,7 @@ impl ResolveResource<NetEndpointHandleKind, ConsommeHandle> for ConsommeResolver
                     protocol,
                     socket,
                     guest_port: p.guest_port,
+                    guest_address: p.guest_address.map(std::net::IpAddr::from),
                 })
             })
             .collect::<Result<Vec<_>, ResolveConsommeError>>()?;

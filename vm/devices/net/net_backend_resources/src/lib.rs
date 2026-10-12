@@ -88,6 +88,9 @@ pub mod consomme {
         pub host_port: HostPort,
         /// The guest port to forward to.
         pub guest_port: u16,
+        /// The guest address to forward to, or `None` to use the guest's
+        /// address on the NIC.
+        pub guest_address: Option<HostIpAddress>,
     }
 
     /// A static DNS `A` record answered directly by Consomme.
