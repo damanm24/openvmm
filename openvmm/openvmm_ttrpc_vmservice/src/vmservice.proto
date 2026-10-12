@@ -67,6 +67,16 @@ service VM {
     // directly, without forwarding the query to the host resolver.
     rpc AddDnsRecord(AddDnsRecordRequest) returns (google.protobuf.Empty);
 
+    // AddHvSocketListener binds a Unix socket and relays each accepted
+    // connection to a guest hvsocket service. Unlike the HVSocketConfig
+    // listener, clients do not send a CONNECT request or receive an OK
+    // response, so the stream carries only relayed data.
+    rpc AddHvSocketListener(AddHvSocketListenerRequest) returns (google.protobuf.Empty);
+
+    // RemoveHvSocketListener stops accepting connections for a listener added
+    // by AddHvSocketListener. Established connections are not affected.
+    rpc RemoveHvSocketListener(RemoveHvSocketListenerRequest) returns (google.protobuf.Empty);
+
     // Quit will shutdown the process hosting the ttrpc server.
     rpc Quit(google.protobuf.Empty) returns (google.protobuf.Empty);
 }
@@ -1037,4 +1047,18 @@ message AddVpciDeviceRequest {
 message RemoveVpciDeviceRequest {
     // Instance ID supplied to AddVpciDevice.
     string instance_id = 1;
+}
+
+message AddHvSocketListenerRequest {
+    // Unix socket path to bind. The caller owns the socket file and removes it
+    // after the listener is removed.
+    string path = 1;
+    // Guest hvsocket service ID (GUID). Vsock port N uses the service ID
+    // N-facb-11e6-bd58-64006a7986d3, with N as eight hexadecimal digits.
+    string service_id = 2;
+}
+
+message RemoveHvSocketListenerRequest {
+    // Service ID supplied to AddHvSocketListener.
+    string service_id = 1;
 }

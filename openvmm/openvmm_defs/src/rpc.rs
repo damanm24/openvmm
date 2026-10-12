@@ -27,6 +27,13 @@ pub enum VmRpc {
     Nmi(Rpc<u32, ()>),
     AddVmbusDevice(FailableRpc<(DeviceVtl, Resource<VmbusDeviceHandleKind>), ()>),
     ConnectHvsock(FailableRpc<(CancelContext, Guid, DeviceVtl), unix_socket::UnixStream>),
+    /// Relays connections accepted by a Unix listener to a guest hvsocket
+    /// service, without the hybrid vsock connect handshake.
+    /// Tuple is (vtl, service_id, listener).
+    AddHvsockListener(FailableRpc<(DeviceVtl, Guid, unix_socket::UnixListener), ()>),
+    /// Stops a listener added by `AddHvsockListener`.
+    /// Tuple is (vtl, service_id).
+    RemoveHvsockListener(FailableRpc<(DeviceVtl, Guid), ()>),
     PulseSaveRestore(Rpc<(), Result<(), PulseSaveRestoreError>>),
     StartReloadIgvm(FailableRpc<File, ()>),
     CompleteReloadIgvm(FailableRpc<bool, ()>),
@@ -78,6 +85,8 @@ impl fmt::Debug for VmRpc {
             VmRpc::Nmi(_) => "Nmi",
             VmRpc::AddVmbusDevice(_) => "AddVmbusDevice",
             VmRpc::ConnectHvsock(_) => "ConnectHvsock",
+            VmRpc::AddHvsockListener(_) => "AddHvsockListener",
+            VmRpc::RemoveHvsockListener(_) => "RemoveHvsockListener",
             VmRpc::PulseSaveRestore(_) => "PulseSaveRestore",
             VmRpc::StartReloadIgvm(_) => "StartReloadIgvm",
             VmRpc::CompleteReloadIgvm(_) => "CompleteReloadIgvm",

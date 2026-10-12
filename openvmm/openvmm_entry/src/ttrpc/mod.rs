@@ -805,6 +805,14 @@ impl VmService {
                 let r = self.add_dns_record(request);
                 self.start_rpc(response, r);
             }
+            vmservice::Vm::AddHvSocketListener(request, response) => {
+                let r = self.add_hvsocket_listener(request);
+                self.start_rpc(response, r);
+            }
+            vmservice::Vm::RemoveHvSocketListener(request, response) => {
+                let r = self.remove_hvsocket_listener(request);
+                self.start_rpc(response, r);
+            }
         }
         HandleAction::None
     }
@@ -1654,6 +1662,41 @@ impl VmService {
             .context("VM not created yet")?
             .worker_rpc
             .call_failable(VmRpc::RemoveVpciDevice, instance_id);
+        Ok(async move { recv.await.map_err(anyhow::Error::from) })
+    }
+
+    fn add_hvsocket_listener(
+        &self,
+        request: vmservice::AddHvSocketListenerRequest,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+        let service_id = request
+            .service_id
+            .parse()
+            .context("invalid hvsocket service ID")?;
+        let vm = self.vm.as_ref().context("VM not created yet")?;
+        let listener = UnixListener::bind(&request.path)
+            .with_context(|| format!("failed to bind hvsocket listener path: {}", request.path))?;
+        let recv = vm.worker_rpc.call_failable(
+            VmRpc::AddHvsockListener,
+            (DeviceVtl::Vtl0, service_id, listener),
+        );
+        Ok(async move { recv.await.map_err(anyhow::Error::from) })
+    }
+
+    fn remove_hvsocket_listener(
+        &self,
+        request: vmservice::RemoveHvSocketListenerRequest,
+    ) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + use<>> {
+        let service_id = request
+            .service_id
+            .parse()
+            .context("invalid hvsocket service ID")?;
+        let recv = self
+            .vm
+            .as_ref()
+            .context("VM not created yet")?
+            .worker_rpc
+            .call_failable(VmRpc::RemoveHvsockListener, (DeviceVtl::Vtl0, service_id));
         Ok(async move { recv.await.map_err(anyhow::Error::from) })
     }
 
