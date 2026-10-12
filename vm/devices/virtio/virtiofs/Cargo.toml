@@ -34,7 +34,9 @@ windows-sys = { workspace = true, features = [
 	"Wdk_System_Memory",
 	"Wdk_System_SystemServices",
 	"Win32_Foundation",
+	"Win32_Security",
 	"Win32_System_Memory",
+	"Win32_System_Threading",
 ] }
 
 [lints]

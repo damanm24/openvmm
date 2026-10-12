@@ -6078,6 +6078,7 @@ dependencies = [
  "video_core",
  "virt_whp",
  "virtio_resources",
+ "virtiofs",
  "vm_manifest_builder",
  "vm_resource",
  "vmbfs_resources",

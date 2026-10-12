@@ -2569,6 +2569,7 @@ fn build_virtio_fs(
         root_path,
         read_only,
         mut mount_options,
+        user_token,
     } = config;
     const VIRTIO_FS_TAG_LEN: usize = 36;
     anyhow::ensure!(!tag.is_empty(), "virtio-fs tag must not be empty");
@@ -2598,11 +2599,23 @@ fn build_virtio_fs(
         }
         mount_options.push_str("ro");
     }
+    #[cfg(windows)]
+    let user_token = (user_token != 0)
+        .then(|| virtiofs::duplicate_user_token(user_token))
+        .transpose()
+        .context("invalid virtio-fs user token")?;
+    #[cfg(not(windows))]
+    anyhow::ensure!(
+        user_token == 0,
+        "virtio-fs user token is only supported on Windows"
+    );
     Ok(virtio_resources::fs::VirtioFsHandle {
         tag,
         fs: virtio_resources::fs::VirtioFsBackend::HostFs {
             root_path,
             mount_options,
+            #[cfg(windows)]
+            user_token,
         },
     })
 }

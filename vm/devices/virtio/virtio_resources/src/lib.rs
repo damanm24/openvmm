@@ -56,6 +56,10 @@ pub mod fs {
         HostFs {
             root_path: String,
             mount_options: String,
+            /// Impersonation token used for all host file system access.
+            /// `None` uses the process token.
+            #[cfg(windows)]
+            user_token: Option<std::os::windows::io::OwnedHandle>,
         },
         SectionFs {
             root_path: String,

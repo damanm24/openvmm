@@ -63,6 +63,13 @@ struct TestHarness {
 
 impl TestHarness {
     fn new(driver: &DefaultDriver) -> Self {
+        Self::new_with(driver, |device| device)
+    }
+
+    fn new_with(
+        driver: &DefaultDriver,
+        configure: impl FnOnce(VirtioFsDevice) -> VirtioFsDevice,
+    ) -> Self {
         let tmpdir = tempfile::tempdir().unwrap();
 
         let mem = GuestMemory::allocate(TOTAL_MEM_SIZE);
@@ -71,7 +78,7 @@ impl TestHarness {
 
         let fs = VirtioFs::new(tmpdir.path(), None).unwrap();
         let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver.clone()));
-        let device = VirtioFsDevice::new(&driver_source, "testfs", fs, 0, None);
+        let device = configure(VirtioFsDevice::new(&driver_source, "testfs", fs, 0, None));
 
         let queue_event = Event::new();
         let interrupt_event = Event::new();
@@ -463,6 +470,50 @@ async fn lookup_existing_file(driver: DefaultDriver) {
         entry_out.attr.mode & 0o170000,
         0o100000,
         "hello.txt should be a regular file"
+    );
+}
+
+/// LOOKUP runs under the device's user token.
+#[cfg(windows)]
+#[async_test]
+async fn lookup_uses_user_token(driver: DefaultDriver) {
+    use crate::impersonation::tests::process_token;
+    use windows_sys::Win32::Security;
+
+    async fn lookup(
+        driver: &DefaultDriver,
+        level: Security::SECURITY_IMPERSONATION_LEVEL,
+    ) -> fuse_out_header {
+        let mut harness = TestHarness::new_with(driver, |device| {
+            device.with_user_token(process_token(level))
+        });
+        std::fs::write(harness.tmpdir_path().join("hello.txt"), "test data").unwrap();
+        harness.enable().await;
+        harness.fuse_init(0).await;
+
+        let name = b"hello.txt\0";
+        let resp_size = OUT_HEADER_SIZE + size_of::<fuse_entry_out>() as u32;
+        let (unique, resp_gpa) =
+            harness.post_fuse_request(2, FUSE_LOOKUP, FUSE_ROOT_ID, name, resp_size);
+        harness.wait_for_used().await;
+        let out_header = harness.read_out_header(resp_gpa);
+        assert_eq!(out_header.unique, unique);
+        out_header
+    }
+
+    assert_eq!(
+        lookup(&driver, Security::SecurityImpersonation).await.error,
+        0,
+        "LOOKUP should succeed under an impersonation-level token"
+    );
+    // Windows refuses to open files under an identification-level token, so
+    // the request only fails if it runs under the device's token.
+    assert_ne!(
+        lookup(&driver, Security::SecurityIdentification)
+            .await
+            .error,
+        0,
+        "LOOKUP should fail under an identification-level token"
     );
 }
 

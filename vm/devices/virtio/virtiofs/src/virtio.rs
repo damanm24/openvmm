@@ -72,6 +72,9 @@ pub struct VirtioFsDevice {
     #[inspect(skip)]
     notify_corruption: Arc<dyn Fn() + Sync + Send>,
     num_request_queues: u32,
+    #[cfg(windows)]
+    #[inspect(skip)]
+    user_token: Option<Arc<std::os::windows::io::OwnedHandle>>,
 }
 
 impl VirtioFsDevice {
@@ -142,7 +145,18 @@ impl VirtioFsDevice {
             shared_memory_region: None,
             notify_corruption,
             num_request_queues,
+            #[cfg(windows)]
+            user_token: None,
         }
+    }
+
+    /// Serves all file system requests while impersonating `token`, which
+    /// must be an impersonation token (see
+    /// [`crate::duplicate_user_token`]).
+    #[cfg(windows)]
+    pub fn with_user_token(mut self, token: std::os::windows::io::OwnedHandle) -> Self {
+        self.user_token = Some(Arc::new(token));
+        self
     }
 }
 
@@ -201,6 +215,8 @@ impl VirtioDevice for VirtioFsDevice {
             shared_memory_region: self.shared_memory_region.clone(),
             shared_memory_size: self.shmem_size,
             notify_corruption: self.notify_corruption.clone(),
+            #[cfg(windows)]
+            user_token: self.user_token.clone(),
         });
 
         let queue_event = PolledWait::new(&self.driver, resources.event)
@@ -233,6 +249,8 @@ impl VirtioDevice for VirtioFsDevice {
                     shared_memory_region: None,
                     shared_memory_size: 0,
                     notify_corruption: self.notify_corruption.clone(),
+                    #[cfg(windows)]
+                    user_token: self.user_token.clone(),
                 })
             });
         }
@@ -270,6 +288,8 @@ struct VirtioFsWorker {
     shared_memory_region: Option<Arc<dyn MappedMemoryRegion>>,
     shared_memory_size: u64,
     notify_corruption: Arc<dyn Fn() + Sync + Send>,
+    #[cfg(windows)]
+    user_token: Option<Arc<std::os::windows::io::OwnedHandle>>,
 }
 
 struct VirtioFsQueue {
@@ -336,6 +356,34 @@ fn process_virtiofs_request(
         mem,
         bytes_written: 0,
     };
+
+    // Requests do not await, so the impersonation stays on this thread until
+    // dispatch returns.
+    #[cfg(windows)]
+    let _impersonation = match worker
+        .user_token
+        .as_deref()
+        .map(crate::impersonation::ImpersonationGuard::new)
+        .transpose()
+    {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::error!(
+                error = &e as &dyn std::error::Error,
+                "[virtiofs] failed to impersonate user token"
+            );
+            if let Err(e) =
+                fuse::ReplySender::send_error(&mut sender, request.unique(), lx::Error::EIO.value())
+            {
+                tracing::error!(
+                    error = &e as &dyn std::error::Error,
+                    "[virtiofs] failed to send error reply"
+                );
+            }
+            return sender.bytes_written;
+        }
+    };
+
     let mapper = worker
         .shared_memory_region
         .as_ref()

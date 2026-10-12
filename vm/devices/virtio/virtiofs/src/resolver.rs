@@ -5,6 +5,8 @@
 
 use crate::VirtioFs;
 use crate::virtio::VirtioFsDevice;
+#[cfg(windows)]
+use anyhow::Context as _;
 use lxutil::LxVolumeOptions;
 use virtio::resolve::ResolvedVirtioDevice;
 use virtio::resolve::VirtioResolveInput;
@@ -31,26 +33,51 @@ impl ResolveResource<VirtioDeviceHandle, VirtioFsHandle> for VirtioFsResolver {
         resource: VirtioFsHandle,
         input: VirtioResolveInput<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let device = match &resource.fs {
+        let VirtioFsHandle { tag, fs } = resource;
+        let device = match fs {
             VirtioFsBackend::HostFs {
                 root_path,
                 mount_options,
-            } => VirtioFsDevice::new(
-                input.driver_source,
-                &resource.tag,
-                VirtioFs::new(
-                    root_path,
-                    Some(&LxVolumeOptions::from_option_string(mount_options)),
-                )?,
-                0,
-                None,
-            ),
+                #[cfg(windows)]
+                user_token,
+            } => {
+                #[cfg(windows)]
+                let user_token = user_token
+                    .as_ref()
+                    .map(crate::impersonation::impersonation_token)
+                    .transpose()
+                    .context("failed to create virtio-fs impersonation token")?;
+
+                let fs = {
+                    // Open the root as the user so that access is checked
+                    // against the user's token.
+                    #[cfg(windows)]
+                    let _impersonation = user_token
+                        .as_ref()
+                        .map(crate::impersonation::ImpersonationGuard::new)
+                        .transpose()
+                        .context("failed to impersonate virtio-fs user token")?;
+
+                    VirtioFs::new(
+                        &root_path,
+                        Some(&LxVolumeOptions::from_option_string(&mount_options)),
+                    )?
+                };
+
+                let device = VirtioFsDevice::new(input.driver_source, &tag, fs, 0, None);
+                #[cfg(windows)]
+                let device = match user_token {
+                    Some(token) => device.with_user_token(token),
+                    None => device,
+                };
+                device
+            }
             #[cfg(windows)]
             VirtioFsBackend::SectionFs { root_path } => {
                 VirtioFsDevice::new(
                     input.driver_source,
-                    &resource.tag,
-                    crate::SectionFs::new(root_path)?,
+                    &tag,
+                    crate::SectionFs::new(&root_path)?,
                     8 * 1024 * 1024 * 1024, // 8GB of shared memory,
                     None,
                 )
@@ -75,7 +102,7 @@ impl ResolveResource<VirtioDeviceHandle, VirtioFsHandle> for VirtioFsResolver {
                         )
                     })?;
                 }
-                VirtioFsDevice::new(input.driver_source, &resource.tag, fs, 0, None)
+                VirtioFsDevice::new(input.driver_source, &tag, fs, 0, None)
             }
         };
         Ok(device.into())

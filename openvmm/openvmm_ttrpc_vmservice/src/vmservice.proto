@@ -978,6 +978,11 @@ message VirtioFs {
     string root_path = 2;
     bool read_only = 3;
     string mount_options = 4;
+    // Windows only. A token handle, valid in the VM service process, that the
+    // device impersonates for all host file system access. The service
+    // duplicates the handle; the caller retains ownership of it. Zero uses the
+    // process token.
+    uint64 user_token = 5;
 }
 
 message VirtioConsoleConfig {
