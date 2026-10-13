@@ -550,8 +550,18 @@ impl VmService {
 struct Vm {
     worker_rpc: mesh::Sender<VmRpc>,
     scsi_rpc: Option<mesh::Sender<ScsiControllerRequest>>,
-    consomme_rpc: Option<mesh::Sender<ConsommeRequest>>,
+    consomme_rpc: std::collections::HashMap<Guid, mesh::Sender<ConsommeRequest>>,
     iommufds: Arc<IommufdContexts>,
+}
+
+impl Vm {
+    fn consomme_rpc(&self, nic_id: &str) -> anyhow::Result<mesh::Sender<ConsommeRequest>> {
+        let nic_id: Guid = nic_id.parse().context("invalid NIC ID")?;
+        self.consomme_rpc
+            .get(&nic_id)
+            .cloned()
+            .with_context(|| format!("no consomme NIC {nic_id}"))
+    }
 }
 
 #[derive(Default)]
@@ -1234,7 +1244,7 @@ impl VmService {
         };
 
         let mut scsi_rpc = None;
-        let mut consomme_rpc = None;
+        let mut consomme_rpc = std::collections::HashMap::new();
         if let Some(devices_config) = req_config.devices_config {
             if !devices_config.scsi_disks.is_empty() {
                 let mut devices = Vec::new();
@@ -1262,12 +1272,12 @@ impl VmService {
                     &nic.backend,
                     Some(vmservice::nic_config::Backend::Consomme(_))
                 );
-                // Only wire the bind/unbind RPC channel to the first consomme
-                // NIC. Additional consomme NICs work but cannot be targeted by
-                // runtime bind/unbind commands.
-                let recv = if is_consomme && consomme_rpc.is_none() {
+                let recv = if is_consomme {
+                    let nic_id: Guid = nic.nic_id.parse().context("invalid NIC ID")?;
                     let (send, recv) = mesh::channel();
-                    consomme_rpc = Some(send);
+                    if consomme_rpc.insert(nic_id, send).is_some() {
+                        bail!("duplicate consomme NIC {nic_id}");
+                    }
                     Some(recv)
                 } else {
                     None
@@ -1587,10 +1597,7 @@ impl VmService {
             .vm
             .as_ref()
             .context("VM not created yet")?
-            .consomme_rpc
-            .as_ref()
-            .context("no consomme port channel")?
-            .clone();
+            .consomme_rpc(&request.nic_id)?;
         Ok(async move {
             let virtual_address = consomme_rpc
                 .call_failable(ConsommeRequest::CreateVirtualAddress, destination.into())
@@ -1614,10 +1621,7 @@ impl VmService {
             .vm
             .as_ref()
             .context("VM not created yet")?
-            .consomme_rpc
-            .as_ref()
-            .context("no consomme port channel")?
-            .clone();
+            .consomme_rpc(&request.nic_id)?;
         let record = DnsRecordConfig {
             name: request.name,
             address,
@@ -1786,11 +1790,7 @@ impl VmService {
                         vmservice::nic_config::Backend::Consomme(c) => c,
                         _ => anyhow::bail!("port update only supported for consomme backend"),
                     };
-                    let consomme_rpc = vm
-                        .consomme_rpc
-                        .as_ref()
-                        .context("no consomme port channel")?
-                        .clone();
+                    let consomme_rpc = vm.consomme_rpc(&nic.nic_id)?;
                     Ok(async move {
                         for port in consomme.ports {
                             let cfg = parse_port_config(port)?;
@@ -1807,11 +1807,7 @@ impl VmService {
                         vmservice::nic_config::Backend::Consomme(c) => c,
                         _ => anyhow::bail!("port remove only supported for consomme backend"),
                     };
-                    let consomme_rpc = vm
-                        .consomme_rpc
-                        .as_ref()
-                        .context("no consomme port channel")?
-                        .clone();
+                    let consomme_rpc = vm.consomme_rpc(&nic.nic_id)?;
                     Ok(async move {
                         for port in consomme.ports {
                             let cfg = parse_port_config(port)?;
@@ -2001,21 +1997,7 @@ fn parse_nic_config(
         .into_resource(),
         #[cfg(target_os = "linux")]
         Backend::Tap(tap) => build_tap_backend(tap, registry)?,
-        Backend::Consomme(consomme) => net_backend_resources::consomme::ConsommeHandle {
-            disable_internal_dns: consomme.disable_internal_dns,
-            cidr: if consomme.cidr.is_empty() {
-                None
-            } else {
-                Some(consomme.cidr)
-            },
-            ports: consomme
-                .ports
-                .into_iter()
-                .map(parse_port_config)
-                .collect::<anyhow::Result<_>>()?,
-            recv,
-        }
-        .into_resource(),
+        Backend::Consomme(consomme) => build_consomme_handle(consomme, recv)?.into_resource(),
         _ => anyhow::bail!("unsupported backend"),
     };
     let instance_id = nic.nic_id.parse().context("invalid instance ID")?;
@@ -2702,6 +2684,40 @@ async fn build_disk_backend(
     }
 }
 
+/// Builds a consomme endpoint handle from the proto `ConsommeBackend`.
+fn build_consomme_handle(
+    consomme: vmservice::ConsommeBackend,
+    recv: Option<mesh::Receiver<ConsommeRequest>>,
+) -> anyhow::Result<net_backend_resources::consomme::ConsommeHandle> {
+    fn parse_optional<T: std::str::FromStr>(value: &str, name: &str) -> anyhow::Result<Option<T>>
+    where
+        T::Err: std::error::Error + Send + Sync + 'static,
+    {
+        (!value.is_empty())
+            .then(|| value.parse())
+            .transpose()
+            .with_context(|| format!("invalid {name} '{value}'"))
+    }
+
+    Ok(net_backend_resources::consomme::ConsommeHandle {
+        params: net_backend_resources::consomme::ConsommeParams {
+            client_ip: parse_optional(&consomme.client_ip, "client IP")?,
+            gateway_ip: parse_optional(&consomme.gateway_ip, "gateway IP")?,
+            net_mask: parse_optional(&consomme.net_mask, "net mask")?,
+            client_ip_ipv6: parse_optional(&consomme.client_ip_ipv6, "client IPv6")?,
+            allow_host_local_access: consomme.allow_host_local_access,
+        },
+        cidr: (!consomme.cidr.is_empty()).then_some(consomme.cidr),
+        disable_internal_dns: consomme.disable_internal_dns,
+        ports: consomme
+            .ports
+            .into_iter()
+            .map(parse_port_config)
+            .collect::<anyhow::Result<_>>()?,
+        recv,
+    })
+}
+
 /// Builds a host network endpoint resource from the proto `NicBackend`.
 fn build_nic_backend(
     backend: vmservice::NicBackend,
@@ -2712,20 +2728,7 @@ fn build_nic_backend(
     let _ = registry;
     let vmservice::NicBackend { kind } = backend;
     Ok(match kind.context("missing network backend")? {
-        Kind::Consomme(vmservice::ConsommeBackend {
-            cidr,
-            ports,
-            disable_internal_dns,
-        }) => net_backend_resources::consomme::ConsommeHandle {
-            cidr: (!cidr.is_empty()).then_some(cidr),
-            disable_internal_dns,
-            ports: ports
-                .into_iter()
-                .map(parse_port_config)
-                .collect::<anyhow::Result<_>>()?,
-            recv: None,
-        }
-        .into_resource(),
+        Kind::Consomme(consomme) => build_consomme_handle(consomme, None)?.into_resource(),
         #[cfg(target_os = "linux")]
         Kind::Tap(tap) => build_tap_backend(tap, registry)?,
         #[cfg(windows)]
@@ -2889,6 +2892,47 @@ mod nic_tests {
             drop(device);
             assert!(sender.is_closed());
         }
+    }
+
+    #[test]
+    fn consomme_params_are_parsed() {
+        let handle = build_consomme_handle(
+            vmservice::ConsommeBackend {
+                client_ip: "127.0.0.1".into(),
+                gateway_ip: "169.254.73.249".into(),
+                net_mask: "255.255.255.240".into(),
+                client_ip_ipv6: "2001:db8::1".into(),
+                allow_host_local_access: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let params = handle.params;
+        assert_eq!(params.client_ip, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(params.gateway_ip, Some("169.254.73.249".parse().unwrap()));
+        assert_eq!(params.net_mask, Some("255.255.255.240".parse().unwrap()));
+        assert_eq!(params.client_ip_ipv6, Some("2001:db8::1".parse().unwrap()));
+        assert!(params.allow_host_local_access);
+
+        let defaults = build_consomme_handle(Default::default(), None).unwrap();
+        assert!(defaults.params.client_ip.is_none());
+        assert!(defaults.params.client_ip_ipv6.is_none());
+        assert!(!defaults.params.allow_host_local_access);
+    }
+
+    #[test]
+    fn invalid_consomme_address_is_rejected() {
+        let error = build_consomme_handle(
+            vmservice::ConsommeBackend {
+                gateway_ip: "not-an-ip".into(),
+                ..Default::default()
+            },
+            None,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "invalid gateway IP 'not-an-ip'");
     }
 
     #[test]

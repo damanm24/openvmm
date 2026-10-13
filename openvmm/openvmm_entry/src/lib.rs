@@ -2373,6 +2373,7 @@ fn parse_endpoint(
             };
             net_backend_resources::consomme::ConsommeHandle {
                 cidr: cidr.clone(),
+                params: Default::default(),
                 ports,
                 disable_internal_dns: false,
                 recv,

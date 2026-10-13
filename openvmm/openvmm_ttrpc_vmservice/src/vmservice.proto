@@ -966,10 +966,23 @@ message ConsommeBackend {
     // instead of consomme's built-in DNS resolver on the gateway address.
     // Only honored when the NIC is created.
     bool disable_internal_dns = 3;
+    // Optional guest IPv4 address, gateway IPv4 address and network mask.
+    // Each overrides the value derived from cidr. Only honored when the NIC
+    // is created.
+    string client_ip = 4;
+    string gateway_ip = 5;
+    string net_mask = 6;
+    // Optional guest IPv6 address, used before consomme learns it from the
+    // guest. Only honored when the NIC is created.
+    string client_ip_ipv6 = 7;
+    // If true, guest traffic to host-local addresses (loopback, unspecified,
+    // link-local) is forwarded to the host. Only honored when the NIC is
+    // created.
+    bool allow_host_local_access = 8;
 }
 
 message CreateVirtualAddressRequest {
-    // The consomme NIC. Only the VM's consomme NIC is addressable today.
+    // The consomme NIC.
     string nic_id = 1; // GUID
     // The host address (IPv4 or IPv6) that guest traffic to the virtual
     // address is routed to, e.g. "127.0.0.1".
@@ -982,7 +995,7 @@ message CreateVirtualAddressResponse {
 }
 
 message AddDnsRecordRequest {
-    // The consomme NIC. Only the VM's consomme NIC is addressable today.
+    // The consomme NIC.
     string nic_id = 1; // GUID
     // The name the guest resolves, e.g. "host.wsl.internal".
     string name = 2;

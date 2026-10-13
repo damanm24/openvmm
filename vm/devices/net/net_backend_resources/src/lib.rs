@@ -116,11 +116,30 @@ pub mod consomme {
         CreateVirtualAddress(mesh::rpc::FailableRpc<HostIpAddress, HostIpAddress>),
     }
 
+    /// Optional Consomme endpoint settings supplied by the VM creator.
+    #[derive(Debug, Default, MeshPayload)]
+    pub struct ConsommeParams {
+        /// The guest's IPv4 address. Overrides the address derived from the CIDR.
+        pub client_ip: Option<std::net::Ipv4Addr>,
+        /// The gateway's IPv4 address. Overrides the address derived from the CIDR.
+        pub gateway_ip: Option<std::net::Ipv4Addr>,
+        /// The IPv4 network mask. Overrides the mask derived from the CIDR.
+        pub net_mask: Option<std::net::Ipv4Addr>,
+        /// The guest's IPv6 address (link-local or routable), if known before
+        /// the guest configures it.
+        pub client_ip_ipv6: Option<std::net::Ipv6Addr>,
+        /// If true, allow guest traffic to host-local addresses (loopback,
+        /// unspecified, link-local).
+        pub allow_host_local_access: bool,
+    }
+
     /// Handle to a Consomme network endpoint.
     #[derive(MeshPayload)]
     pub struct ConsommeHandle {
         /// The CIDR of the network to use.
         pub cidr: Option<String>,
+        /// Optional network parameters applied after the CIDR.
+        pub params: ConsommeParams,
         /// Ports to forward from the host into the guest at creation time.
         pub ports: Vec<HostPortConfig>,
         /// If true, the guest uses the host's DNS servers instead of the
