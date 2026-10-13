@@ -899,6 +899,11 @@ message VPMEMDisk {
     bool read_only = 3;
 }
 
+enum NicFrontend {
+    NIC_FRONTEND_VMBUS = 0;
+    NIC_FRONTEND_VIRTIO = 1;
+}
+
 message NICConfig {
     string nic_id = 1; // GUID
     string mac_address = 3; // 12-34-56-78-9A-BC
@@ -911,6 +916,10 @@ message NICConfig {
         TapBackend tap = 7;
         ConsommeBackend consomme = 8;
     }
+    // Guest-visible NIC frontend. Defaults to the VMBus synthetic NIC.
+    // Virtio uses VPCI on Windows/macOS with VMBus enabled, PCI otherwise.
+    // Virtio NICs must be configured at VM creation, not added via ModifyResource.
+    NicFrontend frontend = 9;
 }
 
 message DioBackend {

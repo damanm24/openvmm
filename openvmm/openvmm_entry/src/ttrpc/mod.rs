@@ -633,8 +633,11 @@ fn validate_platform_config(config: &vmservice::VmConfig) -> anyhow::Result<()> 
                 "SCSI disks require VMBus; use PCIe NVMe or virtio-blk instead"
             );
             anyhow::ensure!(
-                devices.nic_config.is_empty(),
-                "NICConfig requires VMBus; use PCIe virtio-net instead"
+                devices
+                    .nic_config
+                    .iter()
+                    .all(|nic| nic.frontend == vmservice::NicFrontend::Virtio as i32),
+                "VMBus NICConfig requires VMBus; use the virtio frontend instead"
             );
             if cfg!(windows) || cfg!(target_os = "macos") {
                 anyhow::ensure!(
@@ -1269,9 +1272,27 @@ impl VmService {
                 } else {
                     None
                 };
-                config
-                    .vmbus_devices
-                    .push(parse_nic_config(nic, recv, &registry)?);
+                match parse_nic_config(nic, recv, &registry)? {
+                    NicDevice::Vmbus(resource) => {
+                        config.vmbus_devices.push((DeviceVtl::Vtl0, resource));
+                    }
+                    NicDevice::Virtio {
+                        instance_id,
+                        resource,
+                    } => {
+                        if !req_config.disable_vmbus && (cfg!(windows) || cfg!(target_os = "macos"))
+                        {
+                            config.vpci_devices.push(VpciDeviceConfig {
+                                vtl: DeviceVtl::Vtl0,
+                                instance_id,
+                                resource: VirtioPciDeviceHandle(resource).into_resource(),
+                                vnode: None,
+                            });
+                        } else {
+                            config.virtio_devices.push((VirtioBus::Pci, resource));
+                        }
+                    }
+                }
             }
 
             for virtiofs in devices_config.virtiofs_config {
@@ -1749,8 +1770,16 @@ impl VmService {
                              configure it at VM creation time"
                         );
                     }
-                    let config = parse_nic_config(nic, None, &self.registry)?;
-                    let recv = vm.worker_rpc.call_failable(VmRpc::AddVmbusDevice, config);
+                    let NicDevice::Vmbus(resource) = parse_nic_config(nic, None, &self.registry)?
+                    else {
+                        anyhow::bail!(
+                            "adding a virtio NIC via ModifyResource is not supported; \
+                             configure it at VM creation time"
+                        );
+                    };
+                    let recv = vm
+                        .worker_rpc
+                        .call_failable(VmRpc::AddVmbusDevice, (DeviceVtl::Vtl0, resource));
                     Ok(async move { recv.await.map_err(anyhow::Error::from) }.boxed())
                 } else if request.r#type == vmservice::ModifyType::Update as i32 {
                     let consomme = match nic.backend.context("missing backend")? {
@@ -1935,14 +1964,24 @@ fn parse_port_config(port: vmservice::PortConfig) -> anyhow::Result<HostPortConf
     })
 }
 
+enum NicDevice {
+    Vmbus(Resource<VmbusDeviceHandleKind>),
+    Virtio {
+        instance_id: Guid,
+        resource: Resource<VirtioDeviceHandle>,
+    },
+}
+
 fn parse_nic_config(
     nic: vmservice::NicConfig,
     recv: Option<mesh::Receiver<ConsommeRequest>>,
     registry: &FdRegistry,
-) -> anyhow::Result<(DeviceVtl, Resource<VmbusDeviceHandleKind>)> {
+) -> anyhow::Result<NicDevice> {
     use self::vmservice::nic_config::Backend;
     #[cfg(not(target_os = "linux"))]
     let _ = registry;
+    let frontend = vmservice::NicFrontend::from_i32(nic.frontend)
+        .with_context(|| format!("unknown NIC frontend {}", nic.frontend))?;
     let endpoint = match nic.backend.context("missing backend")? {
         #[cfg(windows)]
         Backend::LegacyPortId(port_id) => net_backend_resources::dio::WindowsDirectIoHandle {
@@ -1979,16 +2018,31 @@ fn parse_nic_config(
         .into_resource(),
         _ => anyhow::bail!("unsupported backend"),
     };
-    let cfg = NetvspHandle {
-        instance_id: nic.nic_id.parse().context("invalid instance ID")?,
-        mac_address: nic
-            .mac_address
-            .parse::<MacAddress>()
-            .context("invalid mac address")?,
-        endpoint,
-        max_queues: None,
-    };
-    Ok((DeviceVtl::Vtl0, cfg.into_resource()))
+    let instance_id = nic.nic_id.parse().context("invalid instance ID")?;
+    let mac_address = nic
+        .mac_address
+        .parse::<MacAddress>()
+        .context("invalid mac address")?;
+    Ok(match frontend {
+        vmservice::NicFrontend::Vmbus => NicDevice::Vmbus(
+            NetvspHandle {
+                instance_id,
+                mac_address,
+                endpoint,
+                max_queues: None,
+            }
+            .into_resource(),
+        ),
+        vmservice::NicFrontend::Virtio => NicDevice::Virtio {
+            instance_id,
+            resource: virtio_resources::net::VirtioNetHandle {
+                max_queues: None,
+                mac_address,
+                endpoint,
+            }
+            .into_resource(),
+        },
+    })
 }
 
 async fn make_disk_config(disk: vmservice::ScsiDisk) -> anyhow::Result<ScsiDeviceAndPath> {
@@ -2782,6 +2836,92 @@ fn build_vhost_user_device(
     _vhost_user: vmservice::VhostUser,
 ) -> anyhow::Result<Resource<VirtioDeviceHandle>> {
     anyhow::bail!("vhost-user is only supported on unix hosts")
+}
+
+#[cfg(test)]
+mod nic_tests {
+    use super::*;
+
+    fn nic(frontend: i32) -> vmservice::NicConfig {
+        vmservice::NicConfig {
+            nic_id: "11111111-1111-1111-1111-111111111111".into(),
+            mac_address: "00-15-5D-01-02-03".into(),
+            frontend,
+            backend: Some(vmservice::nic_config::Backend::Consomme(Default::default())),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn omitted_frontend_retains_vmbus_nic() {
+        let resource = parse_nic_config(
+            nic(vmservice::NicConfig::default().frontend),
+            None,
+            &FdRegistry::default(),
+        )
+        .unwrap();
+        assert!(matches!(resource, NicDevice::Vmbus(_)));
+    }
+
+    #[test]
+    fn virtio_frontend_preserves_instance_id() {
+        let config = nic(vmservice::NicFrontend::Virtio as i32);
+        let expected = config.nic_id.parse::<Guid>().unwrap();
+        let NicDevice::Virtio { instance_id, .. } =
+            parse_nic_config(config, None, &FdRegistry::default()).unwrap()
+        else {
+            panic!("expected virtio-net NIC");
+        };
+        assert_eq!(instance_id, expected);
+    }
+
+    #[test]
+    fn both_frontends_keep_consomme_control_channel() {
+        for frontend in [
+            vmservice::NicFrontend::Vmbus,
+            vmservice::NicFrontend::Virtio,
+        ] {
+            let (sender, receiver) = mesh::channel();
+            let device =
+                parse_nic_config(nic(frontend as i32), Some(receiver), &FdRegistry::default())
+                    .unwrap();
+            assert!(!sender.is_closed());
+            drop(device);
+            assert!(sender.is_closed());
+        }
+    }
+
+    #[test]
+    fn unknown_frontend_is_rejected() {
+        let error = parse_nic_config(nic(42), None, &FdRegistry::default())
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "unknown NIC frontend 42");
+    }
+
+    #[test]
+    fn only_virtio_nics_are_allowed_without_vmbus() {
+        for frontend in [
+            vmservice::NicFrontend::Vmbus,
+            vmservice::NicFrontend::Virtio,
+        ] {
+            for disable_hv in [false, true] {
+                let config = vmservice::VmConfig {
+                    disable_vmbus: true,
+                    disable_hv,
+                    devices_config: Some(vmservice::DevicesConfig {
+                        nic_config: vec![nic(frontend as i32)],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    validate_platform_config(&config).is_ok(),
+                    frontend == vmservice::NicFrontend::Virtio
+                );
+            }
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
