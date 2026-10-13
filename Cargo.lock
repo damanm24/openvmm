@@ -1643,6 +1643,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.16",
  "vm_resource",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -6018,6 +6019,7 @@ dependencies = [
  "dirs",
  "disk_backend_resources",
  "disk_crypt_resources",
+ "disk_file",
  "firmware_uefi_resources",
  "floppy_resources",
  "framebuffer",

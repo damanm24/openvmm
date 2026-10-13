@@ -105,6 +105,7 @@ unicycle.workspace = true
 net_tap.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+disk_file.workspace = true
 vmswitch.workspace = true
 virt_whp.workspace = true
 virtiofs.workspace = true
