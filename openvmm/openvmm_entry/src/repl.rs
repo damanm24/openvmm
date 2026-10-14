@@ -972,6 +972,7 @@ pub(crate) async fn run_repl(
                                 openvmm_helpers::disk::OpenDiskOptions {
                                     read_only,
                                     direct: false,
+                                    user_mode_vhdx: false,
                                 },
                             )
                             .await
@@ -1167,6 +1168,7 @@ pub(crate) async fn run_repl(
                             openvmm_helpers::disk::OpenDiskOptions {
                                 read_only,
                                 direct: false,
+                                user_mode_vhdx: false,
                             },
                         )
                         .await

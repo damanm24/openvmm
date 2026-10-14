@@ -336,6 +336,9 @@ message FileDisk {
     string path = 1;
     // Bypass the OS page cache (O_DIRECT).
     bool   direct = 2;
+    // Open .vhdx files with the user-mode VHDX parser on Windows instead of
+    // VHDMP. Ignored on other platforms, which always use the user-mode parser.
+    bool   user_mode_vhdx = 3;
 }
 
 // virtio-blk block device configuration.

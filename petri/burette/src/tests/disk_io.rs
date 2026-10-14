@@ -346,6 +346,7 @@ async fn make_disk_resource(
             openvmm_helpers::disk::OpenDiskOptions {
                 read_only: false,
                 direct: false,
+                user_mode_vhdx: false,
             },
         )
         .await

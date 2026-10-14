@@ -283,6 +283,7 @@ async fn memdiff_disk(path: &Path) -> anyhow::Result<Resource<DiskHandleKind>> {
         OpenDiskOptions {
             read_only: true,
             direct: false,
+            user_mode_vhdx: false,
         },
     )
     .await
@@ -390,6 +391,7 @@ async fn petri_disk_to_openvmm(disk: &Disk) -> anyhow::Result<Resource<DiskHandl
                 OpenDiskOptions {
                     read_only: false,
                     direct: false,
+                    user_mode_vhdx: false,
                 },
             )
             .await?
@@ -400,6 +402,7 @@ async fn petri_disk_to_openvmm(disk: &Disk) -> anyhow::Result<Resource<DiskHandl
                 OpenDiskOptions {
                     read_only: false,
                     direct: false,
+                    user_mode_vhdx: false,
                 },
             )
             .await?

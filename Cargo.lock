@@ -6161,6 +6161,7 @@ dependencies = [
  "libc",
  "mesh",
  "openvmm_defs",
+ "pal_async",
  "sparse_mmap",
  "tempfile",
  "tracing",

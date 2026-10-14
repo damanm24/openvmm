@@ -29,6 +29,7 @@ disk_vhdmp.workspace = true
 sparse_mmap.workspace = true
 
 [dev-dependencies]
+pal_async.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -29,6 +29,8 @@ pub struct OpenDiskOptions {
     pub read_only: bool,
     /// Bypass the OS page cache for direct disk I/O.
     pub direct: bool,
+    /// Use the user-mode VHDX parser for .vhdx files on Windows.
+    pub user_mode_vhdx: bool,
 }
 
 /// Opens the resources needed for using a disk from a file at `path`.
@@ -38,8 +40,9 @@ pub struct OpenDiskOptions {
 /// file will be opened using the kernel-mode VHD parser (Windows only).
 ///
 /// If the file ends with .vhdx, the kernel-mode VHD parser is used on
-/// Windows. On Linux, the pure-Rust VHDX parser is used, with automatic
-/// parent-locator walking for differencing chains.
+/// Windows unless `user_mode_vhdx` is set. Otherwise, the pure-Rust VHDX
+/// parser is used, with automatic parent-locator walking for differencing
+/// chains.
 pub async fn open_disk_type(
     path: &Path,
     options: OpenDiskOptions,
@@ -83,22 +86,17 @@ pub async fn open_disk_type(
                 Err(err) => return Err(err.into()),
             }
         }
+        #[cfg(windows)]
+        Some("vhdx") if !options.user_mode_vhdx => Resource::new(disk_vhdmp::OpenVhdmpDiskConfig(
+            disk_vhdmp::VhdmpDisk::options()
+                .read_only(read_only)
+                .cached_io(!options.direct)
+                .open(path)
+                .with_context(|| disk_open_error(path, "failed to open"))?,
+        )),
         Some("vhdx") => {
-            #[cfg(windows)]
-            {
-                Resource::new(disk_vhdmp::OpenVhdmpDiskConfig(
-                    disk_vhdmp::VhdmpDisk::options()
-                        .read_only(read_only)
-                        .cached_io(!options.direct)
-                        .open(path)
-                        .with_context(|| disk_open_error(path, "failed to open"))?,
-                ))
-            }
-            #[cfg(not(windows))]
-            {
-                ensure_no_direct(".vhdx")?;
-                disklayer_vhdx::chain::open_vhdx_chain(path, read_only).await?
-            }
+            ensure_no_direct(".vhdx")?;
+            disklayer_vhdx::chain::open_vhdx_chain(path, read_only).await?
         }
         Some("iso") if !read_only => {
             anyhow::bail!("iso file cannot be opened as read/write")
@@ -198,5 +196,51 @@ fn open_raw_disk(
     #[cfg(not(target_os = "linux"))]
     {
         Ok(Resource::new(disk_backend_resources::FileDiskHandle(file)))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use pal_async::async_test;
+    use vm_resource::ResourceId;
+
+    fn options(direct: bool, user_mode_vhdx: bool) -> OpenDiskOptions {
+        OpenDiskOptions {
+            read_only: false,
+            direct,
+            user_mode_vhdx,
+        }
+    }
+
+    #[async_test]
+    async fn vhdx_backend_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.vhdx");
+        drop(disk_vhdmp::Vhd::create_dynamic(&path, 64, true).unwrap());
+
+        let resource = open_disk_type(&path, options(false, false)).await.unwrap();
+        assert_eq!(
+            resource.id(),
+            <disk_vhdmp::OpenVhdmpDiskConfig as ResourceId<DiskHandleKind>>::ID
+        );
+        drop(resource);
+
+        let resource = open_disk_type(&path, options(false, true)).await.unwrap();
+        assert_eq!(
+            resource.id(),
+            <disk_backend_resources::LayeredDiskHandle as ResourceId<DiskHandleKind>>::ID
+        );
+    }
+
+    #[async_test]
+    async fn user_mode_vhdx_rejects_direct_io() {
+        let err = open_disk_type(Path::new("test.vhdx"), options(true, true))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "direct I/O is not supported for .vhdx files"
+        );
     }
 }
