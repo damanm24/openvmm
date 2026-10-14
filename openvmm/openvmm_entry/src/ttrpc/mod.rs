@@ -2380,34 +2380,41 @@ fn build_virtio_fs(
         tag,
         root_path,
         read_only,
+        mut mount_options,
+        user_token,
+        shared_mem,
     } = config;
-    const VIRTIO_FS_TAG_LEN: usize = 36;
-    anyhow::ensure!(!tag.is_empty(), "virtio-fs tag must not be empty");
+
+    if shared_mem {
+        return Ok(virtio_resources::fs::VirtioFsHandle {
+            tag,
+            fs: virtio_resources::fs::VirtioFsBackend::SectionFs { root_path },
+        });
+    }
+
+    if read_only {
+        if !mount_options.is_empty() {
+            mount_options.push(';');
+        }
+        mount_options.push_str("ro");
+    }
+    #[cfg(windows)]
+    let user_token = (user_token != 0)
+        .then(|| virtiofs::duplicate_user_token(user_token))
+        .transpose()
+        .context("invalid virtio-fs user token")?;
+    #[cfg(not(windows))]
     anyhow::ensure!(
-        !tag.contains('\0'),
-        "virtio-fs tag must not contain NUL bytes"
-    );
-    anyhow::ensure!(
-        tag.len() <= VIRTIO_FS_TAG_LEN,
-        "virtio-fs tag exceeds the {VIRTIO_FS_TAG_LEN}-byte protocol limit"
-    );
-    anyhow::ensure!(
-        !root_path.is_empty(),
-        "virtio-fs root path must not be empty"
-    );
-    anyhow::ensure!(
-        !root_path.contains('\0'),
-        "virtio-fs root path must not contain NUL bytes"
+        user_token == 0,
+        "virtio-fs user token is only supported on Windows"
     );
     Ok(virtio_resources::fs::VirtioFsHandle {
         tag,
         fs: virtio_resources::fs::VirtioFsBackend::HostFs {
             root_path,
-            mount_options: if read_only {
-                "ro".to_string()
-            } else {
-                String::new()
-            },
+            mount_options,
+            #[cfg(windows)]
+            user_token,
         },
     })
 }

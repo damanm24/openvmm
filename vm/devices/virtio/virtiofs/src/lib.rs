@@ -6,6 +6,8 @@
 
 mod aggregate;
 mod file;
+#[cfg(windows)]
+mod impersonation;
 mod inode;
 #[cfg(test)]
 mod integration_tests;
@@ -16,6 +18,8 @@ mod util;
 pub mod virtio;
 mod virtio_util;
 
+#[cfg(windows)]
+pub use impersonation::duplicate_user_token;
 #[cfg(windows)]
 pub use section::SectionFs;
 
