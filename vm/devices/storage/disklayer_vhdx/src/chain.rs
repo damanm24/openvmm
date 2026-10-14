@@ -37,8 +37,8 @@ fn open_layer_file(path: &Path, read_only: bool) -> std::io::Result<std::fs::Fil
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // Share immutable parents, but exclude other writers and host mounts.
-        options.share_mode(if read_only { 1 } else { 0 }); // FILE_SHARE_READ
+        // Allow host inspection, but exclude other writers.
+        options.share_mode(1); // FILE_SHARE_READ
     }
     options.open(path)
 }
@@ -301,8 +301,11 @@ mod tests {
         drop(reader);
         drop(second_reader);
         let writer = open_layer_file(&path, false).unwrap();
+        let inspector = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
+        // A layer reader only shares read access, so it still excludes an active writer.
         assert!(open_layer_file(&path, true).is_err());
         assert!(open_layer_file(&path, false).is_err());
+        drop(inspector);
         drop(writer);
         assert!(open_layer_file(&path, false).is_ok());
     }
