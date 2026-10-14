@@ -1612,6 +1612,7 @@ fn file_disk(path: &Path) -> vmservice::DiskBackend {
         kind: Some(vmservice::disk_backend::Kind::File(vmservice::FileDisk {
             path: path.to_string_lossy().into(),
             direct: false,
+            user_mode_vhdx: false,
         })),
     }
 }
