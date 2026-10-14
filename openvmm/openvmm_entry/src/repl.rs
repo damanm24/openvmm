@@ -1531,7 +1531,6 @@ pub(crate) async fn run_repl(
                         host_address: None,
                         host_port: HostPort::Fixed(host_port),
                         guest_port,
-                        guest_address: None,
                     };
                     rpc.call_failable(ConsommeRequest::Bind, cfg).await?;
                     anyhow::Ok(())
@@ -1556,7 +1555,6 @@ pub(crate) async fn run_repl(
                         host_address: None,
                         host_port: HostPort::Fixed(0),
                         guest_port,
-                        guest_address: None,
                     };
                     rpc.call_failable(ConsommeRequest::Unbind, cfg).await?;
                     anyhow::Ok(())

@@ -2357,7 +2357,6 @@ fn parse_endpoint(
                             .map(net_backend_resources::consomme::HostIpAddress::from),
                         host_port: net_backend_resources::consomme::HostPort::Fixed(fwd.host_port),
                         guest_port: fwd.guest_port,
-                        guest_address: None,
                     }
                 })
                 .collect();

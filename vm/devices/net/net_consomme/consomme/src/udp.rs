@@ -103,10 +103,6 @@ struct UdpListener {
     host_addr: SocketAddr,
     /// The guest port to forward received packets to.
     guest_port: u16,
-    /// The guest address to forward received packets to, or `None` to use the
-    /// client address.
-    #[inspect(with = "|x| x.map(inspect::AsDisplay)")]
-    guest_address: Option<IpAddr>,
     stats: Stats,
 }
 
@@ -177,7 +173,6 @@ impl UdpConnection {
                         &mut state.local_addr_map,
                         &src_addr,
                         dst_addr.port(),
-                        None,
                     ) {
                         Some(ft) => ft,
                         None => FourTuple {
@@ -259,7 +254,6 @@ impl UdpListener {
                         &mut state.local_addr_map,
                         &other_addr,
                         self.guest_port,
-                        self.guest_address,
                     ) else {
                         continue;
                     };
@@ -579,26 +573,9 @@ impl<T: Client> Access<'_, T> {
     /// Binds to the specified host IP and port for forwarding inbound UDP
     /// packets to the guest.
     pub fn bind_udp_port(&mut self, socket: Socket, guest_port: u16) -> Result<(), BindError> {
-        self.bind_udp_port_to_address(socket, guest_port, None)
-    }
-
-    /// Binds to the specified host IP and port for forwarding inbound UDP
-    /// packets to the guest, targeting `guest_address` instead of the client
-    /// address when specified.
-    pub fn bind_udp_port_to_address(
-        &mut self,
-        socket: Socket,
-        guest_port: u16,
-        guest_address: Option<IpAddr>,
-    ) -> Result<(), BindError> {
         let socket: UdpSocket = socket.into();
         let socket = PolledSocket::new(self.client.driver(), socket).map_err(BindError::Io)?;
         let host_addr = socket.get().local_addr().map_err(BindError::Io)?;
-        if let Some(guest_address) = guest_address
-            && guest_address.is_ipv4() != host_addr.is_ipv4()
-        {
-            return Err(BindError::GuestAddressFamilyMismatch(guest_address));
-        }
         let key = PortForwardKey::from_socket_addr(host_addr, guest_port);
         if self.inner.udp.listeners.contains_key(&key) {
             return Err(BindError::PortAlreadyBound(guest_port));
@@ -609,7 +586,6 @@ impl<T: Client> Access<'_, T> {
                 socket: Some(socket),
                 host_addr,
                 guest_port,
-                guest_address,
                 stats: Default::default(),
             },
         );

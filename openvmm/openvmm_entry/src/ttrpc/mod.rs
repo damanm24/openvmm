@@ -1924,7 +1924,6 @@ fn parse_port_config(port: vmservice::PortConfig) -> anyhow::Result<HostPortConf
         guest_port,
         protocol,
         host_address,
-        guest_address,
     } = port;
     let protocol = if protocol == vmservice::IpProtocol::Tcp as i32 {
         HostPortProtocol::Tcp
@@ -1947,16 +1946,6 @@ fn parse_port_config(port: vmservice::PortConfig) -> anyhow::Result<HostPortConf
         },
         host_port: HostPort::Fixed(host_port.try_into().context("host port out of range")?),
         guest_port: guest_port.try_into().context("guest port out of range")?,
-        guest_address: if guest_address.is_empty() {
-            None
-        } else {
-            Some(
-                guest_address
-                    .parse::<std::net::IpAddr>()
-                    .context("invalid guest address")?
-                    .into(),
-            )
-        },
     })
 }
 

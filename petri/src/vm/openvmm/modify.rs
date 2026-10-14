@@ -309,7 +309,6 @@ impl PetriVmConfigOpenVmm {
                 )),
                 host_port: net_backend_resources::consomme::HostPort::Dynamic(port_send),
                 guest_port: pipette_client::PIPETTE_PORT as u16,
-                guest_address: None,
             }],
             disable_internal_dns: false,
             recv: None,

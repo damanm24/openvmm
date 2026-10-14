@@ -953,9 +953,6 @@ message PortConfig {
     // The protocol to forward.
     IpProtocol protocol = 3;
     string host_address = 4;
-    // The guest address to forward to, which must match the host address
-    // family. If empty, the guest's address on the NIC is used.
-    string guest_address = 5;
 }
 
 message ConsommeBackend {

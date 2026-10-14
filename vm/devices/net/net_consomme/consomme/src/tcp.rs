@@ -726,10 +726,6 @@ struct TcpListener {
     #[inspect(skip)]
     socket: PolledSocket<Socket>,
     host_port: u16,
-    /// The guest address accepted connections are forwarded to, or `None` to
-    /// use the client address.
-    #[inspect(with = "|x| x.map(inspect::AsDisplay)")]
-    guest_address: Option<IpAddr>,
 }
 
 #[derive(Debug, PartialEq, Eq, Inspect)]
@@ -808,11 +804,7 @@ impl<T: Client> Access<'_, T> {
                                 }
                             }
                         }
-                        let Some(ft) = self.inner.state.try_ft_from_remote_address(
-                            &other_addr,
-                            key.guest_port,
-                            listener.guest_address,
-                        ) else {
+                        let Some(ft) = self.inner.state.try_ft_from_remote_address(&other_addr, key.guest_port) else {
                             return true;
                         };
 
@@ -1156,32 +1148,14 @@ impl<T: Client> Access<'_, T> {
     /// Binds to the specified host IP and port for listening for incoming
     /// connections.
     pub fn bind_tcp_port(&mut self, socket: Socket, guest_port: u16) -> Result<(), BindError> {
-        self.bind_tcp_port_to_address(socket, guest_port, None)
-    }
-
-    /// Binds to the specified host IP and port for listening for incoming
-    /// connections, forwarding them to `guest_address` instead of the client
-    /// address when specified.
-    pub fn bind_tcp_port_to_address(
-        &mut self,
-        socket: Socket,
-        guest_port: u16,
-        guest_address: Option<IpAddr>,
-    ) -> Result<(), BindError> {
         let host_addr = Self::socket_local_addr(&socket)?;
-        if let Some(guest_address) = guest_address
-            && guest_address.is_ipv4() != host_addr.is_ipv4()
-        {
-            return Err(BindError::GuestAddressFamilyMismatch(guest_address));
-        }
         let key = PortForwardKey::from_socket_addr(host_addr, guest_port);
         match self.inner.tcp.listeners.entry(key) {
             hash_map::Entry::Occupied(_) => {
                 return Err(BindError::PortAlreadyBound(guest_port));
             }
             hash_map::Entry::Vacant(e) => {
-                let mut listener = TcpListener::from_socket(self.client.driver(), socket)?;
-                listener.guest_address = guest_address;
+                let listener = TcpListener::from_socket(self.client.driver(), socket)?;
                 e.insert(listener);
             }
         };
@@ -3029,11 +3003,7 @@ impl TcpListener {
             );
             return Err(BindError::Io(err));
         }
-        Ok(Self {
-            socket,
-            host_port,
-            guest_address: None,
-        })
+        Ok(Self { socket, host_port })
     }
 
     fn poll_listener(

@@ -401,35 +401,25 @@ impl ConsommeState {
         &mut self,
         remote_addr: &SocketAddr,
         dst_port: u16,
-        guest_ip: Option<IpAddr>,
     ) -> Option<FourTuple> {
         Self::translate_remote_address(
             &self.params,
             &mut self.local_addr_map,
             remote_addr,
             dst_port,
-            guest_ip,
         )
     }
 
-    /// Translates a remote (host-side) address into the four-tuple used to
-    /// deliver its traffic to the guest. `guest_ip` overrides the guest
-    /// destination address (e.g. a port forward targeting the guest's
-    /// loopback address); otherwise the client address is used.
     fn translate_remote_address(
         params: &ConsommeParams,
         local_addr_map: &mut local_addr_map::LocalAddrMap,
         remote_addr: &SocketAddr,
         dst_port: u16,
-        guest_ip: Option<IpAddr>,
     ) -> Option<FourTuple> {
         // Pick the best destination (guest) address based on the origination of the remote packet.
-        let dst = match (remote_addr, guest_ip) {
-            (_, Some(guest_ip)) => SocketAddr::new(guest_ip, dst_port),
-            (SocketAddr::V4(_), None) => {
-                SocketAddr::V4(SocketAddrV4::new(params.client_ip, dst_port))
-            }
-            (SocketAddr::V6(v6), None) => {
+        let dst = match remote_addr {
+            SocketAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(params.client_ip, dst_port)),
+            SocketAddr::V6(v6) => {
                 let client_ipv6 = if !v6.ip().is_unicast_link_local()
                     && let Some(routable) = params.client_ip_ipv6_routable
                 {
@@ -721,9 +711,6 @@ pub enum BindError {
     /// The specified port is not bound.
     #[error("port is not bound")]
     PortNotBound,
-    /// The guest address family does not match the host socket's family.
-    #[error("guest address {0} does not match the host address family")]
-    GuestAddressFamilyMismatch(IpAddr),
     /// An IO error occurred during binding.
     #[error(transparent)]
     Io(std::io::Error),
