@@ -2596,29 +2596,16 @@ fn build_virtio_fs(
         read_only,
         mut mount_options,
         user_token,
+        shared_mem,
     } = config;
-    const VIRTIO_FS_TAG_LEN: usize = 36;
-    anyhow::ensure!(!tag.is_empty(), "virtio-fs tag must not be empty");
-    anyhow::ensure!(
-        !tag.contains('\0'),
-        "virtio-fs tag must not contain NUL bytes"
-    );
-    anyhow::ensure!(
-        tag.len() <= VIRTIO_FS_TAG_LEN,
-        "virtio-fs tag exceeds the {VIRTIO_FS_TAG_LEN}-byte protocol limit"
-    );
-    anyhow::ensure!(
-        !root_path.is_empty(),
-        "virtio-fs root path must not be empty"
-    );
-    anyhow::ensure!(
-        !root_path.contains('\0'),
-        "virtio-fs root path must not contain NUL bytes"
-    );
-    anyhow::ensure!(
-        !mount_options.contains('\0'),
-        "virtio-fs mount options must not contain NUL bytes"
-    );
+
+    if shared_mem {
+        return Ok(virtio_resources::fs::VirtioFsHandle {
+            tag,
+            fs: virtio_resources::fs::VirtioFsBackend::SectionFs { root_path },
+        });
+    }
+
     if read_only {
         if !mount_options.is_empty() {
             mount_options.push(';');

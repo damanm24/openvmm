@@ -1018,6 +1018,11 @@ message VirtioFs {
     // duplicates the handle; the caller retains ownership of it. Zero uses the
     // process token.
     uint64 user_token = 5;
+    // Windows only. Expose shared-memory section objects instead of host files.
+    // root_path is the NT path of an existing object directory, e.g.
+    // \Sessions\1\BaseNamedObjects\WSL\<vm id>\wslg. read_only, mount_options,
+    // and user_token must be unset; access uses the VM service process token.
+    bool shared_mem = 6;
 }
 
 message VirtioConsoleConfig {
