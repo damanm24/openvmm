@@ -25,6 +25,8 @@ use guestmem::MemoryRead;
 use guestmem::MemoryWrite;
 use inspect::Inspect;
 use io::BlockingFile;
+use pal_async::DefaultDriver;
+use pal_async::DefaultPool;
 use scsi_buffers::RequestBuffers;
 use vhdx::AsyncFile;
 use vhdx::ReadRange;
@@ -38,10 +40,14 @@ use vhdx::WriteRange;
 /// [`SectorMarker`]).
 #[derive(Inspect)]
 pub struct VhdxLayer {
+    // Always `Some` until the layer is dropped.
     #[inspect(skip)]
-    vhdx: VhdxFile<BlockingFile>,
+    vhdx: Option<VhdxFile<BlockingFile>>,
     #[inspect(skip)]
     file: BlockingFile,
+    // Dedicated executor for the VHDX log task, set by `open_writable`.
+    #[inspect(skip)]
+    log_driver: Option<DefaultDriver>,
     sector_size: u32,
     physical_sector_size: u32,
     sector_count: u64,
@@ -64,8 +70,9 @@ impl VhdxLayer {
         let block_size = vhdx.block_size();
         let has_parent = vhdx.has_parent();
         Self {
-            vhdx,
+            vhdx: Some(vhdx),
             file,
+            log_driver: None,
             sector_size,
             physical_sector_size,
             sector_count,
@@ -73,6 +80,42 @@ impl VhdxLayer {
             has_parent,
             read_only,
         }
+    }
+
+    /// Open a writable VHDX layer whose log task runs on a dedicated thread.
+    ///
+    /// Dropping the returned layer gracefully closes the VHDX, applying the
+    /// log and clearing the log GUID, so the file can be opened afterwards
+    /// without log replay.
+    pub async fn open_writable(file: BlockingFile) -> Result<Self, vhdx::OpenError> {
+        let (_thread, driver) = DefaultPool::spawn_on_thread("vhdx-log");
+        let vhdx = VhdxFile::open(file.clone()).writable(&driver).await?;
+        let mut layer = Self::new(vhdx, file, false);
+        layer.log_driver = Some(driver);
+        Ok(layer)
+    }
+
+    fn vhdx(&self) -> &VhdxFile<BlockingFile> {
+        self.vhdx.as_ref().expect("vhdx is only taken on drop")
+    }
+}
+
+impl Drop for VhdxLayer {
+    fn drop(&mut self) {
+        // Only layers that own their log executor can block on close here;
+        // otherwise the log task may need the thread that is dropping us.
+        let Some(driver) = self.log_driver.take() else {
+            return;
+        };
+        if let Some(vhdx) = self.vhdx.take() {
+            if let Err(err) = pal_async::local::block_on(vhdx.close()) {
+                tracing::warn!(
+                    error = &err as &dyn std::error::Error,
+                    "failed to cleanly close vhdx"
+                );
+            }
+        }
+        drop(driver);
     }
 }
 
@@ -100,7 +143,7 @@ impl LayerIo for VhdxLayer {
     }
 
     fn disk_id(&self) -> Option<[u8; 16]> {
-        Some(self.vhdx.page_83_data().into())
+        Some(self.vhdx().page_83_data().into())
     }
 
     fn physical_sector_size(&self) -> u32 {
@@ -128,7 +171,7 @@ impl LayerIo for VhdxLayer {
     }
 
     async fn sync_cache(&self) -> Result<(), DiskError> {
-        self.vhdx.flush().await.map_err(vhdx_to_disk_error)
+        self.vhdx().flush().await.map_err(vhdx_to_disk_error)
     }
 
     async fn read(
@@ -143,7 +186,7 @@ impl LayerIo for VhdxLayer {
         // Resolve the read into file-level ranges.
         let mut ranges = Vec::new();
         let guard = self
-            .vhdx
+            .vhdx()
             .resolve_read(offset, len, &mut ranges)
             .await
             .map_err(vhdx_to_disk_error)?;
@@ -219,7 +262,7 @@ impl LayerIo for VhdxLayer {
         // Resolve the write into file-level ranges.
         let mut ranges = Vec::new();
         let guard = self
-            .vhdx
+            .vhdx()
             .resolve_write(offset, len, &mut ranges)
             .await
             .map_err(vhdx_to_disk_error)?;
@@ -266,7 +309,7 @@ impl LayerIo for VhdxLayer {
 
         // If FUA, flush to stable storage.
         if fua {
-            self.vhdx.flush().await.map_err(vhdx_to_disk_error)?;
+            self.vhdx().flush().await.map_err(vhdx_to_disk_error)?;
         }
 
         Ok(())
@@ -290,7 +333,7 @@ impl LayerIo for VhdxLayer {
             vhdx::TrimMode::Zero
         };
 
-        self.vhdx
+        self.vhdx()
             .trim(vhdx::TrimRequest::new(mode, offset, length))
             .await
             .map_err(vhdx_to_disk_error)
@@ -533,6 +576,55 @@ mod tests {
             let expected: Vec<u8> = (0..512u16).map(|i| (i % 251) as u8).collect();
             assert_eq!(buf, expected);
         }
+    }
+
+    /// Dropping a layer opened with `open_writable` must close the VHDX so
+    /// that it can be reopened without log replay.
+    #[async_test]
+    async fn drop_cleanly_closes_writable_layer(_driver: DefaultDriver) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.vhdx");
+
+        let bf = BlockingFile::open(&path, false).unwrap();
+        let mut params = vhdx::CreateParams {
+            disk_size: 1024 * 1024,
+            ..Default::default()
+        };
+        vhdx::create(&bf, &mut params).await.unwrap();
+        drop(bf);
+
+        {
+            let bf = BlockingFile::open(&path, false).unwrap();
+            let layer = VhdxLayer::open_writable(bf).await.unwrap();
+            let disk = wrap_in_layered_disk(layer).await;
+            let mem = GuestMemory::allocate(512);
+            mem.write_at(0, &[0xa5; 512]).unwrap();
+            let owned = OwnedRequestBuffers::linear(0, 512, false);
+            disk.write_vectored(&owned.buffer(&mem), 0, false)
+                .await
+                .unwrap();
+            disk.sync_cache().await.unwrap();
+        }
+
+        let bf = BlockingFile::open(&path, true).unwrap();
+        let bf2 = bf.clone();
+        let vhdx = VhdxFile::open(bf).read_only().await.unwrap();
+        let disk = LayeredDisk::new(
+            true,
+            vec![LayerConfiguration {
+                layer: DiskLayer::new(VhdxLayer::new(vhdx, bf2, true)),
+                write_through: false,
+                read_cache: false,
+            }],
+        )
+        .await
+        .unwrap();
+        let mem = GuestMemory::allocate(512);
+        let owned = OwnedRequestBuffers::linear(0, 512, true);
+        disk.read_vectored(&owned.buffer(&mem), 0).await.unwrap();
+        let mut buf = vec![0u8; 512];
+        mem.read_at(0, &mut buf).unwrap();
+        assert!(buf.iter().all(|&b| b == 0xa5));
     }
 
     #[async_test]

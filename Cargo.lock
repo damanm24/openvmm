@@ -1841,6 +1841,7 @@ dependencies = [
  "storage_tests",
  "tempfile",
  "thiserror 2.0.16",
+ "tracing",
  "vhdx",
  "vm_resource",
 ]
