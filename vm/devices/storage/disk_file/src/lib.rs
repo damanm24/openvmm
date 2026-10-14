@@ -2,9 +2,15 @@
 // Licensed under the MIT License.
 
 #![expect(missing_docs)]
-#![forbid(unsafe_code)]
+#![cfg_attr(not(windows), forbid(unsafe_code))]
+#![cfg_attr(windows, deny(unsafe_code))]
 
 mod readwriteat;
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub use windows::duplicate_device_handle;
 
 use self::readwriteat::ReadWriteAt;
 use blocking::unblock;
@@ -67,12 +73,29 @@ pub struct Metadata {
 }
 
 impl FileDisk {
+    /// Opens a disk backed by a regular file or, on Windows, by a block
+    /// device such as `\\.\PhysicalDriveN`.
+    ///
+    /// Block device handles must be opened for synchronous I/O.
     pub fn open(file: fs::File, read_only: bool) -> Result<Self, std::io::Error> {
-        let metadata = Metadata {
-            disk_size: file.metadata()?.len(),
-            sector_size: 512,
-            physical_sector_size: 4096,
-            read_only,
+        let metadata = match file.metadata() {
+            Ok(m) => Metadata {
+                disk_size: m.len(),
+                sector_size: 512,
+                physical_sector_size: 4096,
+                read_only,
+            },
+            #[cfg(windows)]
+            Err(err) if windows::is_device_error(&err) => {
+                let geometry = windows::query_device_geometry(&file)?;
+                Metadata {
+                    disk_size: geometry.disk_size,
+                    sector_size: geometry.sector_size,
+                    physical_sector_size: geometry.physical_sector_size,
+                    read_only,
+                }
+            }
+            Err(err) => return Err(err),
         };
         Ok(Self::with_metadata(file, metadata))
     }

@@ -2424,6 +2424,19 @@ async fn build_disk_backend(
                 .await
                 .with_context(|| format!("failed to open {path}"))
         }
+        vmservice::disk_backend::Kind::Handle(vmservice::HandleDisk { handle }) => {
+            #[cfg(windows)]
+            {
+                let file =
+                    disk_file::duplicate_device_handle(handle).context("invalid disk handle")?;
+                Ok(disk_backend_resources::FileDiskHandle(file).into_resource())
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = handle;
+                anyhow::bail!("handle disk backends are only supported on Windows")
+            }
+        }
     }
 }
 
