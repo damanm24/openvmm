@@ -101,6 +101,11 @@ particular strategy.
 - For differencing disks, the `vhdx` crate parses parent locator
   metadata, while `disklayer_vhdx::chain::open_vhdx_chain` walks and
   opens parent chains automatically.
+- On Windows, OpenVMM uses VHDMP for `.vhdx` files by default. ttrpc
+  `FileDisk` clients can set `user_mode_vhdx` to use this backend instead,
+  for example to support guest trim/unmap. Writable leaves recover their
+  logs before parent discovery. Read-only disks and parents must have clean
+  logs, since recovery requires writes.
 
 ## Parent lookup
 

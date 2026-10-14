@@ -24,14 +24,23 @@ use vm_resource::kind::DiskHandleKind;
 ///
 /// The file is opened for read+write unless `read_only` is true.
 pub fn open_vhdx_single(path: &Path, read_only: bool) -> anyhow::Result<Resource<DiskHandleKind>> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(!read_only)
-        .open(path)?;
+    let file = open_layer_file(path, read_only)?;
 
     Ok(Resource::new(LayeredDiskHandle::single_layer(
         VhdxDiskLayerHandle { file, read_only },
     )))
+}
+
+fn open_layer_file(path: &Path, read_only: bool) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(!read_only);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Allow host inspection, but exclude other writers.
+        options.share_mode(1); // FILE_SHARE_READ
+    }
+    options.open(path)
 }
 
 /// Open a VHDX differencing chain from an explicit list of file paths.
@@ -73,10 +82,7 @@ pub fn open_vhdx_chain_explicit(
             let is_leaf = i == 0;
             let layer_read_only = !is_leaf || read_only;
 
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(!layer_read_only)
-                .open(path)
+            let file = open_layer_file(path, layer_read_only)
                 .with_context(|| format!("failed to open vhdx layer {}: {}", i, path.display()))?;
 
             let handle = VhdxDiskLayerHandle {
@@ -141,11 +147,15 @@ pub async fn open_vhdx_chain(
             );
         }
 
-        // Open the current file read-only just to read metadata.
-        // The actual read-write open happens later via open_vhdx_chain_explicit.
-        let bf = crate::io::BlockingFile::open(&current_path, true)
-            .with_context(|| format!("failed to open vhdx file: {}", current_path.display()))?;
+        // Recover the writable leaf's log before inspecting its parent locator.
+        // Parents remain immutable and must already have clean logs.
+        let can_replay = paths.len() == 1 && !read_only;
+        let bf = crate::io::BlockingFile::new(
+            open_layer_file(&current_path, !can_replay)
+                .with_context(|| format!("failed to open vhdx file: {}", current_path.display()))?,
+        );
         let vhdx = vhdx::VhdxFile::open(bf)
+            .allow_replay(can_replay)
             .read_only()
             .await
             .with_context(|| format!("failed to parse vhdx file: {}", current_path.display()))?;
@@ -290,6 +300,26 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn layer_file_sharing() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.into_temp_path();
+        let reader = open_layer_file(&path, true).unwrap();
+        let second_reader = open_layer_file(&path, true).unwrap();
+        assert!(open_layer_file(&path, false).is_err());
+        drop(reader);
+        drop(second_reader);
+        let writer = open_layer_file(&path, false).unwrap();
+        let inspector = std::fs::OpenOptions::new().read(true).open(&path).unwrap();
+        // A layer reader only shares read access, so it still excludes an active writer.
+        assert!(open_layer_file(&path, true).is_err());
+        assert!(open_layer_file(&path, false).is_err());
+        drop(inspector);
+        drop(writer);
+        assert!(open_layer_file(&path, false).is_ok());
+    }
+
     #[test]
     fn open_single_creates_one_layer() {
         let dir = tempfile::tempdir().unwrap();
@@ -357,5 +387,31 @@ mod tests {
 
         let resource = open_vhdx_chain(&path, false).await.unwrap();
         let _ = resource;
+    }
+
+    #[pal_async::async_test]
+    async fn auto_walk_recovers_writable_leaf(driver: pal_async::DefaultDriver) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dirty.vhdx");
+        let file = crate::io::BlockingFile::open(&path, false).unwrap();
+        let mut params = vhdx::CreateParams {
+            disk_size: 1024 * 1024,
+            ..Default::default()
+        };
+        vhdx::create(&file, &mut params).await.unwrap();
+        let disk = vhdx::VhdxFile::open(file).writable(&driver).await.unwrap();
+        let mut ranges = Vec::new();
+        disk.resolve_write(0, 512, &mut ranges)
+            .await
+            .unwrap()
+            .complete()
+            .await
+            .unwrap();
+        disk.flush().await.unwrap();
+        disk.abort().await;
+        assert!(open_vhdx_chain(&path, true).await.is_err());
+        let resource = open_vhdx_chain(&path, false).await.unwrap();
+        drop(resource);
+        assert!(open_vhdx_chain(&path, true).await.is_ok());
     }
 }

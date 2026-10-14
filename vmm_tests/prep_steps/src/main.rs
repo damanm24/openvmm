@@ -122,6 +122,7 @@ async fn run(
         openvmm_helpers::disk::OpenDiskOptions {
             read_only: false,
             direct: false,
+            user_mode_vhdx: false,
         },
     )
     .await?;
@@ -239,6 +240,7 @@ async fn run_no_vmbus(
         openvmm_helpers::disk::OpenDiskOptions {
             read_only: false,
             direct: false,
+            user_mode_vhdx: false,
         },
     )
     .await?;

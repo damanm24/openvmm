@@ -428,6 +428,60 @@ mod tests {
     }
 
     #[async_test]
+    async fn unmap_preserves_neighbors_and_survives_reopen(driver: DefaultDriver) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trim.vhdx");
+        let block_size = 2 * 1024 * 1024;
+        let file = BlockingFile::open(&path, false).unwrap();
+        let mut params = vhdx::CreateParams {
+            disk_size: 3 * block_size as u64,
+            block_size: block_size as u32,
+            ..Default::default()
+        };
+        vhdx::create(&file, &mut params).await.unwrap();
+        let vhdx = VhdxFile::open(file.clone())
+            .writable(&driver)
+            .await
+            .unwrap();
+        let disk =
+            Disk::new(wrap_in_layered_disk(VhdxLayer::new(vhdx, file, false)).await).unwrap();
+        assert_eq!(disk.unmap_behavior(), UnmapBehavior::Zeroes);
+        let mem = GuestMemory::allocate(3 * block_size);
+        mem.write_at(0, &vec![0x5a; 3 * block_size]).unwrap();
+        disk.write_vectored(
+            &OwnedRequestBuffers::linear(0, 3 * block_size, false).buffer(&mem),
+            0,
+            false,
+        )
+        .await
+        .unwrap();
+        let sectors_per_block = block_size as u64 / disk.sector_size() as u64;
+        disk.unmap(sectors_per_block, sectors_per_block, false)
+            .await
+            .unwrap();
+        disk.sync_cache().await.unwrap();
+        drop(disk);
+
+        let file = BlockingFile::open(&path, false).unwrap();
+        let vhdx = VhdxFile::open(file.clone())
+            .writable(&driver)
+            .await
+            .unwrap();
+        let disk = wrap_in_layered_disk(VhdxLayer::new(vhdx, file, false)).await;
+        disk.read_vectored(
+            &OwnedRequestBuffers::linear(0, 3 * block_size, true).buffer(&mem),
+            0,
+        )
+        .await
+        .unwrap();
+        let mut data = vec![0; 3 * block_size];
+        mem.read_at(0, &mut data).unwrap();
+        assert!(data[..block_size].iter().all(|&b| b == 0x5a));
+        assert!(data[block_size..2 * block_size].iter().all(|&b| b == 0));
+        assert!(data[2 * block_size..].iter().all(|&b| b == 0x5a));
+    }
+
+    #[async_test]
     async fn write_close_reopen_read(driver: DefaultDriver) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.vhdx");

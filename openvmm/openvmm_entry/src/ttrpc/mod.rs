@@ -1863,6 +1863,7 @@ async fn make_disk_config(disk: vmservice::ScsiDisk) -> anyhow::Result<ScsiDevic
                 OpenDiskOptions {
                     read_only: disk.read_only,
                     direct: false,
+                    user_mode_vhdx: false,
                 },
             )
             .await
@@ -2419,11 +2420,20 @@ async fn build_disk_backend(
 ) -> anyhow::Result<Resource<DiskHandleKind>> {
     let vmservice::DiskBackend { kind } = backend;
     match kind.context("missing disk backend kind")? {
-        vmservice::disk_backend::Kind::File(vmservice::FileDisk { path, direct }) => {
-            open_disk_type(path.as_ref(), OpenDiskOptions { read_only, direct })
-                .await
-                .with_context(|| format!("failed to open {path}"))
-        }
+        vmservice::disk_backend::Kind::File(vmservice::FileDisk {
+            path,
+            direct,
+            user_mode_vhdx,
+        }) => open_disk_type(
+            path.as_ref(),
+            OpenDiskOptions {
+                read_only,
+                direct,
+                user_mode_vhdx,
+            },
+        )
+        .await
+        .with_context(|| format!("failed to open {path}")),
     }
 }
 

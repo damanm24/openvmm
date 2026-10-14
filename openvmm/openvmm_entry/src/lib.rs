@@ -2520,6 +2520,7 @@ fn disk_open_inner<'a>(
                     OpenDiskOptions {
                         read_only: false,
                         direct: *direct,
+                        user_mode_vhdx: false,
                     },
                 )
                 .with_context(|| format!("failed to create {}", path.display()))?
@@ -2529,6 +2530,7 @@ fn disk_open_inner<'a>(
                     OpenDiskOptions {
                         read_only,
                         direct: *direct,
+                        user_mode_vhdx: false,
                     },
                 )
                 .await
