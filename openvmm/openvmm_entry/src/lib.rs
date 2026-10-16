@@ -1994,7 +1994,7 @@ async fn vm_config_from_command_line(
     }
 
     // Handle --vhost-user arguments.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     for vhost_cli in &opt.vhost_user {
         let stream =
             unix_socket::UnixStream::connect(&vhost_cli.socket_path).with_context(|| {

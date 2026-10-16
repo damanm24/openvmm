@@ -568,7 +568,7 @@ options:
     #[clap(long = "virtio-blk")]
     pub virtio_blk: Vec<DiskCli>,
 
-    /// Attach a vhost-user device via a Unix socket.
+    /// Attach a vhost-user device via a Unix socket (AF_UNIX on Windows).
     ///
     /// The first positional argument is the socket path. Options:
     ///
@@ -592,7 +592,7 @@ options:
     ///   --vhost-user /tmp/virtiofsd.sock,type=fs,tag=myfs
     ///   --vhost-user /tmp/virtiofsd.sock,type=fs,tag=myfs,num_queues=2,queue_size=1024
     /// ```
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[clap(long = "vhost-user")]
     pub vhost_user: Vec<VhostUserCli>,
 
@@ -3824,7 +3824,7 @@ impl From<&std::ffi::OsStr> for OptionalPathBuf {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[derive(Clone)]
 pub enum VhostUserDeviceTypeCli {
     /// Block device — config from backend via GET_CONFIG, with num_queues
@@ -3846,7 +3846,7 @@ pub enum VhostUserDeviceTypeCli {
     },
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[derive(Clone)]
 pub struct VhostUserCli {
     pub socket_path: String,
@@ -3856,7 +3856,7 @@ pub struct VhostUserCli {
 
 /// Raw `--vhost-user` options, resolved into a [`VhostUserCli`] by its
 /// `FromStr`.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[derive(vmm_cli::KeyValueArgs)]
 struct VhostUserArgs {
     #[kv(positional)]
@@ -3871,7 +3871,7 @@ struct VhostUserArgs {
     queue_sizes: Option<vmm_cli::BracketList<u16>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 impl FromStr for VhostUserCli {
     type Err = anyhow::Error;
 
@@ -6121,7 +6121,7 @@ mod tests {
         assert!(IommuCli::from_str("id=").is_err());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[test]
     fn test_vhost_user_cli() {
         // type=blk: socket is positional; num_queues/queue_size optional.

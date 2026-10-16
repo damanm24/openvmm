@@ -10,7 +10,7 @@
 //! a Unix domain socket, accepts one connection at a time, and translates
 //! vhost-user protocol messages into `VirtioDevice` trait calls.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 #![expect(missing_docs)]
 
 pub mod memory;
@@ -25,6 +25,8 @@ use crate::memory::MemoryRegionInfo;
 use crate::memory::build_guest_memory;
 use crate::protocol::*;
 use crate::queue_setup::QueueSetup;
+use crate::socket::MessageReceiver;
+use crate::socket::OwnedOsHandle;
 use crate::socket::SocketError;
 use crate::socket::VhostUserSocket;
 use anyhow::Context as _;
@@ -32,9 +34,7 @@ use guestmem::GuestMemory;
 use pal_async::driver::SpawnDriver;
 use pal_async::socket::PolledSocket;
 use pal_event::Event;
-use std::os::fd::OwnedFd;
 use std::path::Path;
-use unix_socket::ScmReceiver;
 use unix_socket::UnixListener;
 use vhost_user_protocol::VHOST_USER_MAX_FDS;
 use virtio::DeviceTraits;
@@ -123,7 +123,7 @@ impl VhostUserDeviceServer {
 
         // Reused across the connection so each recv doesn't allocate a control
         // buffer for fd passing.
-        let mut receiver = ScmReceiver::new(VHOST_USER_MAX_FDS);
+        let mut receiver = MessageReceiver::new(VHOST_USER_MAX_FDS);
 
         loop {
             let (hdr, payload, fds) = match socket.recv_message(&mut receiver).await {
@@ -164,7 +164,7 @@ impl VhostUserDeviceServer {
         traits: &DeviceTraits,
         hdr: &VhostUserMsgHeader,
         payload: &[u8],
-        fds: Vec<OwnedFd>,
+        fds: Vec<OwnedOsHandle>,
     ) -> anyhow::Result<()> {
         let code = hdr.code();
 
@@ -503,7 +503,7 @@ impl VhostUserDeviceServer {
         &mut self,
         state: &mut ConnectionState,
         payload: &[u8],
-        fds: Vec<OwnedFd>,
+        fds: Vec<OwnedOsHandle>,
     ) -> anyhow::Result<()> {
         let mem_hdr = parse_payload::<VhostUserMemoryHeader>(payload)?;
         let nregions = mem_hdr.nregions as usize;
@@ -670,7 +670,7 @@ async fn send_reply(
     socket: &VhostUserSocket,
     request_hdr: &VhostUserMsgHeader,
     payload: &[u8],
-    fds: &[OwnedFd],
+    fds: &[OwnedOsHandle],
 ) -> Result<(), SocketError> {
     let hdr = VhostUserMsgHeader::reply(request_hdr, payload.len() as u32);
     socket.send_message(&hdr, payload, fds).await
@@ -702,21 +702,21 @@ fn parse_payload<T: FromBytes>(payload: &[u8]) -> anyhow::Result<T> {
         })
 }
 
-/// Create a `pal_event::Event` from an `OwnedFd`.
+/// Create a `pal_event::Event` from a received handle.
 ///
-/// The fd should be an eventfd. On Linux, `pal_event::Event` wraps an eventfd.
-fn event_from_fd(fd: OwnedFd) -> Event {
+/// The handle should be an eventfd on Linux or an event on Windows.
+fn event_from_fd(fd: OwnedOsHandle) -> Event {
     Event::from(fd)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::socket::AsOsHandle;
     use inspect::InspectMut;
     use pal_async::DefaultDriver;
     use pal_async::async_test;
     use pal_async::socket::PolledSocket;
-    use std::os::fd::AsFd;
 
     use test_with_tracing::test;
     use unix_socket::UnixStream;
@@ -793,11 +793,7 @@ mod tests {
 
     /// Helper: create a Unix socket pair for testing.
     fn socket_pair() -> (UnixStream, UnixStream) {
-        let (a, b) = socket2::Socket::pair(socket2::Domain::UNIX, socket2::Type::STREAM, None)
-            .expect("socketpair failed");
-        let a: UnixStream = a.into();
-        let b: UnixStream = b.into();
-        (a, b)
+        UnixStream::pair().expect("socketpair failed")
     }
 
     /// Helper: send a vhost-user message on the frontend socket.
@@ -805,7 +801,7 @@ mod tests {
         socket: &VhostUserSocket,
         code: VhostUserRequestCode,
         payload: &[u8],
-        fds: &[impl AsFd],
+        fds: &[impl AsOsHandle],
     ) {
         let hdr = VhostUserMsgHeader {
             request: code.0,
@@ -824,8 +820,8 @@ mod tests {
         code: VhostUserRequestCode,
         payload: &[u8],
     ) -> Vec<u8> {
-        send_msg(socket, code, payload, &[] as &[OwnedFd]).await;
-        let mut receiver = ScmReceiver::new(VHOST_USER_MAX_FDS);
+        send_msg(socket, code, payload, &[] as &[OwnedOsHandle]).await;
+        let mut receiver = MessageReceiver::new(VHOST_USER_MAX_FDS);
         let (hdr, reply_payload, _fds) = socket
             .recv_message(&mut receiver)
             .await
@@ -866,7 +862,7 @@ mod tests {
                 &frontend,
                 VhostUserRequestCode::SET_FEATURES,
                 set_features.as_bytes(),
-                &[] as &[OwnedFd],
+                &[] as &[OwnedOsHandle],
             )
             .await;
 
@@ -890,7 +886,7 @@ mod tests {
                 &frontend,
                 VhostUserRequestCode::SET_PROTOCOL_FEATURES,
                 set_pf.as_bytes(),
-                &[] as &[OwnedFd],
+                &[] as &[OwnedOsHandle],
             )
             .await;
 
@@ -904,7 +900,7 @@ mod tests {
                 &frontend,
                 VhostUserRequestCode::SET_OWNER,
                 &[],
-                &[] as &[OwnedFd],
+                &[] as &[OwnedOsHandle],
             )
             .await;
 
@@ -917,13 +913,9 @@ mod tests {
         server_result.expect("server should exit cleanly");
     }
 
-    /// Helper: create a temp file of the given size and return it as an OwnedFd.
-    fn make_memfd(size: usize) -> OwnedFd {
-        use std::io::Write;
-
-        let mut f = tempfile::tempfile().expect("tempfile failed");
-        f.write_all(&vec![0u8; size]).expect("write failed");
-        f.into()
+    /// Helper: create shared memory of the given size.
+    fn make_memfd(size: usize) -> OwnedOsHandle {
+        sparse_mmap::alloc_shared_memory(size, "vhost-user-test").expect("alloc failed")
     }
 
     /// Build a SET_MEM_TABLE payload for one region at GPA 0 of the given size.
@@ -960,7 +952,7 @@ mod tests {
             frontend,
             VhostUserRequestCode::SET_FEATURES,
             set_features.as_bytes(),
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
 
@@ -979,7 +971,7 @@ mod tests {
             frontend,
             VhostUserRequestCode::SET_PROTOCOL_FEATURES,
             set_pf.as_bytes(),
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
 
@@ -988,33 +980,41 @@ mod tests {
             frontend,
             VhostUserRequestCode::SET_OWNER,
             &[],
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
     }
 
-    /// Helper: send SET_MEM_TABLE with one region backed by a memfd.
-    async fn send_mem_table(frontend: &VhostUserSocket, region_size: usize) {
+    /// Helper: send SET_MEM_TABLE with one region backed by shared memory.
+    ///
+    /// Returns the region handle, which must be kept open until the backend
+    /// has processed the message (handles may be pulled by the receiver on
+    /// Windows).
+    async fn send_mem_table(frontend: &VhostUserSocket, region_size: usize) -> OwnedOsHandle {
         let fd = make_memfd(region_size);
         let payload = mem_table_payload(0, region_size as u64, 0x1000_0000);
         send_msg(
             frontend,
             VhostUserRequestCode::SET_MEM_TABLE,
             &payload,
-            &[fd],
+            &[&fd],
         )
         .await;
+        fd
     }
 
     /// Helper: set up and enable queue 0 with dummy addresses and eventfds.
-    async fn setup_and_enable_queue(frontend: &VhostUserSocket) {
+    ///
+    /// Returns the kick and call events, which must be kept open until the
+    /// backend has processed the messages.
+    async fn setup_and_enable_queue(frontend: &VhostUserSocket) -> [Event; 2] {
         // SET_VRING_NUM
         let vring_num = VhostUserVringState { index: 0, num: 256 };
         send_msg(
             frontend,
             VhostUserRequestCode::SET_VRING_NUM,
             vring_num.as_bytes(),
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
 
@@ -1031,7 +1031,7 @@ mod tests {
             frontend,
             VhostUserRequestCode::SET_VRING_ADDR,
             vring_addr.as_bytes(),
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
 
@@ -1041,31 +1041,29 @@ mod tests {
             frontend,
             VhostUserRequestCode::SET_VRING_BASE,
             vring_base.as_bytes(),
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
 
         // SET_VRING_KICK (with eventfd)
         let kick_event = Event::new();
-        let kick_fd: OwnedFd = kick_event.into();
         let kick_msg = VhostUserU64Msg { value: 0 }; // index 0, no NOFD
         send_msg(
             frontend,
             VhostUserRequestCode::SET_VRING_KICK,
             kick_msg.as_bytes(),
-            &[kick_fd],
+            &[&kick_event],
         )
         .await;
 
         // SET_VRING_CALL (with eventfd)
         let call_event = Event::new();
-        let call_fd: OwnedFd = call_event.into();
         let call_msg = VhostUserU64Msg { value: 0 }; // index 0, no NOFD
         send_msg(
             frontend,
             VhostUserRequestCode::SET_VRING_CALL,
             call_msg.as_bytes(),
-            &[call_fd],
+            &[&call_event],
         )
         .await;
 
@@ -1075,9 +1073,11 @@ mod tests {
             frontend,
             VhostUserRequestCode::SET_VRING_ENABLE,
             enable_msg.as_bytes(),
-            &[] as &[OwnedFd],
+            &[] as &[OwnedOsHandle],
         )
         .await;
+
+        [kick_event, call_event]
     }
 
     /// Verify that sending SET_MEM_TABLE while a queue is active causes
@@ -1155,15 +1155,15 @@ mod tests {
             do_handshake(&frontend).await;
 
             // 1. Initial SET_MEM_TABLE (before queues are started).
-            send_mem_table(&frontend, 0x10_0000).await;
+            let _mem1 = send_mem_table(&frontend, 0x10_0000).await;
 
             // 2. Set up and enable queue 0.
-            setup_and_enable_queue(&frontend).await;
+            let _events = setup_and_enable_queue(&frontend).await;
 
             // 3. Send another SET_MEM_TABLE while queue 0 is active.
             //    This simulates a runtime memory update (e.g., hotplug/balloon).
             //    The backend must stop and restart the queue — not leave it dead.
-            send_mem_table(&frontend, 0x10_0000).await;
+            let _mem2 = send_mem_table(&frontend, 0x10_0000).await;
 
             // Sync barrier: GET_FEATURES requires a reply, so receiving
             // the reply guarantees the backend has processed SET_MEM_TABLE.

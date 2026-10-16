@@ -6,8 +6,8 @@
 //! This crate is used by both the vhost-user backend (`vhost_user_backend`)
 //! and the vhost-user frontend (`vhost_user_frontend`).
 
-#![cfg(target_os = "linux")]
-#![forbid(unsafe_code)]
+#![cfg(any(target_os = "linux", windows))]
+#![cfg_attr(not(windows), forbid(unsafe_code))]
 #![expect(missing_docs)]
 
 pub mod protocol;

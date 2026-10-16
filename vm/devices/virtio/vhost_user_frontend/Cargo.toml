@@ -25,7 +25,6 @@ zerocopy.workspace = true
 
 [dev-dependencies]
 pal_async = { workspace = true, features = ["tests"] }
-socket2 = { workspace = true, features = ["all"] }
 test_with_tracing.workspace = true
 vhost_user_backend.workspace = true
 sparse_mmap.workspace = true

@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
-#![cfg_attr(not(target_os = "linux"), expect(missing_docs))]
-#![cfg(target_os = "linux")]
+#![cfg_attr(not(any(target_os = "linux", windows)), expect(missing_docs))]
+#![cfg(any(target_os = "linux", windows))]
 
 //! vhost-user frontend: a [`VirtioDevice`] implementation that forwards
 //! device operations to an external vhost-user backend over a Unix socket.
@@ -19,9 +19,9 @@ use anyhow::Context as _;
 use guestmem::GuestMemory;
 use guestmem::ShareableRegion;
 use inspect::InspectMut;
-use std::os::fd::AsFd;
-use std::os::fd::OwnedFd;
-use unix_socket::ScmReceiver;
+use vhost_user_protocol::socket::AsOsHandle;
+use vhost_user_protocol::socket::MessageReceiver;
+use vhost_user_protocol::socket::OwnedOsHandle;
 use vhost_user_protocol::*;
 use virtio::DeviceTraits;
 use virtio::DeviceTraitsSharedMemory;
@@ -94,7 +94,7 @@ pub struct VhostUserFrontend {
     /// Reusable receiver holding the control buffer used for fd passing, so
     /// each recv doesn't allocate one. The socket is used strictly
     /// sequentially (request/reply), so a single receiver suffices.
-    receiver: ScmReceiver,
+    receiver: MessageReceiver,
     /// Per-queue sizes. `queue_size()` indexes into this.
     queue_sizes: Vec<u16>,
     /// Sparse patches applied to config reads. Each entry is
@@ -126,7 +126,7 @@ impl VhostUserFrontend {
     ) -> anyhow::Result<Self> {
         // Reused across the connection so each recv doesn't allocate a control
         // buffer for fd passing.
-        let mut receiver = ScmReceiver::new(VHOST_USER_MAX_FDS);
+        let mut receiver = MessageReceiver::new(VHOST_USER_MAX_FDS);
 
         // 1. GET_FEATURES
         let device_features_raw = VirtioDeviceFeatures::from_bits(
@@ -161,6 +161,17 @@ impl VhostUserFrontend {
         } else {
             VhostUserProtocolFeatures::new()
         };
+
+        // On Windows, the backend may pull handles out of this process
+        // after the message is sent (see `vhost_user_protocol::socket`), so
+        // each handle must stay open until the backend acknowledges the
+        // message.
+        if cfg!(windows) {
+            anyhow::ensure!(
+                negotiated_proto.reply_ack(),
+                "vhost-user backend must support REPLY_ACK on Windows"
+            );
+        }
 
         // 3. SET_OWNER
         send_simple(
@@ -674,11 +685,11 @@ fn validate_reply(
 /// Returns the reply payload and any file descriptors.
 async fn send_and_recv(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     code: VhostUserRequestCode,
     payload: &[u8],
-    fds: &[impl AsFd],
-) -> anyhow::Result<(Vec<u8>, Vec<OwnedFd>)> {
+    fds: &[impl AsOsHandle],
+) -> anyhow::Result<(Vec<u8>, Vec<OwnedOsHandle>)> {
     let hdr = VhostUserMsgHeader {
         request: code.0,
         flags: VHOST_USER_FLAG_VERSION,
@@ -693,7 +704,7 @@ async fn send_and_recv(
 /// Receive and validate a REPLY_ACK response.
 async fn recv_ack(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     expected_code: VhostUserRequestCode,
 ) -> anyhow::Result<()> {
     let (reply_hdr, payload, _fds) = socket.recv_message(receiver).await?;
@@ -721,11 +732,12 @@ fn request_flags(reply_ack: bool) -> u32 {
 /// Send a request with no payload and receive a u64 reply.
 async fn send_get_u64(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     code: VhostUserRequestCode,
 ) -> anyhow::Result<u64> {
     tracing::trace!(code = ?code, "send_get_u64");
-    let (payload, _fds) = send_and_recv(socket, receiver, code, &[], &[] as &[OwnedFd]).await?;
+    let (payload, _fds) =
+        send_and_recv(socket, receiver, code, &[], &[] as &[OwnedOsHandle]).await?;
     let msg = VhostUserU64Msg::read_from_prefix(&payload)
         .map(|(val, _)| val)
         .map_err(|_| anyhow::anyhow!("reply payload too small for u64"))?;
@@ -736,7 +748,7 @@ async fn send_get_u64(
 /// Send a SET request with a u64 payload.
 async fn send_set_u64(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     code: VhostUserRequestCode,
     value: u64,
     reply_ack: bool,
@@ -749,7 +761,7 @@ async fn send_set_u64(
     let payload = VhostUserU64Msg { value };
     tracing::trace!(code = ?code, value = %format!("0x{value:x}"), "send_set_u64");
     socket
-        .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedFd])
+        .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedOsHandle])
         .await?;
     if reply_ack {
         recv_ack(socket, receiver, code).await?;
@@ -760,7 +772,7 @@ async fn send_set_u64(
 /// Send a request with no payload (e.g., SET_OWNER, RESET_DEVICE).
 async fn send_simple(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     code: VhostUserRequestCode,
     reply_ack: bool,
 ) -> anyhow::Result<()> {
@@ -770,7 +782,9 @@ async fn send_simple(
         size: 0,
     };
     tracing::trace!(code = ?code, "send_simple");
-    socket.send_message(&hdr, &[], &[] as &[OwnedFd]).await?;
+    socket
+        .send_message(&hdr, &[], &[] as &[OwnedOsHandle])
+        .await?;
     if reply_ack {
         recv_ack(socket, receiver, code).await?;
     }
@@ -780,7 +794,7 @@ async fn send_simple(
 /// Send SET_MEM_TABLE with exported memory regions.
 async fn send_set_mem_table(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     regions: &[ShareableRegion],
     reply_ack: bool,
 ) -> anyhow::Result<()> {
@@ -832,7 +846,7 @@ async fn send_set_mem_table(
 /// Send a VringState message (SET_VRING_NUM, SET_VRING_BASE, SET_VRING_ENABLE).
 async fn send_vring_state(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     code: VhostUserRequestCode,
     index: u16,
     num: u32,
@@ -849,7 +863,7 @@ async fn send_vring_state(
     };
     tracing::trace!(code = ?code, index, num = %format!("0x{num:x}"), "send_vring_state");
     socket
-        .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedFd])
+        .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedOsHandle])
         .await?;
     if reply_ack {
         recv_ack(socket, receiver, code).await?;
@@ -860,7 +874,7 @@ async fn send_vring_state(
 /// Send SET_VRING_ADDR.
 async fn send_vring_addr(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     index: u16,
     desc_addr: u64,
     used_addr: u64,
@@ -888,7 +902,7 @@ async fn send_vring_addr(
         "SET_VRING_ADDR",
     );
     socket
-        .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedFd])
+        .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedOsHandle])
         .await?;
     if reply_ack {
         recv_ack(socket, receiver, VhostUserRequestCode::SET_VRING_ADDR).await?;
@@ -899,10 +913,10 @@ async fn send_vring_addr(
 /// Send SET_VRING_KICK or SET_VRING_CALL with an optional fd.
 async fn send_vring_fd(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     code: VhostUserRequestCode,
     index: u16,
-    event: Option<&(impl AsFd + ?Sized)>,
+    event: Option<&(impl AsOsHandle + ?Sized)>,
     reply_ack: bool,
 ) -> anyhow::Result<()> {
     let nofd = event.is_none();
@@ -919,11 +933,11 @@ async fn send_vring_fd(
     tracing::trace!(code = ?code, index, nofd, "send_vring_fd");
     if let Some(event) = event {
         socket
-            .send_message(&hdr, payload.as_bytes(), &[event.as_fd()])
+            .send_message(&hdr, payload.as_bytes(), &[event])
             .await?;
     } else {
         socket
-            .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedFd])
+            .send_message(&hdr, payload.as_bytes(), &[] as &[OwnedOsHandle])
             .await?;
     }
     if reply_ack {
@@ -940,7 +954,7 @@ async fn send_vring_fd(
 /// (high 16) state.
 async fn send_get_vring_base(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     index: u16,
 ) -> anyhow::Result<u32> {
     let payload = VhostUserVringState {
@@ -952,7 +966,7 @@ async fn send_get_vring_base(
         receiver,
         VhostUserRequestCode::GET_VRING_BASE,
         payload.as_bytes(),
-        &[] as &[OwnedFd],
+        &[] as &[OwnedOsHandle],
     )
     .await?;
     let reply = VhostUserVringState::read_from_prefix(&reply_payload)
@@ -964,7 +978,7 @@ async fn send_get_vring_base(
 /// Send GET_CONFIG and return the config bytes.
 async fn send_get_config(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     offset: u32,
     size: u32,
 ) -> anyhow::Result<Vec<u8>> {
@@ -986,7 +1000,7 @@ async fn send_get_config(
         receiver,
         VhostUserRequestCode::GET_CONFIG,
         &request_payload,
-        &[] as &[OwnedFd],
+        &[] as &[OwnedOsHandle],
     )
     .await?;
     // Reply: config header + config data.
@@ -1008,7 +1022,7 @@ async fn send_get_config(
 /// Send SET_CONFIG.
 async fn send_set_config(
     socket: &VhostUserSocket,
-    receiver: &mut ScmReceiver,
+    receiver: &mut MessageReceiver,
     offset: u16,
     data: &[u8],
     reply_ack: bool,
@@ -1029,7 +1043,7 @@ async fn send_set_config(
     };
     tracing::trace!(offset, size = data.len(), "SET_CONFIG");
     socket
-        .send_message(&hdr, &payload, &[] as &[OwnedFd])
+        .send_message(&hdr, &payload, &[] as &[OwnedOsHandle])
         .await?;
     if reply_ack {
         recv_ack(socket, receiver, VhostUserRequestCode::SET_CONFIG).await?;
@@ -1210,9 +1224,7 @@ mod tests {
     }
 
     fn socket_pair() -> (UnixStream, UnixStream) {
-        let (a, b) = socket2::Socket::pair(socket2::Domain::UNIX, socket2::Type::STREAM, None)
-            .expect("socketpair failed");
-        (a.into(), b.into())
+        UnixStream::pair().expect("socketpair failed")
     }
 
     /// Create a frontend+backend pair over a socketpair. Returns the frontend

@@ -168,25 +168,32 @@ pub mod console {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod vhost_user {
     use mesh::MeshPayload;
-    use std::os::fd::OwnedFd;
+
+    /// A connected vhost-user Unix domain socket (AF_UNIX on Windows).
+    #[cfg(unix)]
+    pub type VhostUserSocketHandle = std::os::fd::OwnedFd;
+
+    /// A connected vhost-user Unix domain socket (AF_UNIX on Windows).
+    #[cfg(windows)]
+    pub type VhostUserSocketHandle = std::os::windows::io::OwnedSocket;
     use vm_resource::ResourceId;
     use vm_resource::kind::VirtioDeviceHandle;
 
     /// Handle for a generic vhost-user device backed by an external process.
     ///
     /// The socket must already be connected. The CLI layer connects
-    /// to the backend and passes the connected fd here.
+    /// to the backend and passes the connected socket here.
     ///
     /// For device types with specific handles (FS, BLK), use those
     /// instead. This handle is for devices identified only by their
     /// numeric virtio device ID.
     #[derive(MeshPayload)]
     pub struct VhostUserGenericHandle {
-        /// Connected Unix socket fd to the vhost-user backend.
-        pub socket: OwnedFd,
+        /// Connected Unix socket to the vhost-user backend.
+        pub socket: VhostUserSocketHandle,
         /// Virtio device ID (e.g., 2 for block, 1 for net).
         pub device_id: u16,
         /// Per-queue sizes. Length determines the queue count.
@@ -206,8 +213,8 @@ pub mod vhost_user {
     /// behavior of cloud-hypervisor.
     #[derive(MeshPayload)]
     pub struct VhostUserFsHandle {
-        /// Connected Unix socket fd to the vhost-user backend.
-        pub socket: OwnedFd,
+        /// Connected Unix socket to the vhost-user backend.
+        pub socket: VhostUserSocketHandle,
         /// The mount tag exposed to the guest (max 36 bytes).
         pub tag: String,
         /// Number of request queues (default 1 in resolver).
@@ -223,8 +230,8 @@ pub mod vhost_user {
     /// Handle for a vhost-user virtio-blk device.
     #[derive(MeshPayload)]
     pub struct VhostUserBlkHandle {
-        /// Connected Unix socket fd to the vhost-user backend.
-        pub socket: OwnedFd,
+        /// Connected Unix socket to the vhost-user backend.
+        pub socket: VhostUserSocketHandle,
         /// Number of queues (default 1 in resolver).
         pub num_queues: Option<u16>,
         /// Queue size for all queues (default 128 in resolver).

@@ -2500,9 +2500,8 @@ fn build_serial_backend(
     }
 }
 
-/// Builds a vhost-user-backed virtio device. Only supported on unix, where the
-/// backend is reached over a Unix domain socket.
-#[cfg(unix)]
+/// Builds a vhost-user-backed virtio device. The backend is reached over a
+/// Unix domain socket (AF_UNIX on Windows).
 fn build_vhost_user_device(
     vhost_user: vmservice::VhostUser,
 ) -> anyhow::Result<Resource<VirtioDeviceHandle>> {
@@ -2551,13 +2550,6 @@ fn build_vhost_user_device(
         }
         .into_resource(),
     })
-}
-
-#[cfg(not(unix))]
-fn build_vhost_user_device(
-    _vhost_user: vmservice::VhostUser,
-) -> anyhow::Result<Resource<VirtioDeviceHandle>> {
-    anyhow::bail!("vhost-user is only supported on unix hosts")
 }
 
 #[cfg(all(test, target_os = "linux"))]

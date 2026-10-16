@@ -6312,6 +6312,7 @@ dependencies = [
  "virtio",
  "virtio_blk",
  "virtio_resources",
+ "virtiofs",
  "vm_resource",
  "vmcore",
 ]
@@ -9710,9 +9711,7 @@ dependencies = [
  "pal_async",
  "pal_event",
  "parking_lot",
- "socket2",
  "sparse_mmap",
- "tempfile",
  "test_with_tracing",
  "thiserror 2.0.16",
  "tracelimit",
@@ -9734,7 +9733,6 @@ dependencies = [
  "inspect",
  "pal_async",
  "pal_event",
- "socket2",
  "sparse_mmap",
  "test_with_tracing",
  "tracelimit",
@@ -9754,11 +9752,16 @@ name = "vhost_user_protocol"
 version = "0.0.0"
 dependencies = [
  "bitfield-struct 0.11.0",
+ "futures",
  "open_enum",
  "pal_async",
+ "pal_event",
  "parking_lot",
+ "tempfile",
  "thiserror 2.0.16",
+ "tracing",
  "unix_socket",
+ "windows-sys 0.61.0",
  "zerocopy",
 ]
 

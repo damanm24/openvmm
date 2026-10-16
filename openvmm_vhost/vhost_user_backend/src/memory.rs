@@ -12,13 +12,11 @@
 //! a new `GuestMemory` can be constructed on each `SET_MEM_TABLE` without
 //! needing dynamically-updateable shared state.
 
-#![cfg(unix)]
-
 use crate::protocol::VhostUserMemoryRegion;
 use guestmem::GuestMemory;
 use memory_range::MemoryRange;
+use sparse_mmap::Mappable;
 use sparse_mmap::SparseMapping;
-use std::os::fd::OwnedFd;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -59,7 +57,7 @@ pub struct VhostUserMemory {
 /// entire GPA range up to the highest region end. Each region's fd is mapped
 /// at its GPA offset within that reservation, giving direct pointer access.
 pub fn build_guest_memory(
-    mut raw_regions: Vec<(VhostUserMemoryRegion, OwnedFd)>,
+    mut raw_regions: Vec<(VhostUserMemoryRegion, Mappable)>,
 ) -> Result<VhostUserMemory, MemoryError> {
     if raw_regions.is_empty() {
         return Ok(VhostUserMemory {

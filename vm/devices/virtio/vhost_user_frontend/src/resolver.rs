@@ -7,7 +7,6 @@ use crate::VhostUserFrontend;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use pal_async::socket::PolledSocket;
-use std::os::fd::OwnedFd;
 use unix_socket::UnixStream;
 use vhost_user_protocol::VhostUserSocket;
 use virtio::resolve::ResolvedVirtioDevice;
@@ -17,6 +16,7 @@ use virtio::spec::fs as virtio_fs;
 use virtio_resources::vhost_user::VhostUserBlkHandle;
 use virtio_resources::vhost_user::VhostUserFsHandle;
 use virtio_resources::vhost_user::VhostUserGenericHandle;
+use virtio_resources::vhost_user::VhostUserSocketHandle;
 use vm_resource::AsyncResolveResource;
 use vm_resource::ResourceResolver;
 use vm_resource::declare_static_async_resolver;
@@ -36,7 +36,7 @@ declare_static_async_resolver! {
 /// Connect a vhost-user socket fd and create the frontend.
 async fn connect_frontend(
     input: VirtioResolveInput<'_>,
-    socket_fd: OwnedFd,
+    socket_fd: VhostUserSocketHandle,
     config: crate::VhostUserConfig,
 ) -> anyhow::Result<VhostUserFrontend> {
     let driver = input.driver_source.simple();
