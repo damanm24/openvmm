@@ -162,17 +162,6 @@ impl VhostUserFrontend {
             VhostUserProtocolFeatures::new()
         };
 
-        // On Windows, the backend may pull handles out of this process
-        // after the message is sent (see `vhost_user_protocol::socket`), so
-        // each handle must stay open until the backend acknowledges the
-        // message.
-        if cfg!(windows) {
-            anyhow::ensure!(
-                negotiated_proto.reply_ack(),
-                "vhost-user backend must support REPLY_ACK on Windows"
-            );
-        }
-
         // 3. SET_OWNER
         send_simple(
             &socket,
@@ -1223,8 +1212,13 @@ mod tests {
         }
     }
 
-    fn socket_pair() -> (UnixStream, UnixStream) {
-        UnixStream::pair().expect("socketpair failed")
+    async fn socket_pair(driver: &DefaultDriver) -> (VhostUserSocket, VhostUserSocket) {
+        let (frontend, backend) = UnixStream::pair().expect("socketpair failed");
+        let (frontend, backend) = futures::join!(
+            VhostUserSocket::connect(driver.clone(), PolledSocket::new(driver, frontend).unwrap(),),
+            VhostUserSocket::accept(driver.clone(), PolledSocket::new(driver, backend).unwrap(),),
+        );
+        (frontend.unwrap(), backend.unwrap())
     }
 
     /// Create a frontend+backend pair over a socketpair. Returns the frontend
@@ -1232,19 +1226,13 @@ mod tests {
     async fn setup_frontend_backend(
         driver: &DefaultDriver,
     ) -> (VhostUserFrontend, GuestMemory, pal_async::task::Task<()>) {
-        let (frontend_stream, backend_stream) = socket_pair();
-
-        let backend_polled = PolledSocket::new(driver, backend_stream).unwrap();
-        let backend_socket = VhostUserSocket::new(backend_polled);
+        let (frontend_socket, backend_socket) = socket_pair(driver).await;
 
         let server = VhostUserDeviceServer::new(Box::new(MockBackendDevice::new()));
 
         let backend_task = driver.spawn("backend", async move {
             server.serve_connection(backend_socket).await.unwrap();
         });
-
-        let frontend_polled = PolledSocket::new(driver, frontend_stream).unwrap();
-        let frontend_socket = VhostUserSocket::new(frontend_polled);
 
         let guest_memory = ShareableGuestMemory::new(65536).into_guest_memory();
 
@@ -1464,19 +1452,13 @@ mod tests {
         device: impl VirtioDevice + 'static,
         config: VhostUserConfig,
     ) -> (VhostUserFrontend, GuestMemory, pal_async::task::Task<()>) {
-        let (frontend_stream, backend_stream) = socket_pair();
-
-        let backend_polled = PolledSocket::new(driver, backend_stream).unwrap();
-        let backend_socket = VhostUserSocket::new(backend_polled);
+        let (frontend_socket, backend_socket) = socket_pair(driver).await;
 
         let server = VhostUserDeviceServer::new(Box::new(device));
 
         let backend_task = driver.spawn("backend", async move {
             server.serve_connection(backend_socket).await.unwrap();
         });
-
-        let frontend_polled = PolledSocket::new(driver, frontend_stream).unwrap();
-        let frontend_socket = VhostUserSocket::new(frontend_polled);
 
         let guest_memory = ShareableGuestMemory::new(65536).into_guest_memory();
 
@@ -1642,18 +1624,12 @@ mod tests {
         use virtio::spec::fs as virtio_fs;
         use zerocopy::IntoBytes;
 
-        let (frontend_stream, backend_stream) = socket_pair();
-
-        let backend_polled = PolledSocket::new(&driver, backend_stream).unwrap();
-        let backend_socket = VhostUserSocket::new(backend_polled);
+        let (frontend_socket, backend_socket) = socket_pair(&driver).await;
 
         let server = VhostUserDeviceServer::new(Box::new(MockBackendDevice::new()));
         let backend_task = driver.spawn("backend", async move {
             server.serve_connection(backend_socket).await.unwrap();
         });
-
-        let frontend_polled = PolledSocket::new(&driver, frontend_stream).unwrap();
-        let frontend_socket = VhostUserSocket::new(frontend_polled);
 
         // Build a virtio-fs config with a known tag.
         let mut config = virtio_fs::Config {
@@ -1833,10 +1809,7 @@ mod tests {
             config_patches: vec![],
         };
 
-        let (frontend_stream, backend_stream) = socket_pair();
-
-        let backend_polled = PolledSocket::new(&driver, backend_stream).unwrap();
-        let backend_socket = VhostUserSocket::new(backend_polled);
+        let (frontend_socket, backend_socket) = socket_pair(&driver).await;
 
         let server = VhostUserDeviceServer::new(Box::new(MockBackendDevice::new()));
         let backend_task = driver.spawn("backend", async move {
@@ -1844,9 +1817,6 @@ mod tests {
             // rejects the queue count. Ignore the serve error.
             let _ = server.serve_connection(backend_socket).await;
         });
-
-        let frontend_polled = PolledSocket::new(&driver, frontend_stream).unwrap();
-        let frontend_socket = VhostUserSocket::new(frontend_polled);
 
         let vm_driver = VmTaskDriverSource::new(SingleDriverBackend::new(driver.clone())).simple();
         let result = VhostUserFrontend::from_socket(vm_driver, frontend_socket, config).await;

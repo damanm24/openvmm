@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! openvmm_vhost: a vhost-user backend binary that hosts OpenVMM virtio
-//! devices over a Unix domain socket (AF_UNIX on Windows).
+//! devices over a Unix domain socket (mesh bootstrap on Windows).
 //!
 //! The process resolves an OpenVMM virtio device, accepts one vhost-user
 //! frontend connection, maps the frontend's shared guest memory, and services

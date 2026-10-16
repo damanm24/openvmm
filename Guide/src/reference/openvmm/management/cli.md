@@ -289,8 +289,15 @@ describes the source definitions.
   does not support a non-identity virtual IOMMU. It conflicts with
   `--virtio-vsock-path`.
 * `--vhost-user <SOCKET_PATH>,type=<TYPE>[,tag=<NAME>][,num_queues=<N>][,queue_size=<N>][,pcie_port=<PORT>]`: Attach a
-  vhost-user device backed by an external process over a Unix socket (Linux
-  only). The backend process must already be listening on `SOCKET_PATH`.
+  vhost-user device backed by an external process on Linux or Windows.
+  The backend process must already be listening on `SOCKET_PATH`.
+  Linux uses the standard Unix socket protocol with `SCM_RIGHTS` FD passing.
+  Windows uses an AF_UNIX socket to bootstrap a dedicated mesh connection;
+  messages and OS handles then travel over ALPC. Both Windows endpoints must
+  support this mesh transport; it is not the Linux vhost-user wire format.
+  Restrict the socket directory to intended participants. The frontend creates
+  the mesh directory using its default security; an elevated frontend with a
+  non-elevated backend is not currently supported.
   Supported `type` values: `blk`, `fs`. For `type=fs`, `tag=<NAME>` is required
   and specifies the mount tag exposed to the guest (max 36 bytes).
   `num_queues` and `queue_size` control the queue layout (defaults: blk
@@ -542,7 +549,7 @@ For `--virtio-rng` and `--virtio-console`, use their separate PCIe port flags:
 --virtio-console console --virtio-console-pcie-port rp0
 ```
 
-**vhost-user devices** (comma-separated option, Linux only): `--vhost-user`
+**vhost-user devices** (comma-separated option, Linux and Windows): `--vhost-user`
 
 ```sh
 --vhost-user /tmp/vhost-blk.sock,type=blk,pcie_port=rp0

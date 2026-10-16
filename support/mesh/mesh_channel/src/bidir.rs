@@ -38,7 +38,7 @@ use std::task::Waker;
 /// The port can send data of type `T` and receive data of type `U`.
 ///
 /// This is a lower-level construct for sending and receiving binary messages.
-/// Most code should use a higher-level channel returned by [`mesh::channel()`],
+/// Most code should use a higher-level channel returned by [`crate::channel()`],
 /// which uses this type internally.
 pub struct Channel<T = SerializedMessage, U = SerializedMessage> {
     generic: GenericChannel,

@@ -4,8 +4,8 @@
 //! Async vhost-user transport.
 //!
 //! On Unix, messages are carried over a Unix domain socket with SCM_RIGHTS fd
-//! passing. On Windows, messages are carried over an AF_UNIX socket and handles
-//! are transferred with `DuplicateHandle`; see the `windows` module for details.
+//! passing. On Windows, an AF_UNIX socket bootstraps a mesh connection, which
+//! carries messages and handles over ALPC.
 
 #[cfg(unix)]
 mod unix;
@@ -30,8 +30,9 @@ pub enum SocketError {
     PayloadTooLarge(u32),
     #[error("invalid transport frame: {0}")]
     InvalidFrame(&'static str),
-    #[error("handle transfer failed")]
-    HandleTransfer(#[source] io::Error),
+    #[cfg(windows)]
+    #[error("mesh transport failed")]
+    Mesh(#[source] mesh::RecvError),
 }
 
 impl From<io::Error> for SocketError {

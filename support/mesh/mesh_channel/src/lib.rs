@@ -33,6 +33,7 @@ mod lazy;
 pub mod pipe;
 pub mod rpc;
 
+pub use bidir::Channel as BidirChannel;
 pub use mesh_channel_core::ChannelError;
 pub use mesh_channel_core::ChannelErrorKind;
 pub use mesh_channel_core::OneshotReceiver;

@@ -568,7 +568,7 @@ options:
     #[clap(long = "virtio-blk")]
     pub virtio_blk: Vec<DiskCli>,
 
-    /// Attach a vhost-user device via a Unix socket (AF_UNIX on Windows).
+    /// Attach a vhost-user device via a Unix socket (mesh bootstrap on Windows).
     ///
     /// The first positional argument is the socket path. Options:
     ///

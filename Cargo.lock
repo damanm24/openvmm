@@ -9729,6 +9729,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "guestmem",
  "inspect",
  "pal_async",
@@ -9753,15 +9754,16 @@ version = "0.0.0"
 dependencies = [
  "bitfield-struct 0.11.0",
  "futures",
+ "mesh",
+ "mesh_remote",
  "open_enum",
  "pal_async",
  "pal_event",
  "parking_lot",
  "tempfile",
+ "test_with_tracing",
  "thiserror 2.0.16",
- "tracing",
  "unix_socket",
- "windows-sys 0.61.0",
  "zerocopy",
 ]
 

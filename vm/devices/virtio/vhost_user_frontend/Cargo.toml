@@ -24,6 +24,7 @@ vmcore.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
+futures.workspace = true
 pal_async = { workspace = true, features = ["tests"] }
 test_with_tracing.workspace = true
 vhost_user_backend.workspace = true

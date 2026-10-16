@@ -17,16 +17,13 @@ zerocopy.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 futures.workspace = true
-tracing.workspace = true
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_Networking_WinSock",
-    "Win32_System_Threading",
-] }
+mesh.workspace = true
+mesh_remote.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 pal_event.workspace = true
 tempfile.workspace = true
+test_with_tracing.workspace = true
 
 [lints]
 workspace = true

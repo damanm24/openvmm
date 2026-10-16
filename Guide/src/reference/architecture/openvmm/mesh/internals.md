@@ -156,8 +156,17 @@ waits for connections. This is used when the joining process is not a
 child of the listening process. On Unix, security depends on
 filesystem permissions — the socket path must be in a directory
 accessible only to the intended user (e.g., `$XDG_RUNTIME_DIR` with
-mode `0700`). On Windows, the `MeshSecret` provides cryptographic
-authentication regardless of filesystem permissions.
+mode `0700`). On Windows, the `MeshSecret` authenticates subsequent ALPC
+connections, but the bootstrap socket distributes invitations containing that
+secret. Its parent directory must therefore restrict access to intended
+participants.
+
+Windows callers with an already-connected AF_UNIX socket can use
+`AlpcNode::invite_over_socket()` and `AlpcNode::join_by_stream()`. The socket is
+only used for the invitation; messages and handles then use ALPC. For example,
+the Windows vhost-user frontend invites its external backend this way. This
+does not use `PointToPointMesh`, whose generic byte-stream transport cannot
+carry OS handles.
 
 ### Process lifecycle
 

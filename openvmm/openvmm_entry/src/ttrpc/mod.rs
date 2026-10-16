@@ -2501,7 +2501,7 @@ fn build_serial_backend(
 }
 
 /// Builds a vhost-user-backed virtio device. The backend is reached over a
-/// Unix domain socket (AF_UNIX on Windows).
+/// Unix domain socket (mesh bootstrap on Windows).
 fn build_vhost_user_device(
     vhost_user: vmservice::VhostUser,
 ) -> anyhow::Result<Resource<VirtioDeviceHandle>> {

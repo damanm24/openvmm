@@ -43,7 +43,9 @@ async fn connect_frontend(
     let stream = UnixStream::from(socket_fd);
     let polled =
         PolledSocket::new(&driver, stream).context("failed to register vhost-user socket")?;
-    let socket = VhostUserSocket::new(polled);
+    let socket = VhostUserSocket::connect(driver.clone(), polled)
+        .await
+        .context("failed to establish vhost-user transport")?;
 
     VhostUserFrontend::from_socket(driver, socket, config)
         .await

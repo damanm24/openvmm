@@ -7,7 +7,7 @@
 //! and the vhost-user frontend (`vhost_user_frontend`).
 
 #![cfg(any(target_os = "linux", windows))]
-#![cfg_attr(not(windows), forbid(unsafe_code))]
+#![forbid(unsafe_code)]
 #![expect(missing_docs)]
 
 pub mod protocol;

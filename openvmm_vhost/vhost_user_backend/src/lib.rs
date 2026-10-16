@@ -73,7 +73,7 @@ impl VhostUserDeviceServer {
     /// returns `Ok(())`.
     pub async fn run(
         mut self,
-        driver: &(impl SpawnDriver + ?Sized),
+        driver: &(impl SpawnDriver + Clone),
         path: &Path,
     ) -> anyhow::Result<()> {
         // Remove stale socket file if it exists.
@@ -86,7 +86,7 @@ impl VhostUserDeviceServer {
 
         let (stream, _addr) = listener.accept().await?;
         let polled = PolledSocket::new(driver, stream)?;
-        let socket = VhostUserSocket::new(polled);
+        let socket = VhostUserSocket::accept(driver.clone(), polled).await?;
 
         tracing::info!("vhost-user client connected");
 
@@ -791,9 +791,14 @@ mod tests {
         }
     }
 
-    /// Helper: create a Unix socket pair for testing.
-    fn socket_pair() -> (UnixStream, UnixStream) {
-        UnixStream::pair().expect("socketpair failed")
+    /// Helper: create a connected transport pair for testing.
+    async fn socket_pair(driver: &DefaultDriver) -> (VhostUserSocket, VhostUserSocket) {
+        let (frontend, backend) = UnixStream::pair().expect("socketpair failed");
+        let (frontend, backend) = futures::join!(
+            VhostUserSocket::connect(driver.clone(), PolledSocket::new(driver, frontend).unwrap(),),
+            VhostUserSocket::accept(driver.clone(), PolledSocket::new(driver, backend).unwrap(),),
+        );
+        (frontend.unwrap(), backend.unwrap())
     }
 
     /// Helper: send a vhost-user message on the frontend socket.
@@ -832,17 +837,11 @@ mod tests {
 
     #[async_test]
     async fn test_protocol_handshake(driver: DefaultDriver) {
-        let (frontend_stream, backend_stream) = socket_pair();
-
-        let backend_polled = PolledSocket::new(&driver, backend_stream).unwrap();
-        let backend_socket = VhostUserSocket::new(backend_polled);
+        let (frontend, backend_socket) = socket_pair(&driver).await;
 
         let server = VhostUserDeviceServer::new(Box::new(MockDevice::new()));
 
         // Frontend side: drive the handshake.
-        let frontend_polled = PolledSocket::new(&driver, frontend_stream).unwrap();
-        let frontend = VhostUserSocket::new(frontend_polled);
-
         let frontend_task = async {
             // GET_FEATURES
             let reply = send_and_recv(&frontend, VhostUserRequestCode::GET_FEATURES, &[]).await;
@@ -987,9 +986,7 @@ mod tests {
 
     /// Helper: send SET_MEM_TABLE with one region backed by shared memory.
     ///
-    /// Returns the region handle, which must be kept open until the backend
-    /// has processed the message (handles may be pulled by the receiver on
-    /// Windows).
+    /// Returns the region handle so the test can retain the backing memory.
     async fn send_mem_table(frontend: &VhostUserSocket, region_size: usize) -> OwnedOsHandle {
         let fd = make_memfd(region_size);
         let payload = mem_table_payload(0, region_size as u64, 0x1000_0000);
@@ -1005,8 +1002,7 @@ mod tests {
 
     /// Helper: set up and enable queue 0 with dummy addresses and eventfds.
     ///
-    /// Returns the kick and call events, which must be kept open until the
-    /// backend has processed the messages.
+    /// Returns the kick and call events for the test to retain.
     async fn setup_and_enable_queue(frontend: &VhostUserSocket) -> [Event; 2] {
         // SET_VRING_NUM
         let vring_num = VhostUserVringState { index: 0, num: 256 };
@@ -1143,13 +1139,8 @@ mod tests {
             log: log.clone(),
         };
 
-        let (frontend_stream, backend_stream) = socket_pair();
-        let backend_polled = PolledSocket::new(&driver, backend_stream).unwrap();
-        let backend_socket = VhostUserSocket::new(backend_polled);
+        let (frontend, backend_socket) = socket_pair(&driver).await;
         let server = VhostUserDeviceServer::new(Box::new(device));
-
-        let frontend_polled = PolledSocket::new(&driver, frontend_stream).unwrap();
-        let frontend = VhostUserSocket::new(frontend_polled);
 
         let frontend_task = async {
             do_handshake(&frontend).await;

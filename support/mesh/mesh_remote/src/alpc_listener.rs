@@ -140,6 +140,24 @@ impl PendingMeshConnection {
 }
 
 impl AlpcNode {
+    /// Invite a peer over an already-connected Unix socket.
+    ///
+    /// The socket is only used to send the invitation. Subsequent messages
+    /// and OS handles are carried by ALPC. The socket must be accessible
+    /// only to intended mesh participants, just like a mesh listener.
+    pub async fn invite_over_socket(
+        &self,
+        stream: PolledSocket<UnixStream>,
+        port: Port,
+    ) -> Result<(), FinishError> {
+        PendingMeshConnection {
+            stream,
+            inviter: self.inviter(),
+        }
+        .finish(port)
+        .await
+    }
+
     /// Listen for mesh connections on a Unix socket.
     ///
     /// This is a convenience method that extracts an inviter and creates an
@@ -166,10 +184,22 @@ impl AlpcNode {
         path: &Path,
         port: Port,
     ) -> Result<Self, JoinBySocketError> {
-        let mut stream = PolledSocket::<UnixStream>::connect_unix(&driver, path)
+        let stream = PolledSocket::<UnixStream>::connect_unix(&driver, path)
             .await
             .map_err(JoinBySocketError::Connect)?;
 
+        Self::join_by_stream(driver, stream, port).await
+    }
+
+    /// Join a mesh using an invitation received on an already-connected socket.
+    ///
+    /// The peer must call [`AlpcNode::invite_over_socket`]. The socket is
+    /// dropped after the handshake; messages and handles then use ALPC.
+    pub async fn join_by_stream(
+        driver: impl Driver + Spawn + Clone,
+        mut stream: PolledSocket<UnixStream>,
+        port: Port,
+    ) -> Result<Self, JoinBySocketError> {
         // Read the length-prefixed invitation: [4 bytes LE length][data].
         let mut len_buf = [0u8; 4];
         stream
@@ -234,6 +264,39 @@ mod tests {
     #[derive(Debug, PartialEq, Protobuf)]
     struct TestMessage {
         value: u32,
+    }
+
+    #[async_test]
+    async fn test_connected_socket_transfers_handles(driver: DefaultDriver) {
+        use std::os::windows::io::AsHandle;
+        use std::os::windows::io::OwnedHandle;
+
+        let (left, right) = UnixStream::pair().unwrap();
+        let leader = AlpcNode::new_named(driver.clone()).unwrap();
+        let (send, remote_recv) = mesh_channel::channel::<OwnedHandle>();
+        let (remote_send, mut recv) = mesh_channel::channel::<OwnedHandle>();
+        let (invited, peer) = futures::join!(
+            leader.invite_over_socket(
+                PolledSocket::new(&driver, left).unwrap(),
+                remote_recv.into(),
+            ),
+            AlpcNode::join_by_stream(
+                driver.clone(),
+                PolledSocket::new(&driver, right).unwrap(),
+                remote_send.into(),
+            ),
+        );
+        invited.unwrap();
+        let peer = peer.unwrap();
+        let event = pal_event::Event::new();
+        send.send(event.as_handle().try_clone_to_owned().unwrap());
+        let received = pal_event::Event::from(recv.recv().await.unwrap());
+        event.signal();
+        assert!(received.try_wait());
+        drop(send);
+        drop(recv);
+        peer.shutdown().await;
+        leader.shutdown().await;
     }
 
     #[async_test]

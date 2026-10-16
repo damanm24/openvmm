@@ -7,6 +7,7 @@ use super::MAX_PAYLOAD_SIZE;
 use super::SocketError;
 use crate::protocol::VHOST_USER_MAX_FDS;
 use crate::protocol::VhostUserMsgHeader;
+use pal_async::driver::SpawnDriver;
 use pal_async::interest::InterestSlot;
 use pal_async::interest::PollEvents;
 use pal_async::socket::PolledSocket;
@@ -34,6 +35,22 @@ pub struct VhostUserSocket {
 }
 
 impl VhostUserSocket {
+    /// Wrap the frontend side of a connected Unix socket.
+    pub async fn connect(
+        _driver: impl SpawnDriver + Clone,
+        socket: PolledSocket<UnixStream>,
+    ) -> Result<Self, SocketError> {
+        Ok(Self::new(socket))
+    }
+
+    /// Wrap the backend side of a connected Unix socket.
+    pub async fn accept(
+        _driver: impl SpawnDriver + Clone,
+        socket: PolledSocket<UnixStream>,
+    ) -> Result<Self, SocketError> {
+        Ok(Self::new(socket))
+    }
+
     /// Wrap a connected `UnixStream` in an async vhost-user socket.
     pub fn new(socket: PolledSocket<UnixStream>) -> Self {
         Self {

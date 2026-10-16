@@ -14,6 +14,8 @@
 //!
 //! # Channels
 //!
+//! - [`BidirChannel`] — a low-level bidirectional channel that can carry
+//!   messages and OS resources in both directions.
 //! - [`channel()`] — multi-producer channel (`Sender<T>` / `Receiver<T>`).
 //! - [`oneshot()`] — single-use transfer (`OneshotSender<T>` /
 //!   `OneshotReceiver<T>`).
@@ -57,6 +59,7 @@ pub mod payload {
     pub use mesh_protobuf::*;
 }
 
+pub use mesh_channel::BidirChannel;
 pub use mesh_channel::ChannelError;
 pub use mesh_channel::ChannelErrorKind;
 pub use mesh_channel::OneshotReceiver;
