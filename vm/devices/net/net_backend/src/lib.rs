@@ -55,6 +55,7 @@ use mesh::rpc::Rpc;
 use mesh::rpc::RpcSend;
 use null::NullEndpoint;
 use pal_async::driver::Driver;
+use std::collections::VecDeque;
 use std::future::pending;
 use std::num::NonZeroU16;
 use std::sync::Arc;
@@ -222,6 +223,11 @@ pub trait Queue: Send + InspectMut {
     fn rx_avail(&mut self, pool: &mut dyn BufferAccess, done: &[RxId]);
 
     /// Polls the device for receives.
+    ///
+    /// Writes completed buffer IDs into `buffers`, grouped in packet order.
+    /// Each returned completion describes the next `buffer_count` IDs, starting
+    /// with `id`. A packet must not be split across calls, and its buffers must
+    /// be consecutive in the order supplied to [`Self::rx_avail`].
     fn rx_poll(
         &mut self,
         pool: &mut dyn BufferAccess,
@@ -317,6 +323,12 @@ pub trait BufferAccess {
         self.write_packet(id, metadata, &data);
     }
 
+    /// Writes a packet into consecutive receive buffers. Only the first buffer
+    /// contains frontend metadata; intermediate buffers must be filled.
+    ///
+    /// Returns false without modifying buffers if the request is rejected.
+    /// True transfers all IDs to the completion path, including on guest-memory
+    /// failure: the frontend must then drop the entire packet.
     fn write_packet_across_multiple_buffers(
         &mut self,
         ids: &[RxId],
@@ -329,6 +341,75 @@ pub trait BufferAccess {
         self.write_packet_segments(*id, metadata, segments);
         true
     }
+}
+
+/// Writes a packet into the shortest sufficient prefix of `available`.
+///
+/// On insufficient capacity, drops the packet without consuming any buffers.
+/// Returned IDs must be completed together, even if the frontend's guest-memory
+/// writes failed. Frontends without multi-buffer support retain single-buffer
+/// receive semantics.
+pub fn write_rx_packet(
+    pool: &mut dyn BufferAccess,
+    available: &mut VecDeque<RxId>,
+    metadata: &RxMetadata,
+    segments: &[&[u8]],
+) -> Option<Vec<RxId>> {
+    let max_buffers = if pool.supports_multiple_buffers() {
+        usize::from(u16::MAX)
+    } else {
+        1
+    };
+    let mut remaining = metadata.len;
+    for (index, &id) in available.iter().take(max_buffers).enumerate() {
+        remaining = remaining.saturating_sub(pool.packet_buffer_capacity(id, index) as usize);
+        if remaining != 0 {
+            continue;
+        }
+        let ids: Vec<_> = available.iter().take(index + 1).copied().collect();
+        if ids.len() == 1 {
+            pool.write_packet_segments(id, metadata, segments);
+        } else if !pool.write_packet_across_multiple_buffers(&ids, metadata, segments) {
+            tracelimit::warn_ratelimited!("dropping RX packet: buffer pool rejected packet");
+            return None;
+        }
+        available.drain(..ids.len());
+        return Some(ids);
+    }
+    tracelimit::warn_ratelimited!(
+        len = metadata.len,
+        "dropping RX packet: insufficient receive buffer capacity"
+    );
+    None
+}
+
+/// Drains whole packets into a frontend's completion buffer.
+///
+/// Each entry in `ready` must contain between one and `u16::MAX` IDs.
+pub fn drain_rx_packets(
+    ready: &mut VecDeque<Vec<RxId>>,
+    buffers: &mut [RxId],
+) -> Vec<RxBufferCompletion> {
+    let mut completions = Vec::new();
+    let mut remaining = buffers;
+    while let Some(ids) = ready.front() {
+        if ids.len() > remaining.len() {
+            break;
+        }
+        let count = u16::try_from(ids.len())
+            .ok()
+            .and_then(NonZeroU16::new)
+            .expect("invalid receive completion buffer count");
+        let (output, rest) = remaining.split_at_mut(ids.len());
+        output.copy_from_slice(ids);
+        remaining = rest;
+        completions.push(RxBufferCompletion {
+            id: ids[0],
+            buffer_count: count,
+        });
+        ready.pop_front();
+    }
+    completions
 }
 
 /// Linearizes the next packet in a list of segments, returning the buffer data

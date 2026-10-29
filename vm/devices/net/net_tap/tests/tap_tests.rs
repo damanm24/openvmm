@@ -440,6 +440,61 @@ mod tap_tests {
         assert_eq!(packets[0].0, usable.0);
     }
 
+    async fn test_tap_rx_mergeable_buffers(driver: DefaultDriver) {
+        let mut endpoint = new_endpoint("tap0").unwrap();
+        disable_ipv6("tap0");
+        configure_tap("tap0", "10.0.0.1/24");
+        let (pool, mem) = make_pool();
+        let mut pool = pool.with_mergeable_buffers();
+        for id in [7, 1] {
+            pool.set_capacity(RxId(id), 64);
+        }
+        let mut queues = Vec::new();
+        endpoint
+            .get_queues(
+                vec![QueueConfig {
+                    driver: Box::new(driver),
+                    enabled_rx_offloads: Default::default(),
+                }],
+                None,
+                &mut queues,
+            )
+            .await
+            .unwrap();
+        let queue = &mut queues[0];
+        queue.rx_avail(&mut pool, &[RxId(7), RxId(1), RxId(3)]);
+        let mut frame = vec![0x5a; 128];
+        frame[..14].copy_from_slice(&[
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 1, 0x88, 0xb5,
+        ]);
+        send_ethernet_frame("tap0", &frame);
+        poll_fn(|cx| queue.poll_ready(cx, &mut pool)).await;
+        assert!(
+            queue
+                .rx_poll(&mut pool, &mut [RxId(0); 1])
+                .unwrap()
+                .is_empty()
+        );
+        let mut ids = [RxId(0); 3];
+        let completions = queue.rx_poll(&mut pool, &mut ids).unwrap();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].buffer_count.get(), 2);
+        assert_eq!(completions[0].id.0, 7);
+        assert_eq!([ids[0].0, ids[1].0], [7, 1]);
+        let mut readback = [0; 128];
+        mem.read_at(7 * 2048, &mut readback[..64]).unwrap();
+        mem.read_at(2048, &mut readback[64..]).unwrap();
+        assert_eq!(readback.as_slice(), frame);
+        assert!(pool.rx_metadata(RxId(3)).is_none());
+
+        send_ethernet_frame("tap0", &frame[..60]);
+        poll_fn(|cx| queue.poll_ready(cx, &mut pool)).await;
+        let completions = queue.rx_poll(&mut pool, &mut ids).unwrap();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].buffer_count.get(), 1);
+        assert_eq!(ids[0].0, 3);
+    }
+
     /// Validates that flooding tx_avail doesn't panic or error — packets are
     /// silently dropped when the kernel buffer fills up.
     async fn test_tap_tx_wouldblock_drops(driver: DefaultDriver) {
@@ -762,6 +817,7 @@ mod tap_tests {
                 "tap_rx_reuses_undersized_buffer",
                 test_tap_rx_reuses_undersized_buffer,
             ),
+            async_trial("tap_rx_mergeable_buffers", test_tap_rx_mergeable_buffers),
             async_trial("tap_tx_wouldblock_drops", test_tap_tx_wouldblock_drops),
             async_trial("tap_tx_with_offloads", test_tap_tx_with_offloads),
             async_trial("tap_tso_ipv4_checksum", test_tap_tso_ipv4_checksum),

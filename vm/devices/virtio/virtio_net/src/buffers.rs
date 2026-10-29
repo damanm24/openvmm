@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::NetworkFeaturesBank0;
 use crate::VirtioNetHeader;
 use crate::VirtioNetHeaderFlags;
 use crate::header_size;
@@ -11,6 +12,7 @@ use net_backend::ETHERNET_HEADER_LEN;
 use net_backend::RxBufferSegment;
 use net_backend::RxId;
 use net_backend::RxMetadata;
+use std::collections::VecDeque;
 use std::num::NonZeroU16;
 use virtio::VirtioQueueCallbackWork;
 use zerocopy::FromZeros;
@@ -20,6 +22,7 @@ struct RxPacket {
     work: VirtioQueueCallbackWork,
     used_len: Option<u32>,
     cap: u32,
+    data_offset: u32,
     write_failed: bool,
 }
 
@@ -29,8 +32,11 @@ struct RxPacket {
 pub struct VirtioWorkPool {
     mem: GuestMemory,
     mergeable_rx_buffers: bool,
+    guest_csum: bool,
     #[inspect(skip)]
     rx_packets: Vec<Option<RxPacket>>,
+    #[inspect(skip)]
+    rx_order: VecDeque<RxId>,
     rx_capacity_drops: u64,
     rx_memory_write_drops: u64,
     rx_incomplete_drops: u64,
@@ -48,19 +54,17 @@ impl VirtioWorkPool {
     }
 
     /// Create a new instance.
-    pub fn new(mem: GuestMemory, queue_size: u16, mergeable_rx_buffers: bool) -> Self {
+    pub fn new(mem: GuestMemory, queue_size: u16, features: NetworkFeaturesBank0) -> Self {
         Self {
             mem,
-            mergeable_rx_buffers,
+            mergeable_rx_buffers: features.mrg_rxbuf(),
+            guest_csum: features.guest_csum(),
             rx_packets: (0..queue_size).map(|_| None).collect(),
+            rx_order: VecDeque::new(),
             rx_capacity_drops: 0,
             rx_memory_write_drops: 0,
             rx_incomplete_drops: 0,
         }
-    }
-
-    fn header_size(&self) -> usize {
-        header_size()
     }
 
     /// Returns a reference to the guest memory.
@@ -68,55 +72,57 @@ impl VirtioWorkPool {
         &self.mem
     }
 
-    /// Fills `buf` with the RxIds of currently available buffers. `buf` must be
+    /// Resets and reposts outstanding buffers in their original available-ring
+    /// order after a backend restart. `buf` must be
     /// at least as big as the virtio queue size, passed to `new()`.
     ///
     /// Returns the number of entries written.
-    pub fn fill_ready(&self, buf: &mut [RxId]) -> usize {
+    pub fn fill_ready(&mut self, buf: &mut [RxId]) -> usize {
         assert!(buf.len() >= self.rx_packets.len());
-        let mut n = 0;
-        for (dest, src) in buf.iter_mut().zip(
-            self.rx_packets
-                .iter()
-                .enumerate()
-                .filter_map(|(i, e)| e.is_some().then_some(RxId(i as u32))),
-        ) {
-            *dest = src;
-            n += 1;
+        for (dest, &id) in buf.iter_mut().zip(&self.rx_order) {
+            let packet = self.rx_packets[id.0 as usize].as_mut().unwrap();
+            packet.used_len = None;
+            packet.write_failed = false;
+            packet.data_offset = header_size() as u32;
+            *dest = id;
         }
-        n
+        self.rx_order.len()
     }
 
     /// Add a virtio work instance to the buffers available for use.
     ///
-    /// Returns `Err` with the work item if the buffer is smaller than the
-    /// virtio-net header and should be dropped in order.
+    /// Returns `Err` with the work item if the chain has an invalid capacity.
+    /// Mergeable buffers need room for the header; nonmergeable buffers also
+    /// need room for an Ethernet header. The caller handles rejection in order.
     pub fn queue_work(
         &mut self,
         work: VirtioQueueCallbackWork,
     ) -> Result<RxId, VirtioQueueCallbackWork> {
         let idx = work.descriptor_index();
-        let header_size = self.header_size();
         let packet = &mut self.rx_packets[idx as usize];
         assert!(packet.is_none(), "RX descriptor {idx} is already tracked");
-        let payload_length = work.get_payload_length(true) as u32;
-        let Some(cap) = payload_length
-            .checked_sub(header_size as u32)
+        let payload_length = work.get_payload_length(true);
+        let Some(cap) = u32::try_from(payload_length)
+            .ok()
+            .and_then(|len| len.checked_sub(header_size() as u32))
             .filter(|&cap| self.mergeable_rx_buffers || cap >= ETHERNET_HEADER_LEN)
         else {
             tracelimit::warn_ratelimited!(
                 len = payload_length,
-                "dropping RX buffer: insufficient capacity"
+                "dropping RX buffer: invalid capacity"
             );
             return Err(work);
         };
         *packet = Some(RxPacket {
             used_len: None,
             cap,
+            data_offset: header_size() as u32,
             write_failed: false,
             work,
         });
-        Ok(RxId(idx.into()))
+        let id = RxId(idx.into());
+        self.rx_order.push_back(id);
+        Ok(id)
     }
 
     /// Take the RX work item for the given packet, returning it with the
@@ -124,6 +130,12 @@ impl VirtioWorkPool {
     /// the descriptor via the queue.
     #[must_use = "caller must complete the returned work via VirtioQueue::complete"]
     pub fn take_rx_work(&mut self, rx_id: RxId) -> (VirtioQueueCallbackWork, u32, bool) {
+        let index = self
+            .rx_order
+            .iter()
+            .position(|id| id.0 == rx_id.0)
+            .expect("valid packet index");
+        self.rx_order.remove(index);
         let packet = self.rx_packets[rx_id.0 as usize]
             .take()
             .expect("valid packet index");
@@ -143,8 +155,10 @@ impl VirtioWorkPool {
     fn write_rx_header(&mut self, id: RxId, metadata: &RxMetadata, buffer_count: NonZeroU16) {
         let checksum = metadata.offload.checksum_metadata();
         let needs_checksum = checksum.is_some();
-        let data_valid =
-            !needs_checksum && metadata.ip_checksum.is_valid() && metadata.l4_checksum.is_valid();
+        let data_valid = self.guest_csum
+            && !needs_checksum
+            && metadata.ip_checksum.is_valid()
+            && metadata.l4_checksum.is_valid();
         let flags = VirtioNetHeaderFlags::new()
             .with_needs_csum(needs_checksum)
             .with_data_valid(data_valid);
@@ -176,13 +190,12 @@ impl VirtioWorkPool {
             num_buffers: buffer_count.get(),
             ..FromZeros::new_zeroed()
         };
-        let header_size = self.header_size();
         let packet = self.rx_packets[id.0 as usize]
             .as_mut()
             .expect("invalid buffer index");
         if let Err(err) = packet
             .work
-            .write(&self.mem, &header.as_bytes()[..header_size])
+            .write(&self.mem, &header.as_bytes()[..header_size()])
         {
             tracelimit::warn_ratelimited!(
                 error = &err as &dyn std::error::Error,
@@ -212,6 +225,15 @@ impl VirtioWorkPool {
             .expect("invalid buffer index")
             .write_failed = true;
     }
+
+    fn fail_packet(&mut self, ids: &[RxId]) {
+        for id in ids {
+            self.rx_packets[id.0 as usize]
+                .as_mut()
+                .expect("invalid buffer index")
+                .write_failed = true;
+        }
+    }
 }
 
 impl BufferAccess for VirtioWorkPool {
@@ -220,7 +242,6 @@ impl BufferAccess for VirtioWorkPool {
     }
 
     fn write_data(&mut self, id: RxId, data: &[u8]) {
-        let header_size = self.header_size();
         let capacity = self.rx_packets[id.0 as usize]
             .as_ref()
             .expect("invalid buffer index")
@@ -233,7 +254,7 @@ impl BufferAccess for VirtioWorkPool {
             .as_mut()
             .expect("invalid buffer index")
             .work
-            .write_at_offset(header_size as u64, &self.mem, data);
+            .write_at_offset(header_size() as u64, &self.mem, data);
         if let Err(err) = result {
             tracelimit::warn_ratelimited!(
                 len = data.len(),
@@ -286,7 +307,7 @@ impl BufferAccess for VirtioWorkPool {
             return;
         }
 
-        let mut offset = self.header_size() as u64;
+        let mut offset = header_size() as u64;
         for segment in segments {
             let result = self.rx_packets[id.0 as usize]
                 .as_mut()
@@ -313,33 +334,46 @@ impl BufferAccess for VirtioWorkPool {
         metadata: &RxMetadata,
         segments: &[&[u8]],
     ) -> bool {
-        if !self.mergeable_rx_buffers {
+        let Some(buffer_count) = u16::try_from(ids.len())
+            .ok()
+            .and_then(NonZeroU16::new)
+            .filter(|count| self.mergeable_rx_buffers || count.get() == 1)
+        else {
+            tracelimit::warn_ratelimited!(
+                count = ids.len(),
+                "dropping RX packet: invalid receive buffer count"
+            );
             return false;
+        };
+        if let [id] = ids {
+            self.write_packet_segments(*id, metadata, segments);
+            return true;
         }
-        let Ok(buffer_count) = u16::try_from(ids.len()) else {
-            return false;
-        };
-        let Some(buffer_count) = NonZeroU16::new(buffer_count) else {
-            return false;
-        };
         let packet_len: usize = segments.iter().map(|segment| segment.len()).sum();
         let total_capacity: usize = ids
             .iter()
             .enumerate()
             .map(|(index, &id)| self.packet_buffer_capacity(id, index) as usize)
             .sum();
-        if packet_len != metadata.len || packet_len > total_capacity {
+        let last_capacity =
+            self.packet_buffer_capacity(*ids.last().unwrap(), ids.len() - 1) as usize;
+        if metadata.offset != 0
+            || packet_len != metadata.len
+            || packet_len > total_capacity
+            || packet_len <= total_capacity - last_capacity
+        {
+            tracelimit::warn_ratelimited!(
+                packet_len,
+                total_capacity,
+                "dropping RX packet: inconsistent multi-buffer receive"
+            );
             return false;
         }
 
         let mut segment_index = 0;
         let mut segment_offset = 0;
         for (buffer_index, &id) in ids.iter().enumerate() {
-            let data_offset = if buffer_index == 0 {
-                self.header_size()
-            } else {
-                0
-            };
+            let data_offset = if buffer_index == 0 { header_size() } else { 0 };
             let capacity = self.packet_buffer_capacity(id, buffer_index) as usize;
             let mut written = 0;
             while written < capacity && segment_index < segments.len() {
@@ -356,8 +390,11 @@ impl BufferAccess for VirtioWorkPool {
                     tracelimit::warn_ratelimited!(
                         len = write_len,
                         error = &err as &dyn std::error::Error,
-                        "rx memory write failure"
+                        "dropping RX packet after guest memory write failure"
                     );
+                    self.fail_memory_write(id);
+                    self.fail_packet(ids);
+                    return true;
                 }
                 written += write_len;
                 segment_offset += write_len;
@@ -366,12 +403,20 @@ impl BufferAccess for VirtioWorkPool {
                     segment_offset = 0;
                 }
             }
-            self.rx_packets[id.0 as usize]
+            let packet = self.rx_packets[id.0 as usize]
                 .as_mut()
-                .expect("invalid buffer index")
-                .used_len = Some((data_offset + written) as u32);
+                .expect("invalid buffer index");
+            packet.data_offset = data_offset as u32;
+            packet.used_len = Some((data_offset + written) as u32);
         }
         self.write_rx_header(ids[0], metadata, buffer_count);
+        if self.rx_packets[ids[0].0 as usize]
+            .as_ref()
+            .unwrap()
+            .write_failed
+        {
+            self.fail_packet(ids);
+        }
         true
     }
 
@@ -379,17 +424,29 @@ impl BufferAccess for VirtioWorkPool {
         let packet = self.rx_packets[id.0 as usize]
             .as_ref()
             .expect("invalid buffer index");
-        buf.extend(
-            packet
-                .work
-                .payload
-                .iter()
-                .filter(|x| x.writeable)
-                .map(|p| RxBufferSegment {
-                    gpa: p.address,
-                    len: p.length,
-                }),
-        );
+        if packet.write_failed {
+            return;
+        }
+        let mut skip = packet.data_offset;
+        let mut remaining = packet
+            .used_len
+            .map(|len| len - packet.data_offset)
+            .unwrap_or(packet.cap);
+        for p in packet.work.payload.iter().filter(|p| p.writeable) {
+            let offset = skip.min(p.length);
+            skip -= offset;
+            let len = (p.length - offset).min(remaining);
+            if len != 0 {
+                buf.push(RxBufferSegment {
+                    gpa: p.address + u64::from(offset),
+                    len,
+                });
+                remaining -= len;
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
     }
 
     fn capacity(&self, id: RxId) -> u32 {
@@ -408,7 +465,7 @@ impl BufferAccess for VirtioWorkPool {
         if buffer_index == 0 {
             capacity
         } else if self.mergeable_rx_buffers {
-            capacity + self.header_size() as u32
+            capacity + header_size() as u32
         } else {
             0
         }
@@ -434,6 +491,6 @@ impl BufferAccess for VirtioWorkPool {
         self.rx_packets[id.0 as usize]
             .as_mut()
             .expect("invalid buffer index")
-            .used_len = Some(metadata.len as u32 + self.header_size() as u32);
+            .used_len = Some(metadata.len as u32 + header_size() as u32);
     }
 }

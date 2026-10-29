@@ -529,11 +529,11 @@ impl ActiveState {
         mem: GuestMemory,
         rx_queue_size: u16,
         tx_queue_size: u16,
-        mergeable_rx_buffers: bool,
+        features: NetworkFeaturesBank0,
     ) -> Self {
         Self {
             pending_tx_packets: (0..tx_queue_size).map(|_| None).collect(),
-            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size, mergeable_rx_buffers),
+            pending_rx_packets: VirtioWorkPool::new(mem, rx_queue_size, features),
             data: ProcessingData::new(rx_queue_size, tx_queue_size),
             stats: Default::default(),
         }
@@ -705,7 +705,7 @@ impl Device {
             guest_memory.clone(),
             virtio_state.rx_queue_size,
             virtio_state.tx_queue_size,
-            negotiated_features.mrg_rxbuf(),
+            negotiated_features,
         );
         let worker = Worker {
             virtio_state,
@@ -882,6 +882,8 @@ struct VirtioState {
 enum WorkerError {
     #[error("virtio queue processing error")]
     VirtioQueue(#[source] std::io::Error),
+    #[error("invalid mergeable receive buffer")]
+    InvalidRxBuffer,
     #[error("endpoint")]
     Endpoint(#[source] anyhow::Error),
     #[error("cancelled")]
@@ -1334,6 +1336,11 @@ impl Worker {
             match self.active_state.pending_rx_packets.queue_work(work) {
                 Ok(rx_id) => rx_ids.push(rx_id),
                 Err(work) => {
+                    // Skipping a malformed buffer could interleave its completion
+                    // with the buffers of a merged packet. Retire the worker instead.
+                    if self.negotiated_features.mrg_rxbuf() {
+                        return Err(WorkerError::InvalidRxBuffer);
+                    }
                     // Complete (drop) the buffer in avail order via the in-order
                     // completion discipline. Reason traced by callee.
                     self.active_state.stats.rx_dropped.increment();
@@ -1371,17 +1378,33 @@ impl Worker {
             let ready_ids = &state.data.rx_ready[buffer_offset..buffer_offset + buffer_count];
             assert_eq!(ready_ids[0].0, completion.id.0);
             let mut packet_dropped = false;
-            let completions = ready_ids
-                .iter()
-                .map(|ready_id| {
-                    let (work, bytes, dropped) = state.pending_rx_packets.take_rx_work(*ready_id);
-                    packet_dropped |= dropped;
-                    (work.into_completion(), bytes)
-                })
-                .collect();
-            self.virtio_state
-                .rx_in_order
-                .complete_batch(&mut self.virtio_state.rx_queue, completions);
+            if let [id] = ready_ids {
+                let (work, bytes, dropped) = state.pending_rx_packets.take_rx_work(*id);
+                packet_dropped = dropped;
+                self.virtio_state.rx_in_order.complete(
+                    &mut self.virtio_state.rx_queue,
+                    work.into_completion(),
+                    bytes,
+                );
+            } else {
+                let mut completions: Vec<_> = ready_ids
+                    .iter()
+                    .map(|ready_id| {
+                        let (work, bytes, dropped) =
+                            state.pending_rx_packets.take_rx_work(*ready_id);
+                        packet_dropped |= dropped;
+                        (work.into_completion(), bytes)
+                    })
+                    .collect();
+                if packet_dropped {
+                    for (_, bytes) in &mut completions {
+                        *bytes = 0;
+                    }
+                }
+                self.virtio_state
+                    .rx_in_order
+                    .complete_batch(&mut self.virtio_state.rx_queue, completions);
+            }
             buffer_offset += buffer_count;
             if packet_dropped {
                 state.stats.rx_dropped.increment();

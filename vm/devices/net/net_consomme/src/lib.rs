@@ -44,7 +44,6 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 use std::net::SocketAddrV6;
-use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
@@ -780,21 +779,10 @@ impl net_backend::Queue for ConsommeQueue {
         _pool: &mut dyn BufferAccess,
         buffers: &mut [RxId],
     ) -> anyhow::Result<Vec<RxBufferCompletion>> {
-        let mut completions = Vec::new();
-        let mut buffer_offset = 0;
-        while let Some(ids) = self.state.rx_ready.front() {
-            let Some(output) = buffers.get_mut(buffer_offset..buffer_offset + ids.len()) else {
-                break;
-            };
-            output.copy_from_slice(ids);
-            buffer_offset += ids.len();
-            completions.push(RxBufferCompletion {
-                id: ids[0],
-                buffer_count: NonZeroU16::new(ids.len() as u16).unwrap(),
-            });
-            self.state.rx_ready.pop_front();
-        }
-        Ok(completions)
+        Ok(net_backend::drain_rx_packets(
+            &mut self.state.rx_ready,
+            buffers,
+        ))
     }
 
     fn tx_avail(
@@ -872,14 +860,6 @@ impl consomme::Client for Client<'_> {
     }
 
     fn recv_segments(&mut self, segments: &[&[u8]], checksum: &ChecksumState) {
-        let Some(rx_id) = self.state.rx_avail.pop_front() else {
-            // This should be rare, only affecting unbuffered protocols. TCP and
-            // UDP are buffered and they won't indicate packets unless rx_mtu()
-            // returns a non-zero value.
-            self.stats.rx_dropped.increment();
-            return;
-        };
-        let max = self.pool.capacity(rx_id) as usize;
         let len: usize = segments.iter().map(|s| s.len()).sum();
         let metadata = RxMetadata {
             offset: 0,
@@ -905,59 +885,80 @@ impl consomme::Client for Client<'_> {
             vlan: None,
         };
 
-        if len <= max {
-            self.pool.write_packet_segments(rx_id, &metadata, segments);
-            self.state.rx_ready.push_back(vec![rx_id]);
+        if let Some(ids) =
+            net_backend::write_rx_packet(self.pool, &mut self.state.rx_avail, &metadata, segments)
+        {
+            self.state.rx_ready.push_back(ids);
         } else {
-            if !self.pool.supports_multiple_buffers() {
-                tracing::warn!(len, max, "dropping rx packet: packet exceeds rx buffer");
-                self.state.rx_avail.push_front(rx_id);
-                return;
-            }
-
-            let additional_count = self
-                .state
-                .rx_avail
-                .iter()
-                .enumerate()
-                .scan(max, |capacity, (index, &id)| {
-                    *capacity = capacity
-                        .saturating_add(self.pool.packet_buffer_capacity(id, index + 1) as usize);
-                    Some(*capacity)
-                })
-                .position(|capacity| capacity >= len)
-                .map(|index| index + 1);
-
-            let Some(additional_count) = additional_count else {
-                tracing::warn!(len, max, "dropping rx packet: insufficient rx buffers");
-                self.state.rx_avail.push_front(rx_id);
-                return;
-            };
-
-            let rx_ids: Vec<_> = std::iter::once(rx_id)
-                .chain(self.state.rx_avail.drain(..additional_count))
-                .collect();
-
-            if !self
-                .pool
-                .write_packet_across_multiple_buffers(&rx_ids, &metadata, segments)
-            {
-                tracing::warn!(len, max, "dropping rx packet: insufficient rx buffers");
-                for id in rx_ids.into_iter().rev() {
-                    self.state.rx_avail.push_front(id);
-                }
-                return;
-            }
-
-            self.state.rx_ready.push_back(rx_ids);
+            self.stats.rx_dropped.increment();
         }
     }
 
     fn rx_mtu(&mut self) -> usize {
+        if self.pool.supports_multiple_buffers() {
+            let mut capacity = 0usize;
+            for (index, &id) in self.state.rx_avail.iter().enumerate() {
+                capacity =
+                    capacity.saturating_add(self.pool.packet_buffer_capacity(id, index) as usize);
+                if capacity >= consomme::MIN_MTU {
+                    return consomme::MIN_MTU;
+                }
+            }
+            return 0;
+        }
         if let Some(&rx_id) = self.state.rx_avail.front() {
             self.pool.capacity(rx_id) as usize
         } else {
             0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use consomme::Client as _;
+
+    #[pal_async::async_test]
+    async fn mergeable_receive_uses_aggregate_capacity(driver: pal_async::DefaultDriver) {
+        let mut pool = net_backend::tests::Bufs::new(guestmem::GuestMemory::allocate(0x10000))
+            .with_mergeable_buffers();
+        pool.set_capacity(RxId(7), 0);
+        pool.set_capacity(RxId(3), 1000);
+        pool.set_capacity(RxId(1), 1000);
+        let mut state = QueueState {
+            rx_avail: VecDeque::from([RxId(7)]),
+            rx_ready: VecDeque::new(),
+            tx_avail: VecDeque::new(),
+            tx_ready: VecDeque::new(),
+            tx_scratch: Vec::new(),
+        };
+        let mut stats = Stats::default();
+        let mut client = Client {
+            state: &mut state,
+            stats: &mut stats,
+            driver: &driver,
+            pool: &mut pool,
+        };
+        assert_eq!(client.rx_mtu(), 0);
+        client.state.rx_avail.push_back(RxId(3));
+        assert_eq!(client.rx_mtu(), 0);
+        client.state.rx_avail.push_back(RxId(1));
+        assert_eq!(client.rx_mtu(), consomme::MIN_MTU);
+        client.recv_segments(
+            &[&[0x5a; 1000], &[0x42; 500]],
+            &ChecksumState {
+                ipv4: true,
+                tcp: true,
+                udp: false,
+                tso: None,
+                gso: None,
+            },
+        );
+        assert!(client.state.rx_avail.is_empty());
+        let ids = client.state.rx_ready.pop_front().unwrap();
+        assert_eq!(ids.iter().map(|id| id.0).collect::<Vec<_>>(), [7, 3, 1]);
+        assert_eq!(client.rx_mtu(), 0);
+        assert_eq!(pool.rx_metadata(RxId(7)).unwrap().len, 1500);
     }
 }

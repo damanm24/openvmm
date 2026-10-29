@@ -281,7 +281,6 @@ impl PackedQueueCompleteWork {
             };
         }
 
-        atomic::fence(atomic::Ordering::Release);
         for &(index, wrapped_bit, context, bytes_written) in positions.iter().rev() {
             let descriptor = PackedDescriptor::new()
                 .with_buffer_id(context.buffer_id)
@@ -291,8 +290,27 @@ impl PackedQueueCompleteWork {
                         .with_available(wrapped_bit)
                         .with_used(wrapped_bit),
                 );
+            let offset = descriptor_offset(index);
             self.queue_desc
-                .write_plain(descriptor_offset(index), &descriptor)
+                .write_plain(
+                    offset + std::mem::offset_of!(PackedDescriptor, length) as u64,
+                    &descriptor.length,
+                )
+                .map_err(QueueError::Memory)?;
+            self.queue_desc
+                .write_plain(
+                    offset + std::mem::offset_of!(PackedDescriptor, buffer_id) as u64,
+                    &descriptor.buffer_id,
+                )
+                .map_err(QueueError::Memory)?;
+            // Publish flags last, with the packet's first buffer last of all.
+            // Observing it must also make every later buffer visible.
+            atomic::fence(atomic::Ordering::Release);
+            self.queue_desc
+                .write_plain(
+                    offset + std::mem::offset_of!(PackedDescriptor, flags_raw) as u64,
+                    &descriptor.flags_raw,
+                )
                 .map_err(QueueError::Memory)?;
         }
         self.next_index = index;
@@ -306,9 +324,20 @@ impl PackedQueueCompleteWork {
         Ok(match driver_event.flags() {
             EventSuppressionFlags::Disabled => false,
             EventSuppressionFlags::DescriptorIndex if self.use_event_index => {
-                positions.iter().any(|&(index, wrapped_bit, _, _)| {
-                    driver_event.offset() == index && driver_event.wrap() == wrapped_bit
-                })
+                let (first_index, first_wrap, ..) = positions[0];
+                // The event can point inside a chain, not just at a buffer head.
+                let distance = |index: u16, wrap: bool| {
+                    i32::from(index) - i32::from(first_index)
+                        + if wrap != first_wrap {
+                            i32::from(self.queue_size)
+                        } else {
+                            0
+                        }
+                };
+                let event = distance(driver_event.offset(), driver_event.wrap());
+                driver_event.offset() < self.queue_size
+                    && event >= 0
+                    && event < distance(self.next_index, self.wrapped_bit)
             }
             _ => true,
         })

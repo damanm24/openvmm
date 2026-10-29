@@ -483,7 +483,7 @@ impl Queue for PacketCaptureQueue {
                 .unwrap_or(Duration::new(0, 0));
             let snaplen = self.pcap.snaplen.load(Ordering::Relaxed);
             let mut buffer_offset = 0;
-            for completion in &completions {
+            'packet: for completion in &completions {
                 let mut buf = vec![0; snaplen];
                 let mut len = 0;
                 let mut pkt_len = 0;
@@ -500,7 +500,16 @@ impl Queue for PacketCaptureQueue {
                     }
 
                     let copy_length = std::cmp::min(buf.len() - len, segment.len as usize);
-                    let _ = pool.guest_memory().read_at(segment.gpa, &mut buf[len..]);
+                    if let Err(err) = pool
+                        .guest_memory()
+                        .read_at(segment.gpa, &mut buf[len..len + copy_length])
+                    {
+                        tracelimit::warn_ratelimited!(
+                            error = &err as &dyn std::error::Error,
+                            "failed to read receive packet for capture"
+                        );
+                        continue 'packet;
+                    }
                     len += copy_length;
                 }
 

@@ -56,7 +56,6 @@ pub struct InOrderCompletion {
 struct Completed {
     completion: QueueCompletion,
     bytes_written: u32,
-    end_of_batch: bool,
 }
 
 impl InOrderCompletion {
@@ -157,21 +156,42 @@ impl InOrderCompletion {
         *slot = Some(Completed {
             completion,
             bytes_written,
-            end_of_batch: true,
         });
     }
 
-    /// Records and atomically publishes an in-order group of completions.
+    /// Records and atomically publishes a nonempty group of completions.
+    /// The group must be consecutive in consumption order.
     pub fn complete_batch(
         &mut self,
         queue: &mut VirtioQueue,
         completions: Vec<(QueueCompletion, u32)>,
     ) {
-        let last = completions
-            .len()
-            .checked_sub(1)
-            .expect("empty completion batch");
-        for (offset, (completion, bytes_written)) in completions.into_iter().enumerate() {
+        let first = completions.first().expect("empty completion batch");
+        let start = self
+            .order
+            .iter()
+            .position(|&idx| idx == first.0.descriptor_index())
+            .expect("batch must be outstanding");
+        assert!(
+            self.order.len() - start >= completions.len()
+                && self
+                    .order
+                    .iter()
+                    .skip(start)
+                    .zip(&completions)
+                    .all(|(&idx, (completion, _))| idx == completion.descriptor_index()),
+            "batch must be consecutive in consumption order"
+        );
+        if start == 0 {
+            for (completion, _) in &completions {
+                self.order.pop_front();
+                self.in_flight[completion.descriptor_index() as usize] = false;
+            }
+            queue.complete_prepared_batch(completions);
+            self.drain_completed_prefix(queue);
+            return;
+        }
+        for (completion, bytes_written) in completions {
             let idx = completion.descriptor_index();
             let slot = self
                 .completed
@@ -184,7 +204,6 @@ impl InOrderCompletion {
             *slot = Some(Completed {
                 completion,
                 bytes_written,
-                end_of_batch: offset == last,
             });
         }
         self.drain_completed_prefix(queue);
@@ -194,28 +213,13 @@ impl InOrderCompletion {
     /// of the consumption order, in order.
     fn drain_completed_prefix(&mut self, queue: &mut VirtioQueue) {
         let mut ready = Vec::new();
-        loop {
-            let mut batch_len = 0;
-            let mut complete_batch = false;
-            for &idx in &self.order {
-                let Some(completed) = &self.completed[idx as usize] else {
-                    break;
-                };
-                batch_len += 1;
-                if completed.end_of_batch {
-                    complete_batch = true;
-                    break;
-                }
-            }
-            if !complete_batch {
+        while let Some(&idx) = self.order.front() {
+            let Some(completed) = self.completed[idx as usize].take() else {
                 break;
-            }
-            for _ in 0..batch_len {
-                let idx = self.order.pop_front().unwrap();
-                let completed = self.completed[idx as usize].take().unwrap();
-                ready.push((completed.completion, completed.bytes_written));
-                self.in_flight[idx as usize] = false;
-            }
+            };
+            self.order.pop_front();
+            ready.push((completed.completion, completed.bytes_written));
+            self.in_flight[idx as usize] = false;
         }
         if !ready.is_empty() {
             queue.complete_prepared_batch(ready);
