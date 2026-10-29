@@ -37,6 +37,8 @@ pub struct VirtioWorkPool {
     rx_packets: Vec<Option<RxPacket>>,
     #[inspect(skip)]
     rx_order: VecDeque<RxId>,
+    #[inspect(skip)]
+    rx_write_ranges: Vec<RxBufferSegment>,
     rx_capacity_drops: u64,
     rx_memory_write_drops: u64,
     rx_incomplete_drops: u64,
@@ -61,6 +63,7 @@ impl VirtioWorkPool {
             guest_csum: features.guest_csum(),
             rx_packets: (0..queue_size).map(|_| None).collect(),
             rx_order: VecDeque::new(),
+            rx_write_ranges: Vec::new(),
             rx_capacity_drops: 0,
             rx_memory_write_drops: 0,
             rx_incomplete_drops: 0,
@@ -370,44 +373,34 @@ impl BufferAccess for VirtioWorkPool {
             return false;
         }
 
-        let mut segment_index = 0;
-        let mut segment_offset = 0;
+        let mut remaining = packet_len;
         for (buffer_index, &id) in ids.iter().enumerate() {
             let data_offset = if buffer_index == 0 { header_size() } else { 0 };
             let capacity = self.packet_buffer_capacity(id, buffer_index) as usize;
-            let mut written = 0;
-            while written < capacity && segment_index < segments.len() {
-                let segment = &segments[segment_index][segment_offset..];
-                let write_len = segment.len().min(capacity - written);
-                let packet = self.rx_packets[id.0 as usize]
-                    .as_mut()
-                    .expect("invalid buffer index");
-                if let Err(err) = packet.work.write_at_offset(
-                    (data_offset + written) as u64,
-                    &self.mem,
-                    &segment[..write_len],
-                ) {
-                    tracelimit::warn_ratelimited!(
-                        len = write_len,
-                        error = &err as &dyn std::error::Error,
-                        "dropping RX packet after guest memory write failure"
-                    );
-                    self.fail_memory_write(id);
-                    self.fail_packet(ids);
-                    return true;
-                }
-                written += write_len;
-                segment_offset += write_len;
-                if segment_offset == segments[segment_index].len() {
-                    segment_index += 1;
-                    segment_offset = 0;
-                }
-            }
+            let written = capacity.min(remaining);
+            remaining -= written;
             let packet = self.rx_packets[id.0 as usize]
                 .as_mut()
                 .expect("invalid buffer index");
             packet.data_offset = data_offset as u32;
             packet.used_len = Some((data_offset + written) as u32);
+        }
+        let mut ranges = std::mem::take(&mut self.rx_write_ranges);
+        for &id in ids {
+            self.push_guest_addresses(id, &mut ranges);
+        }
+        let result = write_guest_segments(&self.mem, &ranges, segments);
+        ranges.clear();
+        self.rx_write_ranges = ranges;
+        if let Err(err) = result {
+            tracelimit::warn_ratelimited!(
+                len = packet_len,
+                error = &err as &dyn std::error::Error,
+                "dropping RX packet after guest memory write failure"
+            );
+            self.fail_memory_write(ids[0]);
+            self.fail_packet(ids);
+            return true;
         }
         self.write_rx_header(ids[0], metadata, buffer_count);
         if self.rx_packets[ids[0].0 as usize]
@@ -417,6 +410,7 @@ impl BufferAccess for VirtioWorkPool {
         {
             self.fail_packet(ids);
         }
+
         true
     }
 
@@ -438,7 +432,7 @@ impl BufferAccess for VirtioWorkPool {
             let len = (p.length - offset).min(remaining);
             if len != 0 {
                 buf.push(RxBufferSegment {
-                    gpa: p.address + u64::from(offset),
+                    gpa: p.address.saturating_add(u64::from(offset)),
                     len,
                 });
                 remaining -= len;
@@ -493,4 +487,40 @@ impl BufferAccess for VirtioWorkPool {
             .expect("invalid buffer index")
             .used_len = Some(metadata.len as u32 + header_size() as u32);
     }
+}
+
+fn write_guest_segments(
+    mem: &GuestMemory,
+    ranges: &[RxBufferSegment],
+    segments: &[&[u8]],
+) -> Result<(), guestmem::GuestMemoryError> {
+    let mut ranges = ranges.iter().peekable();
+    let mut segment_index = 0;
+    let mut segment_offset = 0;
+    while let Some(range) = ranges.next() {
+        let mut gpa = range.gpa;
+        let mut len = range.len as usize;
+        // Guest buffers can be adjacent page fragments. Copy contiguous runs
+        // together rather than restarting the copy for each virtio buffer.
+        while let Some(next) = ranges.peek() {
+            if gpa.checked_add(len as u64) != Some(next.gpa) {
+                break;
+            }
+            len += next.len as usize;
+            ranges.next();
+        }
+        while len != 0 {
+            let segment = &segments[segment_index][segment_offset..];
+            let write_len = segment.len().min(len);
+            mem.write_at(gpa, &segment[..write_len])?;
+            gpa = gpa.saturating_add(write_len as u64);
+            len -= write_len;
+            segment_offset += write_len;
+            if segment_offset == segments[segment_index].len() {
+                segment_index += 1;
+                segment_offset = 0;
+            }
+        }
+    }
+    Ok(())
 }

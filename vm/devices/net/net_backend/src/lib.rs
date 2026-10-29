@@ -343,6 +343,28 @@ pub trait BufferAccess {
     }
 }
 
+/// Returns the shortest FIFO prefix that can hold `len` packet bytes.
+pub fn rx_packet_buffer_count(
+    pool: &dyn BufferAccess,
+    available: &VecDeque<RxId>,
+    len: usize,
+) -> Option<usize> {
+    let max_buffers = if pool.supports_multiple_buffers() {
+        usize::from(u16::MAX)
+    } else {
+        1
+    };
+    let mut remaining = len;
+    for (index, &id) in available.iter().take(max_buffers).enumerate() {
+        remaining = remaining.saturating_sub(pool.packet_buffer_capacity(id, index) as usize);
+        if remaining != 0 {
+            continue;
+        }
+        return Some(index + 1);
+    }
+    None
+}
+
 /// Writes a packet into the shortest sufficient prefix of `available`.
 ///
 /// On insufficient capacity, drops the packet without consuming any buffers.
@@ -355,32 +377,22 @@ pub fn write_rx_packet(
     metadata: &RxMetadata,
     segments: &[&[u8]],
 ) -> Option<Vec<RxId>> {
-    let max_buffers = if pool.supports_multiple_buffers() {
-        usize::from(u16::MAX)
-    } else {
-        1
+    let Some(count) = rx_packet_buffer_count(pool, available, metadata.len) else {
+        tracelimit::warn_ratelimited!(
+            len = metadata.len,
+            "dropping RX packet: insufficient receive buffer capacity"
+        );
+        return None;
     };
-    let mut remaining = metadata.len;
-    for (index, &id) in available.iter().take(max_buffers).enumerate() {
-        remaining = remaining.saturating_sub(pool.packet_buffer_capacity(id, index) as usize);
-        if remaining != 0 {
-            continue;
-        }
-        let ids: Vec<_> = available.iter().take(index + 1).copied().collect();
-        if ids.len() == 1 {
-            pool.write_packet_segments(id, metadata, segments);
-        } else if !pool.write_packet_across_multiple_buffers(&ids, metadata, segments) {
-            tracelimit::warn_ratelimited!("dropping RX packet: buffer pool rejected packet");
-            return None;
-        }
-        available.drain(..ids.len());
-        return Some(ids);
+    let ids: Vec<_> = available.iter().take(count).copied().collect();
+    if let [id] = ids.as_slice() {
+        pool.write_packet_segments(*id, metadata, segments);
+    } else if !pool.write_packet_across_multiple_buffers(&ids, metadata, segments) {
+        tracelimit::warn_ratelimited!("dropping RX packet: buffer pool rejected packet");
+        return None;
     }
-    tracelimit::warn_ratelimited!(
-        len = metadata.len,
-        "dropping RX packet: insufficient receive buffer capacity"
-    );
-    None
+    available.drain(..count);
+    Some(ids)
 }
 
 /// Drains whole packets into a frontend's completion buffer.

@@ -226,6 +226,7 @@ impl PackedQueueCompleteWork {
             .with_length(bytes_written)
             .with_flags(
                 DescriptorFlags::new()
+                    .with_write(bytes_written != 0)
                     .with_available(self.wrapped_bit)
                     .with_used(self.wrapped_bit),
             );
@@ -282,34 +283,22 @@ impl PackedQueueCompleteWork {
         }
 
         for &(index, wrapped_bit, context, bytes_written) in positions.iter().rev() {
-            let descriptor = PackedDescriptor::new()
-                .with_buffer_id(context.buffer_id)
-                .with_length(bytes_written)
-                .with_flags(
-                    DescriptorFlags::new()
-                        .with_available(wrapped_bit)
-                        .with_used(wrapped_bit),
-                );
+            let flags = DescriptorFlags::new()
+                .with_write(bytes_written != 0)
+                .with_available(wrapped_bit)
+                .with_used(wrapped_bit);
+            let used_fields = u64::from(bytes_written)
+                | (u64::from(context.buffer_id) << 32)
+                | (u64::from(u16::from(flags)) << 48);
             let offset = descriptor_offset(index);
-            self.queue_desc
-                .write_plain(
-                    offset + std::mem::offset_of!(PackedDescriptor, length) as u64,
-                    &descriptor.length,
-                )
-                .map_err(QueueError::Memory)?;
-            self.queue_desc
-                .write_plain(
-                    offset + std::mem::offset_of!(PackedDescriptor, buffer_id) as u64,
-                    &descriptor.buffer_id,
-                )
-                .map_err(QueueError::Memory)?;
-            // Publish flags last, with the packet's first buffer last of all.
-            // Observing it must also make every later buffer visible.
+            // The aligned eight-byte write atomically publishes length, ID,
+            // and flags. Publish the first buffer last so the driver cannot
+            // observe a partially completed multi-buffer request (§2.8.9).
             atomic::fence(atomic::Ordering::Release);
             self.queue_desc
                 .write_plain(
-                    offset + std::mem::offset_of!(PackedDescriptor, flags_raw) as u64,
-                    &descriptor.flags_raw,
+                    offset + std::mem::offset_of!(PackedDescriptor, length) as u64,
+                    &used_fields.to_le(),
                 )
                 .map_err(QueueError::Memory)?;
         }

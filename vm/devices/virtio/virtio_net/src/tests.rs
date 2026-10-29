@@ -1112,6 +1112,20 @@ async fn rx_out_of_order_completion_published_in_order(driver: DefaultDriver) {
             .unwrap();
         assert_eq!(&readback, payload, "buffer {i} data mismatch");
     }
+
+    for i in 0u16..3 {
+        harness.post_rx_buffer_and_signal(i, buffer_size);
+        handle.wait_for_rx_pending().await;
+    }
+    for i in [2, 0, 1] {
+        handle.inject_rx_packet_for(RxId(i), payloads[i as usize]);
+    }
+    for (i, payload) in payloads.iter().enumerate() {
+        assert_eq!(
+            harness.wait_for_rx_used().await,
+            (i as u16, NET_HEADER_SIZE + payload.len() as u32)
+        );
+    }
 }
 
 /// RX buffers without room for an Ethernet header are dropped, but their
@@ -2341,6 +2355,7 @@ async fn rx_mergeable_memory_failure_drops_whole_packet(driver: DefaultDriver) {
         let mut handle = harness
             .enable_and_get_handle_with_features(mergeable_features())
             .await;
+        let before_gpa = harness.post_rx_buffer_and_signal(0, 128);
         let header_gpa = if fail_header {
             TOTAL_MEM_SIZE as u64
         } else {
@@ -2394,9 +2409,11 @@ async fn rx_mergeable_memory_failure_drops_whole_packet(driver: DefaultDriver) {
             &mut harness.rx_avail_idx,
         );
         harness.post_rx_buffer_and_signal(1, 64);
-        for _ in 0..3 {
+        let after_gpa = harness.post_rx_buffer_and_signal(2, 128);
+        for _ in 0..5 {
             handle.wait_for_rx_pending().await;
         }
+        handle.inject_rx_packet(&[0x11; 60]);
         handle.inject_mergeable_rx_packet(
             3,
             &[0x5a; 100],
@@ -2405,8 +2422,14 @@ async fn rx_mergeable_memory_failure_drops_whole_packet(driver: DefaultDriver) {
                 ..Default::default()
             },
         );
+        handle.inject_rx_packet(&[0x22; 60]);
+        assert_eq!(harness.wait_for_rx_used().await, (0, 72));
         for id in [7, 3, 1] {
             assert_eq!(harness.wait_for_rx_used().await, (id, 0));
+        }
+        assert_eq!(harness.wait_for_rx_used().await, (2, 72));
+        for gpa in [before_gpa, after_gpa] {
+            assert_eq!(read_virtio_header(&harness.mem, gpa).num_buffers, 1);
         }
         let gpa = harness.post_rx_buffer_and_signal(7, 128);
         handle.wait_for_rx_pending().await;
@@ -2462,80 +2485,95 @@ fn rx_test_queue(driver: &DefaultDriver, mem: &GuestMemory) -> virtio::VirtioQue
 async fn rx_mergeable_pool_lengths_and_packet_addresses(driver: DefaultDriver) {
     use net_backend::BufferAccess;
 
-    let mem = GuestMemory::allocate(0x10000);
-    let mut queue = rx_test_queue(&driver, &mem);
-    let mut pool = crate::buffers::VirtioWorkPool::new(
-        mem.clone(),
-        QUEUE_SIZE,
-        NetworkFeaturesBank0::new().with_mrg_rxbuf(true),
-    );
-    let mut avail = 0;
-    for (id, gpa, len, next) in [
-        (7, 0x4000, 5, Some(8)),
-        (8, 0x4100, 39, None),
-        (3, 0x4200, 64, None),
-        (1, 0x4300, 64, None),
-    ] {
-        write_descriptor(
-            &mem,
-            RX_DESC_ADDR,
-            id,
-            gpa,
-            len,
-            DescriptorFlags::new()
-                .with_write(true)
-                .with_next(next.is_some()),
-            next.unwrap_or(0),
+    for (second_gpa, first_gpa) in [(0x4200, 0x4100), (0x4127, 0x4100), (0x4200, u64::MAX - 5)] {
+        let mem = GuestMemory::allocate(0x10000);
+        let mut queue = rx_test_queue(&driver, &mem);
+        let mut pool = crate::buffers::VirtioWorkPool::new(
+            mem.clone(),
+            QUEUE_SIZE,
+            NetworkFeaturesBank0::new().with_mrg_rxbuf(true),
         );
-    }
-    for id in [7, 3, 1] {
-        make_available(&mem, RX_AVAIL_ADDR, QUEUE_SIZE, id, &mut avail);
-        let work = queue.try_next().unwrap().unwrap();
-        assert_eq!(pool.queue_work(work).ok().unwrap().0, u32::from(id));
-    }
-    let mut addresses = Vec::new();
-    pool.push_guest_addresses(RxId(7), &mut addresses);
-    assert_eq!(
-        addresses.iter().map(|s| (s.gpa, s.len)).collect::<Vec<_>>(),
-        [(0x4107, 32)]
-    );
-    let data = [0x5a; 100];
-    assert!(!pool.write_packet_across_multiple_buffers(
-        &[RxId(7), RxId(3)],
-        &RxMetadata {
-            len: 100,
-            ..Default::default()
-        },
-        &[&data],
-    ));
-    assert!(!pool.write_packet_across_multiple_buffers(
-        &[RxId(7), RxId(3), RxId(1)],
-        &RxMetadata {
-            len: 96,
-            ..Default::default()
-        },
-        &[&data[..96]],
-    ));
-    assert!(pool.write_packet_across_multiple_buffers(
-        &[RxId(7), RxId(3)],
-        &RxMetadata {
-            len: 96,
-            ..Default::default()
-        },
-        &[&data[..96]],
-    ));
-    addresses.clear();
-    pool.push_guest_addresses(RxId(7), &mut addresses);
-    pool.push_guest_addresses(RxId(3), &mut addresses);
-    assert_eq!(
-        addresses.iter().map(|s| (s.gpa, s.len)).collect::<Vec<_>>(),
-        [(0x4107, 32), (0x4200, 64)]
-    );
-    for (id, len) in [(7, 44), (3, 64)] {
-        let (work, used, dropped) = pool.take_rx_work(RxId(id));
-        assert_eq!(used, len);
-        assert!(!dropped);
-        queue.complete(work, used);
+        let mut avail = 0;
+        for (id, gpa, len, next) in [
+            (7, 0x4000, 5, Some(8)),
+            (8, first_gpa, 39, None),
+            (3, second_gpa, 64, None),
+            (1, 0x4300, 64, None),
+        ] {
+            write_descriptor(
+                &mem,
+                RX_DESC_ADDR,
+                id,
+                gpa,
+                len,
+                DescriptorFlags::new()
+                    .with_write(true)
+                    .with_next(next.is_some()),
+                next.unwrap_or(0),
+            );
+        }
+        for id in [7, 3, 1] {
+            make_available(&mem, RX_AVAIL_ADDR, QUEUE_SIZE, id, &mut avail);
+            let work = queue.try_next().unwrap().unwrap();
+            assert_eq!(pool.queue_work(work).ok().unwrap().0, u32::from(id));
+        }
+        let mut addresses = Vec::new();
+        pool.push_guest_addresses(RxId(7), &mut addresses);
+        assert_eq!(
+            addresses.iter().map(|s| (s.gpa, s.len)).collect::<Vec<_>>(),
+            [(first_gpa.saturating_add(7), 32)]
+        );
+        let data: [u8; 100] = std::array::from_fn(|i| i as u8);
+        assert!(!pool.write_packet_across_multiple_buffers(
+            &[RxId(7), RxId(3)],
+            &RxMetadata {
+                len: 100,
+                ..Default::default()
+            },
+            &[&data],
+        ));
+        assert!(!pool.write_packet_across_multiple_buffers(
+            &[RxId(7), RxId(3), RxId(1)],
+            &RxMetadata {
+                len: 96,
+                ..Default::default()
+            },
+            &[&data[..7], &[], &data[7..67], &data[67..96]],
+        ));
+        assert!(pool.write_packet_across_multiple_buffers(
+            &[RxId(7), RxId(3)],
+            &RxMetadata {
+                len: 96,
+                ..Default::default()
+            },
+            &[&data[..7], &[], &data[7..67], &data[67..96]],
+        ));
+        let mut readback = [0; 96];
+        if first_gpa == u64::MAX - 5 {
+            for id in [7, 3] {
+                let (work, used, dropped) = pool.take_rx_work(RxId(id));
+                assert_eq!(used, 0);
+                assert!(dropped);
+                queue.complete(work, used);
+            }
+            continue;
+        }
+        mem.read_at(0x4107, &mut readback[..32]).unwrap();
+        mem.read_at(second_gpa, &mut readback[32..]).unwrap();
+        assert_eq!(readback, data[..96]);
+        addresses.clear();
+        pool.push_guest_addresses(RxId(7), &mut addresses);
+        pool.push_guest_addresses(RxId(3), &mut addresses);
+        assert_eq!(
+            addresses.iter().map(|s| (s.gpa, s.len)).collect::<Vec<_>>(),
+            [(0x4107, 32), (second_gpa, 64)]
+        );
+        for (id, len) in [(7, 44), (3, 64)] {
+            let (work, used, dropped) = pool.take_rx_work(RxId(id));
+            assert_eq!(used, len);
+            assert!(!dropped);
+            queue.complete(work, used);
+        }
     }
 }
 
@@ -2933,6 +2971,8 @@ async fn feature_negotiation_with_offloads_and_rx_gso(driver: DefaultDriver) {
     assert!(bank0.guest_csum(), "GUEST_CSUM should always be set");
     assert!(bank0.guest_tso4(), "GUEST_TSO4 should always be set");
     assert!(bank0.guest_tso6(), "GUEST_TSO6 should always be set");
+    assert_eq!(device.queue_size(0), virtio::MAX_QUEUE_SIZE);
+    assert_eq!(device.queue_size(1), virtio::DEFAULT_QUEUE_SIZE);
     assert!(
         bank0.host_tso4(),
         "HOST_TSO4 should be set when tso+tcp+ipv4_header supported"
@@ -2986,6 +3026,7 @@ async fn receive_gso_is_disabled_by_default(driver: DefaultDriver) {
         "checksum receive offload remains available"
     );
     assert!(!bank0.guest_tso4(), "GUEST_TSO4 must be opt-in");
+    assert_eq!(device.queue_size(0), virtio::DEFAULT_QUEUE_SIZE);
     assert!(!bank0.guest_tso6(), "GUEST_TSO6 must be opt-in");
 }
 
@@ -3051,6 +3092,7 @@ async fn feature_negotiation_no_offloads(driver: DefaultDriver) {
     assert!(bank0.mtu(), "MTU feature should always be set");
     assert!(bank0.guest_csum(), "GUEST_CSUM should always be set");
     assert!(!bank0.guest_tso4(), "GUEST_TSO4 requires backend support");
+    assert_eq!(device.queue_size(0), virtio::DEFAULT_QUEUE_SIZE);
     assert!(!bank0.guest_tso6(), "GUEST_TSO6 requires backend support");
     assert!(!bank0.csum(), "CSUM should not be set without offloads");
     assert!(

@@ -257,6 +257,17 @@ enum QueuePairState {
 }
 
 impl VirtioDevice for Device {
+    fn queue_size(&self, queue_index: u16) -> u16 {
+        let offloads = &self.adapter.rx_offload_support;
+        if queue_index.is_multiple_of(2) && (offloads.tcpv4_gso || offloads.tcpv6_gso) {
+            // A coalesced packet can consume many mergeable buffers. Keep
+            // enough receives in flight to amortize guest replenishment.
+            virtio::MAX_QUEUE_SIZE
+        } else {
+            virtio::DEFAULT_QUEUE_SIZE
+        }
+    }
+
     fn traits(&self) -> DeviceTraits {
         let offloads = &self.adapter.tx_offload_support;
 
@@ -295,9 +306,7 @@ impl VirtioDevice for Device {
                 .with_ring_event_idx(true)
                 .with_ring_indirect_desc(true)
                 .with_ring_packed(true)
-                // We guarantee in-order descriptor completion per queue. We
-                // don't yet take advantage of the ability to do batched
-                // completions, but we may in the future.
+                // We guarantee in-order descriptor completion per queue.
                 .with_in_order(true),
             max_queues: 2 * self.registers.max_virtqueue_pairs,
             device_register_length: size_of::<NetConfig>() as u32,
@@ -1373,12 +1382,15 @@ impl Worker {
         }
 
         let mut buffer_offset = 0;
+        let mut batch = Vec::new();
         for completion in &completions {
             let buffer_count = completion.buffer_count.get() as usize;
             let ready_ids = &state.data.rx_ready[buffer_offset..buffer_offset + buffer_count];
             assert_eq!(ready_ids[0].0, completion.id.0);
             let mut packet_dropped = false;
-            if let [id] = ready_ids {
+            if let [id] = ready_ids
+                && (completions.len() == 1 || !self.negotiated_features.mrg_rxbuf())
+            {
                 let (work, bytes, dropped) = state.pending_rx_packets.take_rx_work(*id);
                 packet_dropped = dropped;
                 self.virtio_state.rx_in_order.complete(
@@ -1387,23 +1399,17 @@ impl Worker {
                     bytes,
                 );
             } else {
-                let mut completions: Vec<_> = ready_ids
-                    .iter()
-                    .map(|ready_id| {
-                        let (work, bytes, dropped) =
-                            state.pending_rx_packets.take_rx_work(*ready_id);
-                        packet_dropped |= dropped;
-                        (work.into_completion(), bytes)
-                    })
-                    .collect();
+                let start = batch.len();
+                for &ready_id in ready_ids {
+                    let (work, bytes, dropped) = state.pending_rx_packets.take_rx_work(ready_id);
+                    packet_dropped |= dropped;
+                    batch.push((work.into_completion(), bytes));
+                }
                 if packet_dropped {
-                    for (_, bytes) in &mut completions {
+                    for (_, bytes) in &mut batch[start..] {
                         *bytes = 0;
                     }
                 }
-                self.virtio_state
-                    .rx_in_order
-                    .complete_batch(&mut self.virtio_state.rx_queue, completions);
             }
             buffer_offset += buffer_count;
             if packet_dropped {
@@ -1411,6 +1417,13 @@ impl Worker {
             } else {
                 state.stats.rx_packets.increment();
             }
+        }
+        if !batch.is_empty() {
+            // Mergeable backends complete buffers in posting order, so publish
+            // all packets from this poll with one used-ring update.
+            self.virtio_state
+                .rx_in_order
+                .complete_batch(&mut self.virtio_state.rx_queue, batch);
         }
 
         state

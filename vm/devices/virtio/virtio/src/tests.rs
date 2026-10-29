@@ -5678,7 +5678,7 @@ async fn in_order_batch_publication_wrap_and_notifications(driver: DefaultDriver
             if packed {
                 let flag_writes: Vec<_> = log
                     .iter()
-                    .filter(|(addr, len)| *len == 2 && (*addr - BOUND_TEST_DESC_ADDR) % 16 == 14)
+                    .filter(|(addr, len)| *len == 8 && (*addr - BOUND_TEST_DESC_ADDR) % 16 == 8)
                     .map(|&(addr, _)| addr)
                     .collect();
                 let published = if chained { vec![3, 1] } else { vec![3, 0, 1] };
@@ -5687,12 +5687,12 @@ async fn in_order_batch_publication_wrap_and_notifications(driver: DefaultDriver
                     published
                         .iter()
                         .rev()
-                        .map(|&id| BOUND_TEST_DESC_ADDR + id * 16 + 14)
+                        .map(|&id| BOUND_TEST_DESC_ADDR + id * 16 + 8)
                         .collect::<Vec<_>>()
                 );
                 assert_eq!(
                     log.last().copied(),
-                    Some((BOUND_TEST_DESC_ADDR + 3 * 16 + 14, 2))
+                    Some((BOUND_TEST_DESC_ADDR + 3 * 16 + 8, 8))
                 );
                 for (offset, id) in published.into_iter().enumerate() {
                     let desc = mem
@@ -5700,6 +5700,7 @@ async fn in_order_batch_publication_wrap_and_notifications(driver: DefaultDriver
                         .unwrap();
                     assert_eq!(desc.flags().used(), offset == 0);
                     assert_eq!(desc.flags().available(), offset == 0);
+                    assert!(desc.flags().write());
                     assert_eq!(desc.length.get(), 100 + offset as u32);
                     let last_id = if chained && id == 3 { 0 } else { id };
                     assert_eq!(desc.buffer_id.get(), 10 + last_id as u16);

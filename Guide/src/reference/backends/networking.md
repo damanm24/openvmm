@@ -128,12 +128,20 @@ together, with one notification subject to interrupt suppression.
 Each mergeable buffer must hold at least the 12-byte header; the first buffer
 may contain only that header. Headers and packet data may themselves span
 direct or indirect descriptor chains. Backend restarts preserve buffer order.
-If the available buffers cannot hold a packet, software backends drop the
-packet without consuming or skipping any buffers.
+If the available buffers cannot hold a packet, TAP retains that frame and
+waits for more buffers before reading another frame. This lets the frontend
+publish completed receives and the guest replenish its buffers without
+dropping coalesced packets at the end of a receive batch. Other software
+backends drop the packet without consuming or skipping any buffers.
 
-Without this feature, a receive uses exactly one buffer and `num_buffers` is
-one. OpenVMM uses the modern 12-byte header regardless of mergeable-buffer
-negotiation; the legacy 10-byte layout is not supported.
+When receive GSO is enabled and supported by the backend, virtio-net advertises
+1,024 receive-queue entries instead of 256. Coalesced packets can consume many
+mergeable buffers, so the larger queue keeps more packets in flight while the
+guest replenishes buffers. Transmit queues still advertise 256 entries.
+
+Without mergeable receive buffers, a receive uses exactly one buffer and
+`num_buffers` is one. OpenVMM uses the modern 12-byte header regardless of
+mergeable-buffer negotiation; the legacy 10-byte layout is not supported.
 
 ### Receive offload invariants
 
