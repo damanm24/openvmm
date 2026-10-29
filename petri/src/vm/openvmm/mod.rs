@@ -12,6 +12,7 @@ mod construct;
 #[cfg(target_os = "linux")]
 mod hugetlb;
 mod modify;
+mod mshv;
 mod runtime;
 mod start;
 
@@ -86,15 +87,24 @@ pub struct OpenVmmPetriBackend {
     openvmm_path: ResolvedArtifact,
 }
 
+impl OpenVmmPetriBackend {
+    /// Launch a separately supplied, protocol-compatible native executable.
+    pub fn from_binary(path: PathBuf) -> Self {
+        Self {
+            openvmm_path: ResolvedArtifact::from_local_path(path),
+        }
+    }
+}
+
 #[async_trait]
 impl PetriVmmBackend for OpenVmmPetriBackend {
     type VmmConfig = PetriVmConfigOpenVmm;
     type VmRuntime = PetriVmOpenVmm;
+    const SUPPORTS_VMBUS: bool = true;
+    const SUPPORTS_FILE_SHARING: bool = cfg!(any(windows, target_os = "linux"));
 
     fn check_compat(firmware: &Firmware, arch: MachineArch) -> bool {
-        arch == MachineArch::host()
-            && !(firmware.is_openhcl() && (!cfg!(windows) || arch == MachineArch::Aarch64))
-            && !(firmware.is_pcat() && arch == MachineArch::Aarch64)
+        !(firmware.is_openhcl() && (!cfg!(windows) || arch == MachineArch::Aarch64))
     }
 
     fn quirks(firmware: &Firmware) -> (GuestQuirksInner, VmmQuirks) {
@@ -125,7 +135,13 @@ impl PetriVmmBackend for OpenVmmPetriBackend {
         Ok(None) // TODO #2403
     }
 
-    fn new(resolver: &ArtifactResolver<'_>) -> Self {
+    fn build_custom_init_script(_pipette_path: &str) -> Option<String> {
+        None
+    }
+
+    fn new(resolver: &ArtifactResolver<'_>, arch: MachineArch) -> Self {
+        // OpenVMM guests must have the same arch as the host
+        assert_eq!(arch, MachineArch::host());
         OpenVmmPetriBackend {
             openvmm_path: resolver
                 .require(petri_artifacts_vmm_test::artifacts::OPENVMM_NATIVE)
@@ -138,7 +154,7 @@ impl PetriVmmBackend for OpenVmmPetriBackend {
         config: PetriVmConfig,
         modify_vmm_config: Option<ModifyFn<Self::VmmConfig>>,
         resources: &PetriVmResources,
-        properties: PetriVmProperties,
+        properties: &PetriVmProperties,
     ) -> anyhow::Result<(Self::VmRuntime, PetriVmRuntimeConfig)> {
         let mut config =
             PetriVmConfigOpenVmm::new(&self.openvmm_path, config, resources, properties).await?;
@@ -153,6 +169,7 @@ impl PetriVmmBackend for OpenVmmPetriBackend {
 
 /// Configuration state for a test VM.
 pub struct PetriVmConfigOpenVmm {
+    guest_shares: std::collections::HashMap<String, crate::GuestShare>,
     // Direct configuration related information.
     runtime_config: PetriVmRuntimeConfig,
     arch: MachineArch,
@@ -190,6 +207,7 @@ pub struct PetriVmConfigOpenVmm {
 struct PetriVmResourcesOpenVmm {
     log_stream_tasks: Vec<Task<anyhow::Result<()>>>,
     firmware_event_recv: Receiver<FirmwareEvent>,
+    ipmi_sel_event_recv: Receiver<get_resources::ged::IpmiSelEvent>,
     shutdown_ic_send: Option<Sender<ShutdownRpc>>,
     kvp_ic_send: Option<Sender<hyperv_ic_resources::kvp::KvpConnectRpc>>,
     ged_send: Option<Sender<get_resources::ged::GuestEmulationRequest>>,

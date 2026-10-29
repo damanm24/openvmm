@@ -7,6 +7,7 @@ use crate::header_size;
 use guestmem::GuestMemory;
 use inspect::Inspect;
 use net_backend::BufferAccess;
+use net_backend::ETHERNET_HEADER_LEN;
 use net_backend::RxBufferSegment;
 use net_backend::RxId;
 use net_backend::RxMetadata;
@@ -19,6 +20,7 @@ struct RxPacket {
     work: VirtioQueueCallbackWork,
     used_len: Option<u32>,
     cap: u32,
+    write_failed: bool,
 }
 
 /// Holds virtio buffers available for a network backend to send data to the client.
@@ -29,18 +31,9 @@ pub struct VirtioWorkPool {
     mergeable_rx_buffers: bool,
     #[inspect(skip)]
     rx_packets: Vec<Option<RxPacket>>,
-}
-
-/// Reason a submitted RX buffer could not be queued to the backend, returned
-/// with the original work item so the caller can decide how to handle it.
-pub enum RxQueueError {
-    /// The descriptor index is already in use (duplicate guest submission).
-    /// This is a fatal protocol violation: the pool slot is already taken, so
-    /// the buffer cannot be tracked.
-    DuplicateIndex(VirtioQueueCallbackWork),
-    /// The buffer is smaller than the virtio-net header. It must be completed
-    /// (dropped) in avail order rather than posted to the backend.
-    TooSmall(VirtioQueueCallbackWork),
+    rx_capacity_drops: u64,
+    rx_memory_write_drops: u64,
+    rx_incomplete_drops: u64,
 }
 
 impl VirtioWorkPool {
@@ -48,7 +41,10 @@ impl VirtioWorkPool {
         resp.field(
             "pending_rx_packets",
             self.rx_packets.iter().filter(|p| p.is_some()).count(),
-        );
+        )
+        .field("rx_capacity_drops", self.rx_capacity_drops)
+        .field("rx_memory_write_drops", self.rx_memory_write_drops)
+        .field("rx_incomplete_drops", self.rx_incomplete_drops);
     }
 
     /// Create a new instance.
@@ -57,11 +53,14 @@ impl VirtioWorkPool {
             mem,
             mergeable_rx_buffers,
             rx_packets: (0..queue_size).map(|_| None).collect(),
+            rx_capacity_drops: 0,
+            rx_memory_write_drops: 0,
+            rx_incomplete_drops: 0,
         }
     }
 
     fn header_size(&self) -> usize {
-        header_size(self.mergeable_rx_buffers)
+        header_size()
     }
 
     /// Returns a reference to the guest memory.
@@ -90,28 +89,31 @@ impl VirtioWorkPool {
 
     /// Add a virtio work instance to the buffers available for use.
     ///
-    /// Returns `Err` with the work item if the buffer cannot be posted to the
-    /// backend, distinguishing a fatal duplicate descriptor index from a
-    /// too-small buffer that should be dropped in order.
-    pub fn queue_work(&mut self, work: VirtioQueueCallbackWork) -> Result<RxId, RxQueueError> {
+    /// Returns `Err` with the work item if the buffer is smaller than the
+    /// virtio-net header and should be dropped in order.
+    pub fn queue_work(
+        &mut self,
+        work: VirtioQueueCallbackWork,
+    ) -> Result<RxId, VirtioQueueCallbackWork> {
         let idx = work.descriptor_index();
         let header_size = self.header_size();
         let packet = &mut self.rx_packets[idx as usize];
-        if packet.is_some() {
-            tracelimit::warn_ratelimited!("dropping RX buffer: descriptor index already in use");
-            return Err(RxQueueError::DuplicateIndex(work));
-        }
+        assert!(packet.is_none(), "RX descriptor {idx} is already tracked");
         let payload_length = work.get_payload_length(true) as u32;
-        let Some(cap) = payload_length.checked_sub(header_size as u32) else {
+        let Some(cap) = payload_length
+            .checked_sub(header_size as u32)
+            .filter(|&cap| self.mergeable_rx_buffers || cap >= ETHERNET_HEADER_LEN)
+        else {
             tracelimit::warn_ratelimited!(
                 len = payload_length,
-                "dropping RX buffer: payload length smaller than virtio-net header size"
+                "dropping RX buffer: insufficient capacity"
             );
-            return Err(RxQueueError::TooSmall(work));
+            return Err(work);
         };
         *packet = Some(RxPacket {
             used_len: None,
             cap,
+            write_failed: false,
             work,
         });
         Ok(RxId(idx.into()))
@@ -121,22 +123,56 @@ impl VirtioWorkPool {
     /// computed payload length. The caller is responsible for completing
     /// the descriptor via the queue.
     #[must_use = "caller must complete the returned work via VirtioQueue::complete"]
-    pub fn take_rx_work(&mut self, rx_id: RxId) -> (VirtioQueueCallbackWork, u32) {
+    pub fn take_rx_work(&mut self, rx_id: RxId) -> (VirtioQueueCallbackWork, u32, bool) {
         let packet = self.rx_packets[rx_id.0 as usize]
             .take()
             .expect("valid packet index");
-        let used_len = packet.used_len.unwrap_or_else(|| {
-            tracelimit::warn_ratelimited!("dropping RX buffer: packet data not written");
+        let dropped = packet.write_failed || packet.used_len.is_none();
+        let used_len = if dropped {
+            if !packet.write_failed {
+                self.rx_incomplete_drops += 1;
+                tracelimit::warn_ratelimited!("dropping RX buffer: packet write not completed");
+            }
             0
-        });
-        (packet.work, used_len)
+        } else {
+            packet.used_len.unwrap()
+        };
+        (packet.work, used_len, dropped)
     }
 
     fn write_rx_header(&mut self, id: RxId, metadata: &RxMetadata, buffer_count: NonZeroU16) {
-        let data_valid = metadata.ip_checksum.is_valid() && metadata.l4_checksum.is_valid();
-        let flags = VirtioNetHeaderFlags::new().with_data_valid(data_valid);
+        let checksum = metadata.offload.checksum_metadata();
+        let needs_checksum = checksum.is_some();
+        let data_valid =
+            !needs_checksum && metadata.ip_checksum.is_valid() && metadata.l4_checksum.is_valid();
+        let flags = VirtioNetHeaderFlags::new()
+            .with_needs_csum(needs_checksum)
+            .with_data_valid(data_valid);
+        let (gso_type, hdr_len, gso_size) = if let Some(gso) = metadata.offload.gso() {
+            let protocol = match gso.protocol {
+                net_backend::RxGsoProtocol::TcpV4 => crate::VirtioNetHeaderGsoProtocol::TCPV4,
+                net_backend::RxGsoProtocol::TcpV6 => crate::VirtioNetHeaderGsoProtocol::TCPV6,
+            };
+            (
+                crate::VirtioNetHeaderGso::new()
+                    .with_protocol(protocol)
+                    .into_bits(),
+                gso.header_len,
+                gso.max_segment_size,
+            )
+        } else {
+            (0, 0, 0)
+        };
+        let (csum_start, csum_offset) = checksum
+            .map(|checksum| (checksum.start, checksum.offset))
+            .unwrap_or_default();
         let header = VirtioNetHeader {
             flags: flags.into(),
+            gso_type,
+            hdr_len,
+            gso_size,
+            csum_start,
+            csum_offset,
             num_buffers: buffer_count.get(),
             ..FromZeros::new_zeroed()
         };
@@ -150,9 +186,31 @@ impl VirtioWorkPool {
         {
             tracelimit::warn_ratelimited!(
                 error = &err as &dyn std::error::Error,
-                "failure writing header"
+                "dropping RX packet after guest header write failure"
             );
+            self.fail_memory_write(id);
         }
+    }
+
+    fn fail_capacity(&mut self, id: RxId, packet_len: usize, capacity: u32) {
+        self.rx_capacity_drops += 1;
+        self.rx_packets[id.0 as usize]
+            .as_mut()
+            .expect("invalid buffer index")
+            .write_failed = true;
+        tracelimit::warn_ratelimited!(
+            packet_len,
+            capacity,
+            "dropping RX packet larger than guest buffer"
+        );
+    }
+
+    fn fail_memory_write(&mut self, id: RxId) {
+        self.rx_memory_write_drops += 1;
+        self.rx_packets[id.0 as usize]
+            .as_mut()
+            .expect("invalid buffer index")
+            .write_failed = true;
     }
 }
 
@@ -163,33 +221,86 @@ impl BufferAccess for VirtioWorkPool {
 
     fn write_data(&mut self, id: RxId, data: &[u8]) {
         let header_size = self.header_size();
-        let packet = self.rx_packets[id.0 as usize]
+        let capacity = self.rx_packets[id.0 as usize]
+            .as_ref()
+            .expect("invalid buffer index")
+            .cap;
+        if data.len() > capacity as usize {
+            self.fail_capacity(id, data.len(), capacity);
+            return;
+        }
+        let result = self.rx_packets[id.0 as usize]
             .as_mut()
-            .expect("invalid buffer index");
-        if let Err(err) = packet
+            .expect("invalid buffer index")
             .work
-            .write_at_offset(header_size as u64, &self.mem, data)
-        {
+            .write_at_offset(header_size as u64, &self.mem, data);
+        if let Err(err) = result {
             tracelimit::warn_ratelimited!(
                 len = data.len(),
                 error = &err as &dyn std::error::Error,
-                "rx memory write failure"
+                "dropping RX packet after guest memory write failure"
             );
+            self.fail_memory_write(id);
         }
     }
 
+    fn write_packet(&mut self, id: RxId, metadata: &RxMetadata, data: &[u8]) {
+        if metadata.len != data.len() {
+            self.rx_incomplete_drops += 1;
+            self.rx_packets[id.0 as usize]
+                .as_mut()
+                .expect("invalid buffer index")
+                .write_failed = true;
+            tracelimit::warn_ratelimited!(
+                metadata_len = metadata.len,
+                data_len = data.len(),
+                "dropping RX packet with inconsistent metadata length"
+            );
+            return;
+        }
+        self.write_data(id, data);
+        self.write_header(id, metadata);
+    }
+
     fn write_packet_segments(&mut self, id: RxId, metadata: &RxMetadata, segments: &[&[u8]]) {
+        let total_len = segments.iter().map(|segment| segment.len()).sum::<usize>();
+        if metadata.len != total_len {
+            self.rx_incomplete_drops += 1;
+            self.rx_packets[id.0 as usize]
+                .as_mut()
+                .expect("invalid buffer index")
+                .write_failed = true;
+            tracelimit::warn_ratelimited!(
+                metadata_len = metadata.len,
+                data_len = total_len,
+                "dropping RX packet with inconsistent segment length"
+            );
+            return;
+        }
+        let capacity = self.rx_packets[id.0 as usize]
+            .as_ref()
+            .expect("invalid buffer index")
+            .cap;
+        if total_len > capacity as usize {
+            self.fail_capacity(id, total_len, capacity);
+            return;
+        }
+
         let mut offset = self.header_size() as u64;
-        let packet = self.rx_packets[id.0 as usize]
-            .as_mut()
-            .expect("invalid buffer index");
         for segment in segments {
-            if let Err(err) = packet.work.write_at_offset(offset, &self.mem, segment) {
+            let result = self.rx_packets[id.0 as usize]
+                .as_mut()
+                .expect("invalid buffer index")
+                .work
+                .write_at_offset(offset, &self.mem, segment);
+            if let Err(err) = result {
                 tracelimit::warn_ratelimited!(
                     len = segment.len(),
                     error = &err as &dyn std::error::Error,
-                    "rx memory write failure"
+                    "dropping RX packet after guest memory write failure"
                 );
+                self.fail_memory_write(id);
+                return;
             }
             offset += segment.len() as u64;
         }
@@ -307,13 +418,18 @@ impl BufferAccess for VirtioWorkPool {
         assert_eq!(metadata.offset, 0);
         assert!(metadata.len > 0);
 
-        let capacity = self.capacity(id);
-        assert!(
-            metadata.len <= capacity as usize,
-            "packet len {} exceeds buffer capacity {}",
-            metadata.len,
-            capacity
-        );
+        let packet = self.rx_packets[id.0 as usize]
+            .as_ref()
+            .expect("invalid buffer index");
+        if packet.write_failed {
+            return;
+        }
+        if metadata.len > packet.cap as usize {
+            let capacity = packet.cap;
+            self.fail_capacity(id, metadata.len, capacity);
+            return;
+        }
+
         self.write_rx_header(id, metadata, NonZeroU16::MIN);
         self.rx_packets[id.0 as usize]
             .as_mut()

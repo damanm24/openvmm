@@ -17,7 +17,6 @@ pub mod resolver;
 #[cfg(test)]
 mod tests;
 
-use crate::buffers::RxQueueError;
 use crate::buffers::VirtioWorkPool;
 use anyhow::Context as _;
 use bitfield_struct::bitfield;
@@ -30,6 +29,7 @@ use net_backend::Endpoint;
 use net_backend::EndpointAction;
 use net_backend::QueueConfig;
 use net_backend::RxId;
+use net_backend::RxOffloadSupport;
 use net_backend::TxFlags;
 use net_backend::TxId;
 use net_backend::TxMetadata;
@@ -139,7 +139,8 @@ struct NetStatus {
     _reserved: u16,
 }
 
-const DEFAULT_MTU: u16 = 1514;
+const DEFAULT_MTU: u16 = 1500;
+const BITS_PER_MEGABIT: u64 = 1_000_000;
 
 #[expect(dead_code)]
 const VIRTIO_NET_MAX_QUEUES: u16 = 0x8000;
@@ -215,13 +216,10 @@ struct VirtioNetHeader {
     pub padding_reserved: u16, // Only if VIRTIO_NET_F_HASH_REPORT negotiated
 }
 
-const fn header_size(mergeable_rx_buffers: bool) -> usize {
-    // TODO: Verify hash flags are not set, since header size would be larger in that case.
-    if mergeable_rx_buffers {
-        offset_of!(VirtioNetHeader, hash_value)
-    } else {
-        offset_of!(VirtioNetHeader, num_buffers)
-    }
+const fn header_size() -> usize {
+    // Modern devices include num_buffers even without VIRTIO_NET_F_MRG_RXBUF.
+    // VIRTIO_NET_F_HASH_REPORT is not offered.
+    offset_of!(VirtioNetHeader, hash_value)
 }
 
 struct Adapter {
@@ -230,6 +228,7 @@ struct Adapter {
     tx_fast_completions: bool,
     mac_address: MacAddress,
     tx_offload_support: TxOffloadSupport,
+    rx_offload_support: RxOffloadSupport,
 }
 
 pub struct Device {
@@ -275,12 +274,18 @@ impl VirtioDevice for Device {
             .with_mac(true)
             .with_status(true)
             .with_mrg_rxbuf(true)
+            .with_mtu(true)
             .with_csum(csum)
             .with_guest_csum(true)
+            .with_guest_tso4(self.adapter.rx_offload_support.tcpv4_gso)
+            .with_guest_tso6(self.adapter.rx_offload_support.tcpv6_gso)
             .with_host_tso4(host_tso)
             .with_host_tso6(host_tso);
 
-        let features_bank1 = NetworkFeaturesBank1::new().with_host_uso(host_uso);
+        let features_bank1 = NetworkFeaturesBank1::new()
+            .with_host_uso(host_uso)
+            .with_guest_hdrlen(true)
+            .with_speed_duplex(true);
 
         DeviceTraits {
             device_id: virtio::spec::VirtioDeviceType::NET,
@@ -390,7 +395,7 @@ impl VirtioDevice for Device {
                 };
 
                 if first_pair {
-                    self.insert_coordinator(self.pairs.len() as u16);
+                    self.insert_coordinator(self.pairs.len() as u16, negotiated_features);
                 }
 
                 let virtio_state = VirtioState {
@@ -542,11 +547,19 @@ struct PendingTxPacket {
 
 pub struct NicBuilder {
     max_queue_pairs: u16,
+    enable_rx_gso: bool,
 }
 
 impl NicBuilder {
     pub fn max_queues(mut self, max_queue_pairs: u16) -> Self {
         self.max_queue_pairs = max_queue_pairs;
+        self
+    }
+
+    /// Enables advertising guest TCP segmentation offload when supported by
+    /// the network backend.
+    pub fn enable_rx_gso(mut self, enable: bool) -> Self {
+        self.enable_rx_gso = enable;
         self
     }
 
@@ -580,12 +593,22 @@ impl NicBuilder {
 
         let driver = driver_source.simple();
         let tx_offload_support = endpoint.tx_offload_support();
+        let mut rx_offload_support = endpoint.rx_offload_support();
+        if !self.enable_rx_gso {
+            rx_offload_support.tcpv4_gso = false;
+            rx_offload_support.tcpv6_gso = false;
+        }
+        let speed = u32::try_from(endpoint.link_speed() / BITS_PER_MEGABIT)
+            .ok()
+            .filter(|speed| *speed <= i32::MAX as u32)
+            .unwrap_or(u32::MAX);
         let adapter = Arc::new(Adapter {
             driver,
             max_queue_pairs,
             tx_fast_completions: endpoint.tx_fast_completions(),
             mac_address,
             tx_offload_support,
+            rx_offload_support,
         });
 
         let coordinator = TaskControl::new(CoordinatorState {
@@ -598,7 +621,7 @@ impl NicBuilder {
             status: NetStatus::new().with_link_up(true).into(),
             max_virtqueue_pairs: max_queue_pairs,
             mtu: DEFAULT_MTU,
-            speed: 0xffffffff,
+            speed,
             duplex: 0xff,
             rss_max_key_size: 0,
             rss_max_indirection_table_length: 0,
@@ -617,10 +640,20 @@ impl NicBuilder {
     }
 }
 
+fn negotiated_rx_offload_support(features: NetworkFeaturesBank0) -> RxOffloadSupport {
+    let checksum = features.guest_csum();
+    RxOffloadSupport {
+        checksum,
+        tcpv4_gso: checksum && features.guest_tso4(),
+        tcpv6_gso: checksum && features.guest_tso6(),
+    }
+}
+
 impl Device {
     pub fn builder() -> NicBuilder {
         NicBuilder {
             max_queue_pairs: !0,
+            enable_rx_gso: false,
         }
     }
 }
@@ -632,7 +665,7 @@ impl InspectMut for Device {
 }
 
 impl Device {
-    fn insert_coordinator(&mut self, num_queues: u16) {
+    fn insert_coordinator(&mut self, num_queues: u16, negotiated_features: NetworkFeaturesBank0) {
         self.coordinator.insert(
             &self.adapter.driver,
             "virtio-net-coordinator".to_string(),
@@ -641,6 +674,7 @@ impl Device {
                     .map(|_| TaskControl::new(NetQueue { state: None }))
                     .collect(),
                 num_queues,
+                enabled_rx_offloads: negotiated_rx_offload_support(negotiated_features),
                 restart: true,
             },
         );
@@ -689,6 +723,7 @@ impl Device {
 struct Coordinator {
     workers: Vec<TaskControl<NetQueue, Worker>>,
     num_queues: u16,
+    enabled_rx_offloads: RxOffloadSupport,
     restart: bool,
 }
 
@@ -780,6 +815,7 @@ impl Coordinator {
         let queue_config = (0..self.workers.len())
             .map(|_| QueueConfig {
                 driver: Box::new(c_state.adapter.driver.clone()),
+                enabled_rx_offloads: self.enabled_rx_offloads,
             })
             .collect::<Vec<_>>();
 
@@ -848,8 +884,6 @@ enum WorkerError {
     VirtioQueue(#[source] std::io::Error),
     #[error("endpoint")]
     Endpoint(#[source] anyhow::Error),
-    #[error("guest submitted duplicate descriptor index {0}")]
-    DuplicateDescriptor(u16),
     #[error("cancelled")]
     Cancelled(task_control::Cancelled),
 }
@@ -862,8 +896,6 @@ enum TxPacketError {
     Empty,
     #[error("too many segments")]
     TooManySegments,
-    #[error("descriptor index {0} already in use")]
-    DuplicateIndex(u16),
 }
 
 impl From<task_control::Cancelled> for WorkerError {
@@ -965,7 +997,7 @@ impl Worker {
                 else {
                     break;
                 };
-                self.queue_tx_packet(work)?;
+                self.queue_tx_packet(work);
                 did_work = true;
             }
             if self.active_state.data.tx_segments.is_empty() {
@@ -975,7 +1007,7 @@ impl Worker {
         Ok(did_work)
     }
 
-    fn queue_tx_packet(&mut self, work: VirtioQueueCallbackWork) -> Result<(), WorkerError> {
+    fn queue_tx_packet(&mut self, work: VirtioQueueCallbackWork) {
         let seg_start = self.active_state.data.tx_segments.len();
         match self.try_queue_tx_packet(&work) {
             Ok(idx) => {
@@ -986,12 +1018,6 @@ impl Worker {
             Err(err) => {
                 self.active_state.stats.tx_dropped.increment();
                 self.active_state.data.tx_segments.truncate(seg_start);
-                if let TxPacketError::DuplicateIndex(idx) = err {
-                    // A duplicate descriptor index cannot be tracked (the pending
-                    // slot is already taken), so treat it as a fatal queue protocol
-                    // violation rather than an out-of-order drop.
-                    return Err(WorkerError::DuplicateDescriptor(idx));
-                }
                 tracelimit::warn_ratelimited!(
                     error = &err as &dyn std::error::Error,
                     "dropping TX packet"
@@ -1005,7 +1031,6 @@ impl Worker {
                 );
             }
         }
-        Ok(())
     }
 
     /// Build TX segments and offload metadata for a packet.
@@ -1019,11 +1044,12 @@ impl Worker {
         work: &VirtioQueueCallbackWork,
     ) -> Result<u16, TxPacketError> {
         let idx = work.descriptor_index();
-        if self.active_state.pending_tx_packets[idx as usize].is_some() {
-            return Err(TxPacketError::DuplicateIndex(idx));
-        }
+        assert!(
+            self.active_state.pending_tx_packets[idx as usize].is_none(),
+            "TX descriptor {idx} is already tracked"
+        );
 
-        let header_size = header_size(self.negotiated_features.mrg_rxbuf());
+        let header_size = header_size();
         let total_readable = work.get_payload_length(false) as usize;
         let packet_len: u32 = total_readable
             .checked_sub(header_size)
@@ -1307,7 +1333,7 @@ impl Worker {
             tracing::trace!("rx packet");
             match self.active_state.pending_rx_packets.queue_work(work) {
                 Ok(rx_id) => rx_ids.push(rx_id),
-                Err(RxQueueError::TooSmall(work)) => {
+                Err(work) => {
                     // Complete (drop) the buffer in avail order via the in-order
                     // completion discipline. Reason traced by callee.
                     self.active_state.stats.rx_dropped.increment();
@@ -1316,14 +1342,6 @@ impl Worker {
                         work.into_completion(),
                         0,
                     );
-                }
-                Err(RxQueueError::DuplicateIndex(work)) => {
-                    // A duplicate descriptor index cannot be tracked (the pool
-                    // slot is already taken), so treat it as a fatal queue
-                    // protocol violation rather than an out-of-order drop.
-                    let idx = work.descriptor_index();
-                    self.active_state.stats.rx_dropped.increment();
-                    return Err(WorkerError::DuplicateDescriptor(idx));
                 }
             }
         }
@@ -1352,10 +1370,12 @@ impl Worker {
             let buffer_count = completion.buffer_count.get() as usize;
             let ready_ids = &state.data.rx_ready[buffer_offset..buffer_offset + buffer_count];
             assert_eq!(ready_ids[0].0, completion.id.0);
+            let mut packet_dropped = false;
             let completions = ready_ids
                 .iter()
                 .map(|ready_id| {
-                    let (work, bytes) = state.pending_rx_packets.take_rx_work(*ready_id);
+                    let (work, bytes, dropped) = state.pending_rx_packets.take_rx_work(*ready_id);
+                    packet_dropped |= dropped;
                     (work.into_completion(), bytes)
                 })
                 .collect();
@@ -1363,7 +1383,11 @@ impl Worker {
                 .rx_in_order
                 .complete_batch(&mut self.virtio_state.rx_queue, completions);
             buffer_offset += buffer_count;
-            state.stats.rx_packets.increment();
+            if packet_dropped {
+                state.stats.rx_dropped.increment();
+            } else {
+                state.stats.rx_packets.increment();
+            }
         }
 
         state

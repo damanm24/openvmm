@@ -25,6 +25,8 @@ pub(crate) enum HardwareDerivedKeysError {
 
 #[derive(Debug, Error)]
 pub(crate) enum HardwareKeySealingError {
+    #[error("failed to generate the sealing IV")]
+    GenerateIv(#[source] getrandom::Error),
     #[error("failed to encrypt the egress key")]
     EncryptEgressKey(#[source] crypto::aes_256_cbc::Aes256CbcError),
     #[error("invalid egress key encryption size {0}, expected {1}")]
@@ -89,11 +91,12 @@ impl HardwareDerivedKeys {
 
         let vm_config_json = serde_json::to_string(vm_config).expect("JSON serialization failed");
 
-        let output = crypto::kbkdf::kbkdf_hmac_sha256(
+        let output = crypto::kbkdf::kbkdf_hmac(
             &hardware_secret,
             vm_config_json.as_bytes(),
             label,
             vmgs::AES_CBC_KEY_LENGTH + vmgs::HMAC_SHA_256_KEY_LENGTH,
+            crypto::HashAlgorithm::Sha256,
         )
         .map_err(HardwareDerivedKeysError::KdfWithHardwareSecret)?;
 
@@ -103,7 +106,7 @@ impl HardwareDerivedKeys {
         aes_key.copy_from_slice(&output[..vmgs::AES_CBC_KEY_LENGTH]);
         hmac_key.copy_from_slice(&output[vmgs::AES_CBC_KEY_LENGTH..]);
 
-        tracing::info!(
+        tracelimit::info_ratelimited!(
             CVM_ALLOWED,
             svn = ?policy.svn,
             mix_measurement = policy.mix_measurement,
@@ -195,7 +198,7 @@ fn unseal_key_bytes(
     }
     decrypted_ingress_key.copy_from_slice(&output[..vmgs::AES_GCM_KEY_LENGTH]);
 
-    tracing::info!(
+    tracelimit::info_ratelimited!(
         CVM_ALLOWED,
         "decrypt ingress_key using hardware derived key"
     );
@@ -282,7 +285,7 @@ pub fn seal_key(
     );
 
     let mut iv = [0u8; vmgs::AES_CBC_IV_LENGTH];
-    getrandom::fill(&mut iv).expect("rng failure");
+    getrandom::fill(&mut iv).map_err(HardwareKeySealingError::GenerateIv)?;
 
     let mut encrypted_egress_key = [0u8; vmgs::AES_GCM_KEY_LENGTH];
     let output = crypto::aes_256_cbc::Aes256Cbc::new(&hardware_derived_keys.aes_key)
@@ -309,7 +312,7 @@ pub fn seal_key(
     )
     .map_err(HardwareKeySealingError::HmacAfterEncrypt)?;
 
-    tracing::info!(CVM_ALLOWED, "encrypt egress_key using hardware derived key");
+    tracelimit::info_ratelimited!(CVM_ALLOWED, "encrypt egress_key using hardware derived key");
 
     Ok(hardware_key_protector)
 }
@@ -343,6 +346,7 @@ impl HardwareKeyProtectorV3Ext for HardwareKeyProtectorV3 {
 mod tests {
     use super::*;
     use crate::test_utils::MockTeeCall;
+    use igvm_attest::get::runtime_claims::AttestationTpmVersion;
     use igvm_attest::get::runtime_claims::AttestationVmConfig;
     use igvm_attest::get::runtime_claims::HardwareSealingPolicy;
     use zerocopy::FromBytes;
@@ -357,8 +361,10 @@ mod tests {
             root_cert_thumbprint: "".to_string(),
             console_enabled: false,
             interactive_console_enabled: false,
+            ipmi_enabled: false,
             secure_boot: false,
             tpm_enabled: false,
+            tpm_version: AttestationTpmVersion::V138,
             tpm_persisted: false,
             hardware_sealing_policy,
             filtered_vpci_devices_allowed: true,

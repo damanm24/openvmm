@@ -3,6 +3,11 @@
 
 //! Configuration for the VM worker.
 
+pub use serial_uart_resources::UartId;
+pub use smbios_defs::SmbiosBiosOverrides;
+pub use smbios_defs::SmbiosConfig;
+pub use smbios_defs::SmbiosSystemOverrides;
+
 use guid::Guid;
 use input_core::InputData;
 use memory_range::MemoryRange;
@@ -11,6 +16,7 @@ use mesh::payload::Protobuf;
 use net_backend_resources::mac_address::MacAddress;
 use openvmm_pcat_locator::RomFileLocation;
 use std::fs::File;
+use tpm_resources::TpmVersion;
 use vm_resource::Resource;
 use vm_resource::kind::PciDeviceHandleKind;
 use vm_resource::kind::VirtioDeviceHandle;
@@ -118,6 +124,18 @@ pub enum LinuxDirectBootMode {
     Acpi,
 }
 
+/// Isolation-specific settings for Linux direct boot.
+#[derive(MeshPayload, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxIsolationConfig {
+    /// No isolation-specific loader configuration.
+    None,
+    /// AMD SEV-SNP loader configuration.
+    Snp {
+        /// Enables restricted interrupt injection in the SNP VMSA.
+        restricted_injection: bool,
+    },
+}
+
 #[derive(MeshPayload, Debug)]
 pub enum LoadMode {
     Linux {
@@ -125,41 +143,62 @@ pub enum LoadMode {
         initrd: Option<File>,
         cmdline: String,
         enable_serial: bool,
+        isolation: LinuxIsolationConfig,
         boot_mode: LinuxDirectBootMode,
+        // Boxed to keep the `Linux` variant from dominating `LoadMode`'s size.
+        smbios: Box<SmbiosConfig>,
     },
     Uefi {
         firmware: File,
         enable_debugging: bool,
         enable_memory_protections: bool,
         disable_frontpage: bool,
-        enable_tpm: bool,
+        tpm_version: Option<TpmVersion>,
         enable_battery: bool,
         enable_serial: bool,
         enable_vpci_boot: bool,
         uefi_console_mode: Option<UefiConsoleMode>,
         default_boot_always_attempt: bool,
-        bios_guid: Guid,
+        // Boxed to keep the `Uefi` variant from dominating `LoadMode`'s size.
+        // The VM's BIOS GUID is sourced from `smbios.system.uuid`, so UEFI and
+        // Linux direct boot share a single UUID origin.
+        smbios: Box<SmbiosConfig>,
         enable_vmbus: bool,
         force_dma_bounce: bool,
         enable_hv: bool,
+        /// Whether the guest firmware should enable hibernation (S4) support.
+        hibernation_enabled: bool,
+        force_firmware_version: bool,
     },
     Pcat {
         firmware: RomFileLocation,
         boot_order: [PcatBootDevice; 4],
+        /// Whether the guest firmware should enable hibernation (S4) support.
+        hibernation_enabled: bool,
+        // Boxed to keep the `Pcat` variant from dominating `LoadMode`'s size.
+        // Only the system UUID and serial number are honored; the PCAT BIOS ROM
+        // self-describes everything else, so other overrides are rejected.
+        smbios: Box<SmbiosConfig>,
     },
     Igvm {
         file: File,
         cmdline: String,
         vtl2_base_address: Vtl2BaseAddressType,
-        com_serial: Option<SerialInformation>,
+        com_serial: Option<UartId>,
+        personality: IgvmPersonality,
     },
     None,
 }
 
-#[derive(Debug, Clone, Copy, MeshPayload)]
-pub struct SerialInformation {
-    pub io_port: u16,
-    pub irq: u32,
+/// The firmware that an IGVM file contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, MeshPayload)]
+pub enum IgvmPersonality {
+    /// The OpenHCL paravisor, hosted in VTL2.
+    Openhcl,
+    /// UEFI firmware.
+    Uefi,
+    /// A Linux kernel.
+    LinuxDirect,
 }
 
 /// Different types to specify the base address for the VTL2 region of the IGVM
@@ -592,7 +631,10 @@ pub struct Vtl2Config {
 #[derive(Eq, PartialEq, Debug, Copy, Clone, MeshPayload)]
 pub enum IsolationType {
     Vbs,
-    Snp,
+    Snp {
+        /// Optional host-provided data included in SNP launch finish.
+        host_data: Option<[u8; 32]>,
+    },
     Cca,
 }
 
@@ -600,7 +642,7 @@ impl From<IsolationType> for virt::IsolationType {
     fn from(value: IsolationType) -> Self {
         match value {
             IsolationType::Vbs => Self::Vbs,
-            IsolationType::Snp => Self::Snp,
+            IsolationType::Snp { .. } => Self::Snp,
             IsolationType::Cca => Self::Cca,
         }
     }
