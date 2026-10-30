@@ -14,6 +14,7 @@ use crate::dns_resolver;
 use futures::AsyncRead;
 use futures::AsyncWrite;
 use pal_async::DefaultDriver;
+use pal_async::DefaultPool;
 use pal_async::socket::PolledSocket;
 use pal_async::timer::Instant;
 use parking_lot::Mutex;
@@ -1159,6 +1160,58 @@ async fn test_tcp_bind_port_forward(driver: DefaultDriver) {
     let (_, _, tcp) = parse_tcp_packet(syn_pkt);
     assert_eq!(tcp.dst_port, guest_port);
     assert_eq!(tcp.control, TcpControl::Syn);
+}
+
+#[pal_async::async_test]
+async fn test_tcp_listener_refresh_driver(driver: DefaultDriver) {
+    let old_pool = DefaultPool::new();
+    let mut consomme = Consomme::new(ConsommeParams::new().unwrap());
+    let mut client = TestClient::new(old_pool.driver());
+    let guest_port = 7777;
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+    socket
+        .bind(&SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0).into())
+        .unwrap();
+    let host_addr = socket.local_addr().unwrap().as_socket().unwrap();
+    consomme
+        .access(&mut client)
+        .bind_tcp_port(socket, guest_port)
+        .unwrap();
+
+    client.driver = driver.clone();
+    consomme.access(&mut client).refresh_driver();
+    drop(old_pool);
+
+    // Arm listener readiness before connecting, so forwarding requires a wakeup.
+    std::future::poll_fn(|cx| {
+        consomme.access(&mut client).poll(cx);
+        Poll::Ready(())
+    })
+    .await;
+    let connector = std::net::TcpStream::connect(host_addr).unwrap();
+    let forwarded = std::future::poll_fn(|cx| {
+        consomme.access(&mut client).poll(cx);
+        if client.received_packets.lock().iter().any(|packet| {
+            TcpTestHarness::is_tcp_packet(packet)
+                .is_some_and(|tcp| tcp.control == TcpControl::Syn && tcp.dst_port == guest_port)
+        }) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    });
+    let mut timer = pal_async::timer::PolledTimer::new(&driver);
+    let timeout = timer.sleep(Duration::from_secs(5));
+    let forwarded = std::pin::pin!(forwarded);
+    let timeout = std::pin::pin!(timeout);
+    assert!(
+        matches!(
+            futures::future::select(forwarded, timeout).await,
+            futures::future::Either::Left(_)
+        ),
+        "timed out waiting for a TCP SYN after driver replacement"
+    );
+    drop(connector);
 }
 
 /// Test that an accepted connection sends its initial SYN after RX capacity
