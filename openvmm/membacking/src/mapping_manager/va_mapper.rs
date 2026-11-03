@@ -140,20 +140,6 @@ struct MappingProps {
     soft_lp: Option<SoftLp>,
 }
 
-impl MappingProps {
-    fn fragment(&self) -> Self {
-        assert!(
-            self.soft_lp.is_none(),
-            "THP mappings cannot be partially removed"
-        );
-        Self {
-            private: self.private,
-            stats: FaultStats::default(),
-            soft_lp: None,
-        }
-    }
-}
-
 /// Per-mapping fault counters, exposed via `Inspect`.
 ///
 /// Recorded for every mapping regardless of host OS, role, or backing, so
@@ -653,38 +639,9 @@ impl MapperInner {
         if range.is_empty() {
             return;
         }
-        let mut mappings = self.mappings.write();
-        let fragments: Vec<_> = mappings
-            .iter()
-            .filter_map(|(existing, props)| {
-                let existing = MemoryRange::new(*existing.start()..*existing.end() + 1);
-                let removed = existing.intersection(&range);
-                if removed.is_empty() {
-                    return None;
-                }
-
-                let mut fragments = Vec::with_capacity(2);
-                if existing.start() < removed.start() {
-                    fragments.push((
-                        MemoryRange::new(existing.start()..removed.start()),
-                        props.fragment(),
-                    ));
-                }
-                if removed.end() < existing.end() {
-                    fragments.push((
-                        MemoryRange::new(removed.end()..existing.end()),
-                        props.fragment(),
-                    ));
-                }
-                Some(fragments)
-            })
-            .flatten()
-            .collect();
-        mappings.remove_range(range.start()..=range.end() - 1);
-        for (range, props) in fragments {
-            let inserted = mappings.insert(range.start()..=range.end() - 1, props);
-            assert!(inserted, "mapping fragment should not overlap");
-        }
+        self.mappings
+            .write()
+            .remove_range(range.start()..=range.end() - 1);
     }
 
     /// Request that the mapping manager send mappings for the given range.
@@ -1093,12 +1050,6 @@ impl ResolveMemoryFault for VaMapper {
 
 #[cfg(test)]
 mod tests {
-    use super::FaultStats;
-    use super::MapperInner;
-    use super::MappingProps;
-    use super::Mutex;
-    use super::RangeMap;
-    use super::RwLock;
     use crate::mapping_manager::MappingBacking;
     use crate::mapping_manager::MappingManager;
     use crate::mapping_manager::MappingParams;
@@ -1109,8 +1060,6 @@ mod tests {
     use memory_range::MemoryRange;
     use pal_async::DefaultPool;
     use sparse_mmap::SparseMapping;
-    use std::sync::OnceLock;
-    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
     use std::time::Instant;
     use test_with_tracing::test;
@@ -1221,58 +1170,6 @@ mod tests {
         for eager in [true, false] {
             faults_during_replacement(eager, true);
         }
-    }
-
-    #[test]
-    fn remove_mapping_preserves_surviving_mapper_metadata() {
-        let (req_send, _req_recv) = mesh::channel();
-        let inner = MapperInner {
-            mapping: SparseMapping::new(0x10000).unwrap(),
-            waiters: Mutex::new(None),
-            mappings: RwLock::new(RangeMap::new()),
-            eager: AtomicBool::new(true),
-            primary: true,
-            supports_memory_fault_resolution: false,
-            req_send,
-            host_access: OnceLock::new(),
-        };
-        let stats = FaultStats::default();
-        stats.guest_faults.add(10);
-        inner.record_mapping(
-            MemoryRange::new(0..0x10000),
-            MappingProps {
-                private: true,
-                stats,
-                soft_lp: None,
-            },
-        );
-
-        inner.remove_mapping(MemoryRange::new(0x4000..0x8000));
-
-        let mappings = inner.mappings.read();
-        assert!(mappings.get_entry(&0x1000).unwrap().2.private);
-        assert!(mappings.get_entry(&0x9000).unwrap().2.private);
-        assert_eq!(
-            mappings
-                .get_entry(&0x1000)
-                .unwrap()
-                .2
-                .stats
-                .guest_faults
-                .get(),
-            0
-        );
-        assert_eq!(
-            mappings
-                .get_entry(&0x9000)
-                .unwrap()
-                .2
-                .stats
-                .guest_faults
-                .get(),
-            0
-        );
-        assert!(mappings.get_entry(&0x5000).is_none());
     }
 
     /// Tests that private RAM pages can be allocated, written to, and read from.
