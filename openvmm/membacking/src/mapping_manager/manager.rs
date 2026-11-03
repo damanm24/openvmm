@@ -146,8 +146,9 @@ impl MappingManagerClient {
     /// When `eager` is true, the mapper receives all existing mappings
     /// immediately and gets new ones pushed synchronously. File-backed
     /// page faults will fail (since mappings should already be
-    /// established). This is the right choice for the VP process, where
-    /// the hypervisor does not forward page faults back to the VMM.
+    /// established), except while device mappings are being replaced. This is
+    /// the right choice for the VP process, where the hypervisor does not forward
+    /// page faults back to the VMM.
     ///
     /// When `eager` is false, the mapper is lazy: mappings are populated
     /// on demand via page faults. This avoids the cost of pushing every
@@ -243,12 +244,24 @@ impl MappingManagerClient {
         Ok(())
     }
 
-    /// Removes all mappings in `range`.
-    ///
-    /// TODO: allow this to split existing mappings.
+    /// Removes mappings in `range`, splitting partially covered mappings.
     pub async fn remove_mappings(&self, range: MemoryRange) {
         self.req_send
             .call(MappingRequest::RemoveMappings, range)
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn begin_mapping_update(&self, range: MemoryRange) {
+        self.req_send
+            .call(MappingRequest::BeginMappingUpdate, range)
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn end_mapping_update(&self) {
+        self.req_send
+            .call(MappingRequest::EndMappingUpdate, ())
             .await
             .unwrap();
     }
@@ -271,8 +284,8 @@ pub enum MappingRequest {
     AddMapper(FailableRpc<AddMapperParams, MapperId>),
     RemoveMapper(MapperId),
     /// Request that mappings covering the given range be sent to the specified
-    /// mapper via fire-and-forget `MapLazy` messages. Used by lazy mappers
-    /// to populate on demand.
+    /// mapper via fire-and-forget `MapLazy` messages, or acknowledge device
+    /// mappings already present in an eager mapper.
     SendMappings(MapperId, MemoryRange),
     /// Upgrade a lazy mapper to eager: replay all existing mappings and
     /// mark it for future pushes.
@@ -282,6 +295,9 @@ pub enum MappingRequest {
     /// Returns all mappings that have [`MappingType::Ram`] type.
     GetDmaTargetMappings(Rpc<(), Vec<MappingParams>>),
     Inspect(inspect::Deferred),
+    /// Defer fault requests until replacement and any rollback have finished.
+    BeginMappingUpdate(Rpc<MemoryRange, ()>),
+    EndMappingUpdate(Rpc<(), ()>),
 }
 
 #[derive(InspectMut)]
@@ -290,6 +306,10 @@ struct MappingManagerTask {
     mappings: Vec<Mapping>,
     #[inspect(skip)]
     mappers: Mappers,
+    #[inspect(skip)]
+    updating: Option<MemoryRange>,
+    #[inspect(skip)]
+    pending_mappings: Vec<(MapperId, MemoryRange)>,
 }
 
 fn inspect_mappings(mappings: &Vec<Mapping>) -> impl '_ + Inspect {
@@ -313,6 +333,28 @@ fn inspect_mappings(mappings: &Vec<Mapping>) -> impl '_ + Inspect {
 struct Mapping {
     params: MappingParams,
     active_mappers: Vec<MapperId>,
+}
+
+impl Mapping {
+    fn fragment(&self, range: MemoryRange) -> Self {
+        let backing = match &self.params.backing {
+            MappingBacking::File {
+                mappable,
+                file_offset,
+            } => MappingBacking::File {
+                mappable: mappable.clone(),
+                file_offset: file_offset + (range.start() - self.params.range.start()),
+            },
+            MappingBacking::Private => MappingBacking::Private,
+        };
+        let mut params = self.params.clone();
+        params.range = range;
+        params.backing = backing;
+        Self {
+            params,
+            active_mappers: self.active_mappers.clone(),
+        }
+    }
 }
 
 /// How a guest memory mapping is backed by host memory.
@@ -474,6 +516,8 @@ pub enum MapperRequest {
     /// replay `MapEager` Rpcs have completed, so the mapper task
     /// processes it after all replays.
     SetEager(Rpc<(), ()>),
+    /// An eager device mapping is ready for a faulting access to retry.
+    MappingAvailable(MemoryRange, bool),
 }
 
 impl MappingManagerTask {
@@ -483,6 +527,8 @@ impl MappingManagerTask {
                 mappers: Slab::new(),
             },
             mappings: Vec::new(),
+            updating: None,
+            pending_mappings: Vec::new(),
         }
     }
 
@@ -532,6 +578,17 @@ impl MappingManagerTask {
                     rpc.handle_sync(|()| self.get_dma_target_mappings())
                 }
                 MappingRequest::Inspect(deferred) => deferred.inspect(&mut *self),
+                MappingRequest::BeginMappingUpdate(rpc) => rpc.handle_sync(|range| {
+                    assert!(self.updating.replace(range).is_none());
+                }),
+                MappingRequest::EndMappingUpdate(rpc) => rpc.handle_sync(|()| {
+                    assert!(self.updating.take().is_some());
+                    for (id, range) in std::mem::take(&mut self.pending_mappings) {
+                        if self.mappers.mappers.contains(id.0) {
+                            self.send_mappings(id, range);
+                        }
+                    }
+                }),
             }
         }
     }
@@ -666,6 +723,14 @@ impl MappingManagerTask {
     /// to the mapper via fire-and-forget `MapLazy` messages. Gaps send
     /// `NoMapping` so the mapper task can wake waiters with failure.
     fn send_mappings(&mut self, id: MapperId, mut range: MemoryRange) {
+        if self
+            .updating
+            .is_some_and(|updating| updating.overlaps(&range))
+        {
+            self.pending_mappings.push((id, range));
+            return;
+        }
+        let eager = self.mappers.mappers[id.0].eager;
         while !range.is_empty() {
             // Find the next mapping that overlaps range.
             let (this_end, params) = if let Some(mapping) = self
@@ -694,7 +759,18 @@ impl MappingManagerTask {
             let this_range = MemoryRange::new(range.start()..this_end);
             let req = if let Some(params) = params {
                 tracing::debug!(range = %this_range, full_range = %params.range, "sending lazy mapping");
-                MapperRequest::MapLazy(params)
+                if eager {
+                    // Never remap eager RAM on a fault: private memory would
+                    // lose its contents. Only device mappings can be replaced
+                    // while accesses are in flight.
+                    if params.mapping_type == MappingType::Device {
+                        MapperRequest::MappingAvailable(this_range, params.writable)
+                    } else {
+                        MapperRequest::NoMapping(this_range)
+                    }
+                } else {
+                    MapperRequest::MapLazy(params)
+                }
             } else {
                 tracing::debug!(range = %this_range, "no mapping for range");
                 MapperRequest::NoMapping(this_range)
@@ -784,18 +860,29 @@ impl MappingManagerTask {
 
     async fn remove_mappings(&mut self, range: MemoryRange) {
         let mut mappers = Vec::new();
-        self.mappings.retain_mut(|mapping| {
-            if !range.contains(&mapping.params.range) {
-                assert!(
-                    !range.overlaps(&mapping.params.range),
-                    "no partial unmappings allowed"
-                );
-                return true;
+        let mut kept = Vec::new();
+        for mapping in std::mem::take(&mut self.mappings) {
+            let removed = range.intersection(&mapping.params.range);
+            if removed.is_empty() {
+                kept.push(mapping);
+                continue;
             }
-            tracing::debug!(range = %mapping.params.range, "removing mapping");
-            mappers.append(&mut mapping.active_mappers);
-            false
-        });
+
+            tracing::debug!(range = %removed, "removing mapping");
+            mappers.extend(mapping.active_mappers.iter().copied());
+
+            if mapping.params.range.start() < removed.start() {
+                kept.push(mapping.fragment(MemoryRange::new(
+                    mapping.params.range.start()..removed.start(),
+                )));
+            }
+            if mapping.params.range.end() > removed.end() {
+                kept.push(
+                    mapping.fragment(MemoryRange::new(removed.end()..mapping.params.range.end())),
+                );
+            }
+        }
+        self.mappings = kept;
         mappers.sort();
         mappers.dedup();
         self.mappers.invalidate(&mappers, range).await;
@@ -1248,6 +1335,67 @@ mod tests {
                 }
             }
         );
+    }
+
+    #[pal_async::async_test]
+    async fn test_remove_partial_mapping_preserves_backing_offsets(_spawn: impl Spawn) {
+        let (mut task, _) = task_with_mapping().await;
+
+        task.remove_mappings(MemoryRange::new(0x4000..0x8000)).await;
+
+        assert_eq!(task.mappings.len(), 2);
+        assert_eq!(task.mappings[0].params.range, MemoryRange::new(0..0x4000));
+        assert_eq!(task.mappings[0].params.backing.file_offset(), 0);
+        assert_eq!(
+            task.mappings[1].params.range,
+            MemoryRange::new(0x8000..0x10000)
+        );
+        assert_eq!(task.mappings[1].params.backing.file_offset(), 0x8000);
+    }
+
+    #[pal_async::async_test]
+    async fn test_remove_range_spanning_mappings_preserves_fragments(_spawn: impl Spawn) {
+        let mut task = task_with_two_mappings().await;
+
+        task.remove_mappings(MemoryRange::new(0x8000..0x18000))
+            .await;
+
+        assert_eq!(task.mappings.len(), 2);
+        assert_eq!(task.mappings[0].params.range, MemoryRange::new(0..0x8000));
+        assert_eq!(task.mappings[0].params.backing.file_offset(), 0);
+        assert_eq!(
+            task.mappings[1].params.range,
+            MemoryRange::new(0x18000..0x20000)
+        );
+        assert_eq!(task.mappings[1].params.backing.file_offset(), 0x8000);
+    }
+
+    #[pal_async::async_test]
+    async fn test_partial_remove_keeps_active_mappers_on_fragments(_spawn: impl Spawn) {
+        let (mut task, _) = task_with_mapping().await;
+        let (send, mut recv) = mesh::channel();
+        let id = task.add_mapper(send, false).await.unwrap();
+        task.send_mappings(id, MemoryRange::new(0..0x10000));
+        assert!(matches!(
+            recv.recv().await.unwrap(),
+            MapperRequest::MapLazy(_)
+        ));
+
+        let remove = task.remove_mappings(MemoryRange::new(0x4000..0x8000));
+        let ((), ()) = futures::join!(remove, async {
+            match recv.recv().await.unwrap() {
+                MapperRequest::Unmap(rpc) => {
+                    let (range, rpc) = rpc.split();
+                    assert_eq!(range, MemoryRange::new(0x4000..0x8000));
+                    rpc.complete(());
+                }
+                other => panic!("expected partial Unmap, got {other:?}"),
+            }
+        });
+
+        assert_eq!(task.mappings.len(), 2);
+        assert_eq!(task.mappings[0].active_mappers, vec![id]);
+        assert_eq!(task.mappings[1].active_mappers, vec![id]);
     }
 
     /// Helper: create a task with two mappings for rollback tests.
