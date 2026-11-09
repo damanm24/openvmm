@@ -8,8 +8,9 @@
 //!
 //! - **Eager**: mappings are pushed by the mapping manager when they are added
 //!   and replayed when the mapper is created. Page faults on file-backed ranges
-//!   fail immediately — the mapping should already be established. This is the
-//!   right mode for the VP process, where hypervisors like KVM do not forward
+//!   fail immediately — the mapping should already be established.
+//!   Device-memory faults wait for any in-flight replacement to finish. This is
+//!   the right mode for the VP process, where hypervisors like KVM do not forward
 //!   page faults back to the VMM.
 //!
 //! - **Lazy**: mappings are not pushed proactively. Instead, page faults
@@ -334,6 +335,9 @@ impl MapperTask {
                     // to access the VA.
                     tracing::debug!(%range, "no mapping received for range");
                     self.wake_waiters(range, None);
+                }
+                MapperRequest::MappingAvailable(range, writable) => {
+                    self.wake_waiters(range, Some(writable));
                 }
                 MapperRequest::SetEager(rpc) => rpc.handle_sync(|()| {
                     tracing::debug!("mapper upgraded to eager");
@@ -882,6 +886,16 @@ unsafe impl GuestMemoryAccess for VaMapper {
         bitmap_failure: bool,
     ) -> PageFaultAction {
         assert!(!bitmap_failure, "bitmaps are not used");
+        let Some(end) = address
+            .checked_add(len as u64)
+            .filter(|&end| len != 0 && end <= self.inner.mapping.len() as u64)
+        else {
+            return PageFaultAction::Fail(PageFaultError::new(
+                GuestMemoryErrorKind::OutOfRange,
+                UnexpectedPageFault,
+            ));
+        };
+        let range = MemoryRange::bounding(address..end);
 
         // Soft large pages (Windows): THP-eligible ranges on the primary mapper
         // are committed/mapped read-only, so the first *write* traps here (reads
@@ -907,6 +921,12 @@ unsafe impl GuestMemoryAccess for VaMapper {
         }
 
         if self.inner.eager.load(Ordering::Relaxed) {
+            // Device backing can be temporarily absent during replacement.
+            // Wait through both replacement and rollback before retrying.
+            let mapping_error = match block_on(self.inner.request_mapping(self.id, range, write)) {
+                Ok(()) => return PageFaultAction::Retry,
+                Err(err) => err,
+            };
             // The guest-memory VA is already mapped for an eager mapper. For
             // isolated guests, a fault can instead mean that the hypervisor has
             // not granted userspace access to a shared page.
@@ -938,17 +958,13 @@ unsafe impl GuestMemoryAccess for VaMapper {
                 }
             }
 
-            // Eager mapper: file-backed mappings are established proactively.
-            // If we get a page fault, the mapping was never set up or was
-            // torn down.
             return PageFaultAction::Fail(PageFaultError::new(
                 GuestMemoryErrorKind::OutOfRange,
-                UnexpectedPageFault,
+                mapping_error,
             ));
         }
 
         // Lazy mapper: request the mapping on demand from the mapping manager.
-        let range = MemoryRange::bounding(address..address + len as u64);
         if let Err(err) = block_on(self.inner.request_mapping(self.id, range, write)) {
             return PageFaultAction::Fail(PageFaultError::new(
                 GuestMemoryErrorKind::OutOfRange,
@@ -978,7 +994,7 @@ impl ResolveMemoryFault for VaMapper {
         fault: MemoryRange,
         write: bool,
     ) -> Result<MemoryRange, GuestMemoryBackingError> {
-        if fault.end() > self.inner.mapping.len() as u64 {
+        if fault.is_empty() || fault.end() > self.inner.mapping.len() as u64 {
             return Err(GuestMemoryBackingError::new(
                 GuestMemoryErrorKind::OutOfRange,
                 fault.start(),
@@ -990,14 +1006,20 @@ impl ResolveMemoryFault for VaMapper {
         // blocks a concurrent *writer* (a structural map/unmap), which is rare;
         // other faulting VPs are readers and proceed in parallel. `end` is the
         // inclusive last address of the mapping.
-        let mappings = self.inner.mappings.read();
-        let Some(&(start, end, ref props)) = mappings.get_entry(&fault.start()) else {
-            return Err(GuestMemoryBackingError::new(
-                GuestMemoryErrorKind::OutOfRange,
-                fault.start(),
-                UnexpectedPageFault,
-            ));
+        let mappings = loop {
+            let mappings = self.inner.mappings.read();
+            if mappings.get_entry(&fault.start()).is_some() {
+                break mappings;
+            }
+            drop(mappings);
+            // Do not hold the index lock while the mapper task restores the
+            // backing. A subsequent replacement can start before we reacquire
+            // it, so check the index again after waking.
+            block_on(self.inner.request_mapping(self.id, fault, write)).map_err(|err| {
+                GuestMemoryBackingError::new(GuestMemoryErrorKind::OutOfRange, fault.start(), err)
+            })?;
         };
+        let &(start, end, ref props) = mappings.get_entry(&fault.start()).unwrap();
         // The trait contract requires the resolved range to stay within the
         // single uniform RAM region that covers `fault.start()`. Today the only
         // caller faults one page at a time, so a fault never spans two mappings;
@@ -1028,7 +1050,127 @@ impl ResolveMemoryFault for VaMapper {
 
 #[cfg(test)]
 mod tests {
+    use crate::mapping_manager::MappingBacking;
+    use crate::mapping_manager::MappingManager;
+    use crate::mapping_manager::MappingParams;
+    use crate::mapping_manager::MemoryPolicy;
+    use crate::region_manager::MappingType;
+    use futures::executor::block_on;
+    use guestmem::GuestMemory;
+    use memory_range::MemoryRange;
+    use pal_async::DefaultPool;
     use sparse_mmap::SparseMapping;
+    use std::time::Duration;
+    use std::time::Instant;
+    use test_with_tracing::test;
+    use virt::ResolveMemoryFault;
+
+    fn faults_during_replacement(eager: bool, rollback: bool) {
+        let (thread, spawn) = DefaultPool::spawn_on_thread("mapping-update-test");
+        {
+            let manager = MappingManager::new_without_primary(&spawn, 0x10000, None);
+            let client = manager.client();
+            let mapper = block_on(client.new_mapper(eager)).unwrap();
+            let memory = GuestMemory::new("test", mapper.clone());
+            let range = MemoryRange::new(0..0x1000);
+            let params = MappingParams {
+                range,
+                backing: MappingBacking::File {
+                    mappable: sparse_mmap::alloc_shared_memory(0x1000, "test")
+                        .unwrap()
+                        .into(),
+                    file_offset: 0,
+                },
+                writable: false,
+                mapping_type: MappingType::Device,
+                policy: MemoryPolicy::none(),
+            };
+            block_on(client.add_mapping(params.clone())).unwrap();
+            memory.read_at(0, &mut [0]).unwrap();
+            // A lazy mapper cannot reject a backing until it is used.
+            // Register an eager mapper to exercise replacement failure.
+            let _eager_mapper = rollback.then(|| {
+                block_on(super::VaMapper::new(
+                    mapper.inner.req_send.clone(),
+                    0x10000,
+                    None,
+                    None,
+                    true,
+                    super::MapperRole::Secondary,
+                ))
+                .unwrap()
+            });
+            block_on(client.begin_mapping_update(range));
+            block_on(client.remove_mappings(range));
+
+            std::thread::scope(|scope| {
+                let host_access = scope.spawn(|| memory.read_at(0, &mut [0]));
+                let host_write = (!rollback).then(|| scope.spawn(|| memory.write_at(0, &[1])));
+                let guest_fault = scope.spawn(|| mapper.resolve(range, !rollback));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let waiting = loop {
+                    if mapper.inner.waiters.lock().as_ref().unwrap().len()
+                        == 2 + usize::from(!rollback)
+                    {
+                        break true;
+                    }
+                    if Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::yield_now();
+                };
+                let mut replacement = params.clone();
+                replacement.writable = true;
+                if rollback {
+                    let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+                    replacement.backing = MappingBacking::File {
+                        mappable: sparse_mmap::new_mappable_from_file(&file, false, false)
+                            .unwrap()
+                            .into(),
+                        file_offset: 0,
+                    };
+                }
+                let result = block_on(client.add_mapping(replacement));
+                let restored = rollback.then(|| {
+                    if result.is_ok() {
+                        block_on(client.remove_mappings(range));
+                    }
+                    block_on(client.add_mapping(params))
+                });
+                block_on(client.end_mapping_update());
+                assert!(waiting, "faults must wait until the replacement finishes");
+                assert_eq!(result.is_err(), rollback);
+                if let Some(restored) = restored {
+                    restored.unwrap();
+                }
+                host_access.join().unwrap().unwrap();
+                if let Some(host_write) = host_write {
+                    host_write.join().unwrap().unwrap();
+                }
+                assert_eq!(guest_fault.join().unwrap().unwrap(), range);
+            });
+            memory.read_at(0, &mut [0]).unwrap();
+            assert_eq!(memory.write_at(0, &[1]).is_err(), rollback);
+            block_on(client.remove_mappings(range));
+            assert!(memory.read_at(0, &mut [0]).is_err());
+        }
+        drop(spawn);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn faults_wait_for_device_mapping_upgrade() {
+        for eager in [true, false] {
+            faults_during_replacement(eager, false);
+        }
+    }
+
+    #[test]
+    fn faults_wait_for_device_mapping_rollback() {
+        for eager in [true, false] {
+            faults_during_replacement(eager, true);
+        }
+    }
 
     /// Tests that private RAM pages can be allocated, written to, and read from.
     #[test]

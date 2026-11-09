@@ -146,8 +146,9 @@ impl MappingManagerClient {
     /// When `eager` is true, the mapper receives all existing mappings
     /// immediately and gets new ones pushed synchronously. File-backed
     /// page faults will fail (since mappings should already be
-    /// established). This is the right choice for the VP process, where
-    /// the hypervisor does not forward page faults back to the VMM.
+    /// established), except while device mappings are being replaced. This is
+    /// the right choice for the VP process, where the hypervisor does not forward
+    /// page faults back to the VMM.
     ///
     /// When `eager` is false, the mapper is lazy: mappings are populated
     /// on demand via page faults. This avoids the cost of pushing every
@@ -245,10 +246,24 @@ impl MappingManagerClient {
 
     /// Removes all mappings in `range`.
     ///
-    /// TODO: allow this to split existing mappings.
+    /// Mappings must be removed whole.
     pub async fn remove_mappings(&self, range: MemoryRange) {
         self.req_send
             .call(MappingRequest::RemoveMappings, range)
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn begin_mapping_update(&self, range: MemoryRange) {
+        self.req_send
+            .call(MappingRequest::BeginMappingUpdate, range)
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn end_mapping_update(&self) {
+        self.req_send
+            .call(MappingRequest::EndMappingUpdate, ())
             .await
             .unwrap();
     }
@@ -271,8 +286,8 @@ pub enum MappingRequest {
     AddMapper(FailableRpc<AddMapperParams, MapperId>),
     RemoveMapper(MapperId),
     /// Request that mappings covering the given range be sent to the specified
-    /// mapper via fire-and-forget `MapLazy` messages. Used by lazy mappers
-    /// to populate on demand.
+    /// mapper via fire-and-forget `MapLazy` messages, or acknowledge device
+    /// mappings already present in an eager mapper.
     SendMappings(MapperId, MemoryRange),
     /// Upgrade a lazy mapper to eager: replay all existing mappings and
     /// mark it for future pushes.
@@ -282,6 +297,9 @@ pub enum MappingRequest {
     /// Returns all mappings that have [`MappingType::Ram`] type.
     GetDmaTargetMappings(Rpc<(), Vec<MappingParams>>),
     Inspect(inspect::Deferred),
+    /// Defer fault requests until replacement and any rollback have finished.
+    BeginMappingUpdate(Rpc<MemoryRange, ()>),
+    EndMappingUpdate(Rpc<(), ()>),
 }
 
 #[derive(InspectMut)]
@@ -290,6 +308,10 @@ struct MappingManagerTask {
     mappings: Vec<Mapping>,
     #[inspect(skip)]
     mappers: Mappers,
+    #[inspect(skip)]
+    updating: Option<MemoryRange>,
+    #[inspect(skip)]
+    pending_mappings: Vec<(MapperId, MemoryRange)>,
 }
 
 fn inspect_mappings(mappings: &Vec<Mapping>) -> impl '_ + Inspect {
@@ -474,6 +496,8 @@ pub enum MapperRequest {
     /// replay `MapEager` Rpcs have completed, so the mapper task
     /// processes it after all replays.
     SetEager(Rpc<(), ()>),
+    /// An eager device mapping is ready for a faulting access to retry.
+    MappingAvailable(MemoryRange, bool),
 }
 
 impl MappingManagerTask {
@@ -483,6 +507,8 @@ impl MappingManagerTask {
                 mappers: Slab::new(),
             },
             mappings: Vec::new(),
+            updating: None,
+            pending_mappings: Vec::new(),
         }
     }
 
@@ -532,6 +558,17 @@ impl MappingManagerTask {
                     rpc.handle_sync(|()| self.get_dma_target_mappings())
                 }
                 MappingRequest::Inspect(deferred) => deferred.inspect(&mut *self),
+                MappingRequest::BeginMappingUpdate(rpc) => rpc.handle_sync(|range| {
+                    assert!(self.updating.replace(range).is_none());
+                }),
+                MappingRequest::EndMappingUpdate(rpc) => rpc.handle_sync(|()| {
+                    assert!(self.updating.take().is_some());
+                    for (id, range) in std::mem::take(&mut self.pending_mappings) {
+                        if self.mappers.mappers.contains(id.0) {
+                            self.send_mappings(id, range);
+                        }
+                    }
+                }),
             }
         }
     }
@@ -666,6 +703,14 @@ impl MappingManagerTask {
     /// to the mapper via fire-and-forget `MapLazy` messages. Gaps send
     /// `NoMapping` so the mapper task can wake waiters with failure.
     fn send_mappings(&mut self, id: MapperId, mut range: MemoryRange) {
+        if self
+            .updating
+            .is_some_and(|updating| updating.overlaps(&range))
+        {
+            self.pending_mappings.push((id, range));
+            return;
+        }
+        let eager = self.mappers.mappers[id.0].eager;
         while !range.is_empty() {
             // Find the next mapping that overlaps range.
             let (this_end, params) = if let Some(mapping) = self
@@ -694,7 +739,18 @@ impl MappingManagerTask {
             let this_range = MemoryRange::new(range.start()..this_end);
             let req = if let Some(params) = params {
                 tracing::debug!(range = %this_range, full_range = %params.range, "sending lazy mapping");
-                MapperRequest::MapLazy(params)
+                if eager {
+                    // Never remap eager RAM on a fault: private memory would
+                    // lose its contents. Only device mappings can be replaced
+                    // while accesses are in flight.
+                    if params.mapping_type == MappingType::Device {
+                        MapperRequest::MappingAvailable(this_range, params.writable)
+                    } else {
+                        MapperRequest::NoMapping(this_range)
+                    }
+                } else {
+                    MapperRequest::MapLazy(params)
+                }
             } else {
                 tracing::debug!(range = %this_range, "no mapping for range");
                 MapperRequest::NoMapping(this_range)
