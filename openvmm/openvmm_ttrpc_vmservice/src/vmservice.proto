@@ -87,13 +87,13 @@ service VM {
 // type.googleapis.com/vmservice.NativeError.
 message NativeError {
     enum Os {
-        UNKNOWN = 0;
+        OS_UNSPECIFIED = 0;
         // Includes both Win32 and Winsock error codes.
-        WINDOWS = 1;
+        OS_WINDOWS = 1;
         // Linux errno values.
-        LINUX = 2;
+        OS_LINUX = 2;
         // macOS errno values.
-        MACOS = 3;
+        OS_MACOS = 3;
     }
     Os os = 1;
     int32 code = 2;
@@ -1166,10 +1166,8 @@ message WindowsPCIDevice {
 message VirtioFs {
     string tag = 1;
     string root_path = 2;
-    reserved 3;
-    reserved "read_only";
     // Backend mount options, separated by ';'. Include "ro" for read-only access.
-    string mount_options = 4;
+    string mount_options = 3;
     // Host-specific virtio-fs options. Omitted on non-Windows hosts.
     WindowsOptions windows_options = 5;
 

@@ -865,7 +865,7 @@ fn grpc_error(err: anyhow::Error) -> Status {
                 } else if cfg!(target_os = "macos") {
                     vmservice::native_error::Os::Macos
                 } else {
-                    vmservice::native_error::Os::Unknown
+                    vmservice::native_error::Os::Unspecified
                 } as i32,
                 code,
             }
