@@ -3124,7 +3124,6 @@ fn build_virtio_fs(
     let vmservice::VirtioFs {
         tag,
         root_path,
-        read_only,
         mount_options,
         windows_options,
     } = config;
@@ -3136,7 +3135,6 @@ fn build_virtio_fs(
         fs: virtio_resources::fs::VirtioFsBackend::HostFs {
             root_path,
             mount_options,
-            read_only,
             windows_options,
         },
     })
