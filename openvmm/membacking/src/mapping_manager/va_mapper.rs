@@ -131,6 +131,8 @@ struct MappingProps {
     /// Backed by private anonymous memory (committed up front) rather than a
     /// shared file/section mapping.
     private: bool,
+    /// Whether the mapping allows writes.
+    writable: bool,
     /// General per-mapping fault counters, always present. See [`FaultStats`].
     stats: FaultStats,
     /// Soft-large-page (Windows THP) state, or `None` when the scheme does not
@@ -374,19 +376,37 @@ impl MapperTask {
             MappingBacking::File {
                 mappable,
                 file_offset,
-            } => {
-                self.map_file(&params, mappable, *file_offset, deferred_protect)?;
-                false
-            }
-            MappingBacking::Private => {
-                self.map_private(&params, deferred_protect)?;
-                true
+            } => self
+                .map_file(&params, mappable, *file_offset, deferred_protect)
+                .map(|()| false),
+            MappingBacking::Private => self.map_private(&params, deferred_protect).map(|()| true),
+        };
+        let private = match private {
+            Ok(private) => private,
+            Err(err) => {
+                // The old contents of the range may already be gone (Windows
+                // unmaps before mapping), so leave it consistently unmapped,
+                // as a failed `MAP_FIXED` would.
+                if let Err(unmap_err) = self
+                    .inner
+                    .mapping
+                    .unmap(params.range.start() as usize, params.range.len() as usize)
+                {
+                    tracing::error!(
+                        error = &unmap_err as &dyn std::error::Error,
+                        range = %params.range,
+                        "failed to clear range after failed mapping"
+                    );
+                }
+                self.inner.remove_mapping(params.range);
+                return Err(err);
             }
         };
         self.inner.record_mapping(
             params.range,
             MappingProps {
                 private,
+                writable: params.writable,
                 stats: FaultStats::default(),
                 soft_lp,
             },
@@ -614,15 +634,41 @@ pub enum VaMapperError {
 #[error("no mapping for {0}")]
 pub struct NoMapping(MemoryRange);
 
+/// Removes the non-empty `range` from the mapping index, re-inserting the
+/// parts of overlapped entries that lie outside it.
+fn carve_index(mappings: &mut RangeMap<u64, MappingProps>, range: MemoryRange) {
+    for (start, last, props) in mappings.remove_range(range.start()..=range.end() - 1) {
+        let entry = MemoryRange::new(start..last + 1);
+        for survivor in crate::split::remainder(entry, range) {
+            // Soft large pages track per-window state for the whole mapping and
+            // only apply to guest RAM, which is never partially replaced.
+            assert!(
+                props.soft_lp.is_none(),
+                "cannot split soft-large-page mapping {entry} at {range}"
+            );
+            let inserted = mappings.insert(
+                survivor.start()..=survivor.end() - 1,
+                MappingProps {
+                    private: props.private,
+                    writable: props.writable,
+                    stats: FaultStats::default(),
+                    soft_lp: None,
+                },
+            );
+            assert!(inserted, "survivor range should be clear");
+        }
+    }
+}
+
 impl MapperInner {
-    /// Records an established mapping in the index, replacing any stale entry
-    /// for the same range.
+    /// Records an established mapping in the index, replacing the overlapped
+    /// part of any existing entries.
     fn record_mapping(&self, range: MemoryRange, props: MappingProps) {
         if range.is_empty() {
             return;
         }
         let mut mappings = self.mappings.write();
-        mappings.remove_range(range.start()..=range.end() - 1);
+        carve_index(&mut mappings, range);
         let inserted = mappings.insert(range.start()..=range.end() - 1, props);
         assert!(
             inserted,
@@ -630,14 +676,13 @@ impl MapperInner {
         );
     }
 
-    /// Removes a mapping from the index.
+    /// Removes `range` from the index, keeping the parts of any entries
+    /// outside it.
     fn remove_mapping(&self, range: MemoryRange) {
         if range.is_empty() {
             return;
         }
-        self.mappings
-            .write()
-            .remove_range(range.start()..=range.end() - 1);
+        carve_index(&mut self.mappings.write(), range);
     }
 
     /// Request that the mapping manager send mappings for the given range.

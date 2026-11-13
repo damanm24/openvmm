@@ -68,6 +68,7 @@ mod mapping_manager;
 mod memory_manager;
 mod partition_mapper;
 mod region_manager;
+mod split;
 
 #[cfg(windows)]
 mod sys {
