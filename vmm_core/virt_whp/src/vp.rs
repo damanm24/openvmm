@@ -725,8 +725,12 @@ mod x86 {
                     SizeInBytes: 1,
                 };
 
+                // The mapping generation before resolving, so that a failure to
+                // populate can be checked against a concurrent remap.
+                let mut generation = None;
                 if self.state.active_vtl == Vtl::Vtl0 {
                     if let Some(resolver) = self.vp.partition.fault_resolver.as_ref() {
+                        generation = Some(resolver.mapping_generation());
                         let page = access.Gpa & !(hvdef::HV_PAGE_SIZE - 1);
                         let fault = MemoryRange::new(page..page + hvdef::HV_PAGE_SIZE);
                         let write =
@@ -772,6 +776,18 @@ mod x86 {
                         return Ok(());
                     }
                     Err(err) => {
+                        // The backing VA may have been briefly unmapped while
+                        // the mapping covering this GPA was being replaced
+                        // (e.g. a virtiofs DAX window being remapped). If so,
+                        // re-execute the access against the new mapping
+                        // instead of treating the GPA as unmapped.
+                        if let (Some(generation), Some(resolver)) =
+                            (generation, self.vp.partition.fault_resolver.as_ref())
+                        {
+                            if resolver.wait_for_mapping_change(generation) {
+                                return Ok(());
+                            }
+                        }
                         tracelimit::warn_ratelimited!(
                             gpa = access.Gpa,
                             access = ?access.AccessInfo.AccessType(),

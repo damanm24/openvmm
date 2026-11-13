@@ -78,6 +78,7 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use thiserror::Error;
@@ -253,6 +254,29 @@ struct MapperInner {
     req_send: mesh::Sender<MappingRequest>,
     /// Maintains a weak reference to avoid a reference cycle with the partition.
     host_access: OnceLock<HostAccess>,
+    /// Counts structural changes to the VA mapping: incremented when a change
+    /// begins and again when it ends, so it is odd while one is in progress.
+    /// See [`MapperInner::begin_change`].
+    generation: AtomicU64,
+    /// Held by the mapper task for the duration of each structural change, so
+    /// that fault handlers can wait one out.
+    change_lock: Mutex<()>,
+}
+
+/// A structural change to the VA mapping in progress. See
+/// [`MapperInner::begin_change`].
+#[must_use]
+struct MappingChange<'a> {
+    generation: &'a AtomicU64,
+    _lock: parking_lot::MutexGuard<'a, ()>,
+}
+
+impl Drop for MappingChange<'_> {
+    fn drop(&mut self) {
+        // Runs before `_lock` is released, so a waiter that acquires the lock
+        // always observes the completed (even) generation.
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -304,6 +328,7 @@ impl MapperTask {
             match req {
                 MapperRequest::Unmap(rpc) => rpc.handle_sync(|range| {
                     tracing::debug!(%range, "invalidate received");
+                    let _change = self.inner.begin_change();
                     self.inner
                         .mapping
                         .unmap(range.start() as usize, range.len() as usize)
@@ -313,13 +338,18 @@ impl MapperTask {
                 MapperRequest::MapEager(rpc) => {
                     rpc.handle_failable_sync(|params| {
                         tracing::debug!(range = %params.range, "eager mapping received");
+                        let _change = self.inner.begin_change();
                         self.map(params)
                     });
                 }
                 MapperRequest::MapLazy(params) => {
                     tracing::debug!(range = %params.range, "lazy mapping received");
                     let (range, writable) = (params.range, params.writable);
-                    match self.map(params) {
+                    let result = {
+                        let _change = self.inner.begin_change();
+                        self.map(params)
+                    };
+                    match result {
                         Ok(()) => self.wake_waiters(range, Some(writable)),
                         Err(e) => {
                             tracing::error!(
@@ -661,6 +691,39 @@ fn carve_index(mappings: &mut RangeMap<u64, MappingProps>, range: MemoryRange) {
 }
 
 impl MapperInner {
+    /// Begins a structural change to the VA mapping, which lasts until the
+    /// returned guard is dropped.
+    ///
+    /// Replacing a mapping can briefly leave its range unmapped (on Windows,
+    /// the old view is unmapped before the new one is mapped), and a fault
+    /// that lands in that gap would otherwise look like an access to unmapped
+    /// memory. Bracketing each change lets fault handlers detect that a
+    /// failure raced with one and retry. See
+    /// [`ResolveMemoryFault::wait_for_mapping_change`].
+    fn begin_change(&self) -> MappingChange<'_> {
+        let lock = self.change_lock.lock();
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        MappingChange {
+            generation: &self.generation,
+            _lock: lock,
+        }
+    }
+
+    /// Returns the current mapping generation.
+    fn mapping_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Returns whether the mapping may have changed since `generation`,
+    /// waiting for any in-progress change to finish first.
+    fn wait_for_mapping_change(&self, generation: u64) -> bool {
+        if generation.is_multiple_of(2) && self.mapping_generation() == generation {
+            return false;
+        }
+        drop(self.change_lock.lock());
+        true
+    }
+
     /// Records an established mapping in the index, replacing the overlapped
     /// part of any existing entries.
     fn record_mapping(&self, range: MemoryRange, props: MappingProps) {
@@ -816,6 +879,8 @@ impl VaMapper {
             supports_memory_fault_resolution,
             req_send,
             host_access: OnceLock::new(),
+            generation: AtomicU64::new(0),
+            change_lock: Mutex::new(()),
         });
 
         // Spawn the mapper thread *before* the AddMapper RPC. The manager
@@ -1068,6 +1133,14 @@ impl ResolveMemoryFault for VaMapper {
                 }),
             None => Ok(fault),
         }
+    }
+
+    fn mapping_generation(&self) -> u64 {
+        self.inner.mapping_generation()
+    }
+
+    fn wait_for_mapping_change(&self, generation: u64) -> bool {
+        self.inner.wait_for_mapping_change(generation)
     }
 }
 
