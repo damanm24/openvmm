@@ -1944,4 +1944,64 @@ mod tests {
         drop(manager_driver);
         manager_thread.join().unwrap();
     }
+
+    /// An unexpected fault on an eager mapping is retried once in case it
+    /// raced with a remap, but a fault that persists without an intervening
+    /// change fails rather than retrying forever.
+    #[pal_async::async_test]
+    async fn test_eager_fault_retry_is_bounded(_spawn: impl Spawn) {
+        use guestmem::GuestMemoryAccess;
+        use guestmem::PageFaultAction;
+
+        let (manager_thread, manager_driver) =
+            pal_async::DefaultPool::spawn_on_thread("mapping-manager-test");
+        let mm = MappingManager::new_without_primary(&manager_driver, 0x10000, None);
+        let client = mm.client().clone();
+        let mapper = client.new_mapper(true).await.unwrap();
+        let mappable: Mappable = sparse_mmap::alloc_shared_memory(0x10000, "a")
+            .unwrap()
+            .into();
+        let retried = |address, write| {
+            matches!(
+                mapper.page_fault(address, 1, write, false),
+                PageFaultAction::Retry
+            )
+        };
+
+        client
+            .add_mapping(file_params(MemoryRange::new(0..0x4000), &mappable, 0))
+            .await
+            .unwrap();
+        client
+            .add_mapping(MappingParams {
+                writable: false,
+                ..file_params(MemoryRange::new(0x4000..0x8000), &mappable, 0x4000)
+            })
+            .await
+            .unwrap();
+
+        assert!(retried(0x1000, true));
+        assert!(!retried(0x1000, true));
+        // A different address gets its own retry.
+        assert!(retried(0x2000, false));
+
+        // Writes to a read-only mapping and faults outside any mapping are
+        // never retried.
+        assert!(!retried(0x5000, true));
+        assert!(retried(0x5000, false));
+        assert!(!retried(0x9000, false));
+
+        // A mapping change allows another retry at the same address.
+        client
+            .remove_mappings(MemoryRange::new(0x3000..0x4000))
+            .await;
+        assert!(retried(0x2000, false));
+        assert!(!retried(0x2000, false));
+
+        drop(mapper);
+        drop(client);
+        drop(mm);
+        drop(manager_driver);
+        manager_thread.join().unwrap();
+    }
 }

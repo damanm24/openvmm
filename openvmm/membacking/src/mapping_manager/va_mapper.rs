@@ -74,6 +74,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use range_map_vec::RangeMap;
 use sparse_mmap::SparseMapping;
+use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -965,6 +966,38 @@ impl VaMapper {
     pub fn process(&self) -> Option<&RemoteProcess> {
         self.process.as_ref()
     }
+
+    /// Returns whether an unexpected fault at `address` on an eager mapping
+    /// may have raced with a structural change, so that the access should be
+    /// retried.
+    ///
+    /// Replacing a mapping can briefly leave its VA unmapped (see
+    /// [`MapperInner::begin_change`]). This waits out any change in progress
+    /// and then retries if the index now covers `address` with the needed
+    /// access. Since the generation at the time of the access is not known,
+    /// a retry is allowed once per address per generation on each thread; a
+    /// fault that persists without an intervening change fails.
+    fn retry_after_mapping_change(&self, address: u64, write: bool) -> bool {
+        thread_local! {
+            static LAST_RETRY: Cell<Option<(MapperId, u64, u64)>> = const { Cell::new(None) };
+        }
+
+        let generation = {
+            let _lock = self.inner.change_lock.lock();
+            self.inner.mapping_generation()
+        };
+        let covered = self
+            .inner
+            .mappings
+            .read()
+            .get_entry(&address)
+            .is_some_and(|(_, _, props)| props.writable || !write);
+        if !covered {
+            return false;
+        }
+        let key = Some((self.id, address, generation));
+        LAST_RETRY.with(|last| last.replace(key) != key)
+    }
 }
 
 /// SAFETY: the underlying VA mapping is guaranteed to be valid for the lifetime
@@ -1049,8 +1082,11 @@ unsafe impl GuestMemoryAccess for VaMapper {
             }
 
             // Eager mapper: file-backed mappings are established proactively.
-            // If we get a page fault, the mapping was never set up or was
-            // torn down.
+            // If we get a page fault, the mapping was never set up, was torn
+            // down, or was being replaced when the access raced with it.
+            if self.retry_after_mapping_change(address, write) {
+                return PageFaultAction::Retry;
+            }
             return PageFaultAction::Fail(PageFaultError::new(
                 GuestMemoryErrorKind::OutOfRange,
                 UnexpectedPageFault,
