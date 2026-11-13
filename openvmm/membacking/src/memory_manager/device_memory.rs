@@ -11,6 +11,8 @@ use crate::mapping_manager::MemoryPolicy;
 use crate::region_manager::MapParams;
 use crate::region_manager::RegionHandle;
 use crate::region_manager::RegionManagerClient;
+use crate::split::SplitMapping;
+use crate::split::carve;
 use futures::executor::block_on;
 use guestmem::MappableGuestMemory;
 use guestmem::MappedMemoryRegion;
@@ -75,9 +77,37 @@ struct DeviceMapping {
     writable: bool,
 }
 
+impl SplitMapping for DeviceMapping {
+    fn range(&self) -> MemoryRange {
+        self.range
+    }
+
+    fn slice(&self, sub: MemoryRange) -> Self {
+        assert!(self.range.contains(&sub));
+        Self {
+            range: sub,
+            file_offset: self.file_offset + (sub.start() - self.range.start()),
+            mappable: self.mappable.clone(),
+            writable: self.writable,
+        }
+    }
+}
+
 impl DeviceMemoryRegion {
     fn validated_memory_range(&self, offset: usize, len: usize) -> io::Result<MemoryRange> {
-        (offset..offset.wrapping_add(len))
+        let end = offset
+            .checked_add(len)
+            .filter(|&end| end <= self.len)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "range {offset:#x}+{len:#x} exceeds region length {:#x}",
+                        self.len
+                    ),
+                )
+            })?;
+        (offset..end)
             .try_into()
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
     }
@@ -105,15 +135,12 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
             writable,
         };
 
+        // Like `mmap` with `MAP_FIXED`, replace the overlapped part of any
+        // existing mappings. If this fails, the range is left unmapped.
         let mut state = self.state.lock();
-        for mapping in &state.mappings {
-            if mapping.range.overlaps(&new_mapping.range) {
-                todo!("support overlapping mappings");
-            }
-        }
-
+        carve(&mut state.mappings, range);
         if let Some(handle) = &state.handle {
-            if let Err(e) = block_on(handle.add_mapping(
+            block_on(handle.add_mapping(
                 new_mapping.range,
                 MappingBacking::File {
                     mappable: new_mapping.mappable.clone(),
@@ -121,9 +148,8 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
                 },
                 new_mapping.writable,
                 MemoryPolicy::none(),
-            )) {
-                return Err(io::Error::other(e));
-            }
+            ))
+            .map_err(io::Error::other)?;
         }
         state.mappings.push(new_mapping);
         Ok(())
@@ -132,13 +158,7 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
     fn unmap(&self, offset: usize, len: usize) -> io::Result<()> {
         let range = self.validated_memory_range(offset, len)?;
         let mut state = self.state.lock();
-        state.mappings.retain(|mapping| {
-            if !range.contains(&mapping.range) && range.overlaps(&mapping.range) {
-                todo!("support overlapping mappings");
-            }
-            range.contains(&mapping.range)
-        });
-
+        carve(&mut state.mappings, range);
         if let Some(handle) = &state.handle {
             block_on(handle.remove_mappings(range));
         }

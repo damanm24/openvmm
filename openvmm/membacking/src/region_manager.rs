@@ -14,6 +14,9 @@ use crate::mapping_manager::MappingParams;
 use crate::mapping_manager::MemoryPolicy;
 use crate::mapping_manager::VaMapper;
 use crate::partition_mapper::PartitionMapper;
+use crate::split::SplitMapping;
+use crate::split::carve;
+use crate::split::remainder;
 use anyhow::Context as _;
 use futures::StreamExt;
 use inspect::Inspect;
@@ -99,6 +102,10 @@ pub trait DmaTarget: Send + Sync {
     /// will always be aligned to mapping boundaries — it will not bisect
     /// any prior mapping. Gaps within the range (unmapped sub-ranges) are
     /// expected and must not cause errors.
+    ///
+    /// When a sub-mapping is partially replaced or unmapped, the region
+    /// manager unmaps the whole prior mapping and then calls `map_dma` again
+    /// for the parts that survive, so DMA to those parts may briefly fault.
     fn unmap_dma(&self, range: MemoryRange) -> anyhow::Result<()>;
 }
 
@@ -318,6 +325,33 @@ struct RegionMappingParams {
     backing: MappingBacking,
     writable: bool,
     policy: MemoryPolicy,
+}
+
+impl SplitMapping for RegionMapping {
+    fn range(&self) -> MemoryRange {
+        self.params.range_in_region
+    }
+
+    fn slice(&self, sub: MemoryRange) -> Self {
+        let range = self.params.range_in_region;
+        assert!(range.contains(&sub));
+        Self {
+            params: RegionMappingParams {
+                range_in_region: sub,
+                backing: self.params.backing.slice(sub.start() - range.start()),
+                writable: self.params.writable,
+                policy: self.params.policy,
+            },
+        }
+    }
+}
+
+/// Returns the parts of the `replaced` mappings that lie outside `range`.
+fn survivors(replaced: &[RegionMapping], range: MemoryRange) -> Vec<RegionMapping> {
+    replaced
+        .iter()
+        .flat_map(|m| remainder(m.range(), range).map(|sub| m.slice(sub)))
+        .collect()
 }
 
 fn range_within(outer: MemoryRange, inner: MemoryRange) -> MemoryRange {
@@ -659,39 +693,66 @@ impl RegionManagerTask {
         let index = self.region_index(id);
         let region = &mut self.regions[index];
 
-        // TODO: split and remove existing mappings, atomically. This is
-        // technically required by virtiofs DAX support.
-        assert!(
-            !region
-                .mappings
-                .iter()
-                .any(|m| m.params.range_in_region.overlaps(&params.range_in_region))
-        );
+        // Replace the overlapped part of any existing mappings, as `mmap` with
+        // `MAP_FIXED` would. If this fails partway, the range is left
+        // unmapped rather than restored.
+        let replaced = carve(&mut region.mappings, params.range_in_region);
 
         if let Some(region_range) = region.active_range() {
             let range = range_within(region_range, params.range_in_region);
-            let writable = params.writable && region.map_params.unwrap().writable;
+            let region_writable = region.map_params.unwrap().writable;
+            let mapping_type = region.params.mapping_type;
+            let survivors = survivors(&replaced, params.range_in_region);
+
+            // DMA targets require that unmaps not bisect a prior mapping, so
+            // unmap the replaced mappings whole and re-map their survivors
+            // once the VA mappings are updated. IOMMU entries must be removed
+            // before the VA mappings change underneath them.
+            for m in &replaced {
+                let replaced_range = range_within(region_range, m.params.range_in_region);
+                for dma_mapper in &self.inner.dma_mappers {
+                    dma_mapper.unmap_dma(replaced_range);
+                }
+            }
+
             // Register the mapping with the mapping manager. File-backed RAM is
             // mmap'd; private/anonymous RAM has its anonymous pages committed
             // directly. Either way the eager VaMapper ends up with backed pages
             // that drive the DMA targets below by host VA.
-            self.inner
+            let writable = params.writable && region_writable;
+            let result = self
+                .inner
                 .mapping_manager
                 .add_mapping(MappingParams {
                     range,
                     backing: params.backing.clone(),
                     writable,
-                    mapping_type: region.params.mapping_type,
+                    mapping_type,
                     policy: params.policy,
                 })
-                .await?;
+                .await;
+            if let Err(e) = result {
+                // The mapping manager may have rejected the request before
+                // replacing anything, so clear the range explicitly to match
+                // the region's mapping list.
+                self.inner.mapping_manager.remove_mappings(range).await;
+                self.inner.remap_dma_survivors(
+                    region_range,
+                    region_writable,
+                    mapping_type,
+                    &survivors,
+                );
+                return Err(e);
+            }
+            self.inner
+                .remap_dma_survivors(region_range, region_writable, mapping_type, &survivors);
 
             for (dma_idx, dma_mapper) in self.inner.dma_mappers.iter().enumerate() {
                 if let Err(e) = dma_mapper.map_dma(SubMapping {
                     range,
                     backing: &params.backing,
                     writable,
-                    mapping_type: region.params.mapping_type,
+                    mapping_type,
                 }) {
                     // Roll back: unmap from DMA mappers that already
                     // succeeded, then remove the VA mapping.
@@ -711,38 +772,20 @@ impl RegionManagerTask {
     async fn remove_mappings(&mut self, id: RegionId, range_in_region: MemoryRange) {
         let index = self.region_index(id);
         let region = &mut self.regions[index];
-        let active_range = region.active_range();
 
-        // Collect absolute GPA ranges of mappings being removed (before
-        // mutating the vec) so we can notify DMA mappers.
-        let removed_ranges: Vec<MemoryRange> = if active_range.is_some() {
-            let region_range = region.params.range;
-            region
-                .mappings
-                .iter()
-                .filter(|m| range_in_region.contains(&m.params.range_in_region))
-                .map(|m| range_within(region_range, m.params.range_in_region))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Remove the range, keeping the parts of any mappings outside it.
+        let removed = carve(&mut region.mappings, range_in_region);
 
-        region.mappings.retain_mut(|mapping| {
-            if !range_in_region.contains(&mapping.params.range_in_region) {
-                assert!(
-                    !range_in_region.overlaps(&mapping.params.range_in_region),
-                    "no partial unmappings allowed"
-                );
-                return true;
-            }
-            false
-        });
-        if let Some(region_range) = active_range {
+        if let Some(region_range) = region.active_range() {
             // Unmap DMA mappers first — IOMMU entries must be removed before
             // the VA mappings are torn down (same ordering as disable_region).
-            for &removed in &removed_ranges {
+            // Unmap the removed mappings whole, since DMA targets require that
+            // unmaps not bisect a prior mapping, and re-map their survivors
+            // afterward.
+            for m in &removed {
+                let removed_range = range_within(region_range, m.params.range_in_region);
                 for dma_mapper in &self.inner.dma_mappers {
-                    dma_mapper.unmap_dma(removed);
+                    dma_mapper.unmap_dma(removed_range);
                 }
             }
 
@@ -750,6 +793,14 @@ impl RegionManagerTask {
                 .mapping_manager
                 .remove_mappings(range_within(region_range, range_in_region))
                 .await;
+
+            let region_writable = region.map_params.unwrap().writable;
+            self.inner.remap_dma_survivors(
+                region_range,
+                region_writable,
+                region.params.mapping_type,
+                &survivors(&removed, range_in_region),
+            );
 
             // Currently there is no need to tell the partitions about the
             // removed mappings; they will find out when the underlying VA is
@@ -759,6 +810,36 @@ impl RegionManagerTask {
 }
 
 impl RegionManagerTaskInner {
+    /// Maps the surviving parts of split mappings back into every DMA mapper.
+    ///
+    /// Failures are logged rather than returned: the survivors remain mapped
+    /// for the CPU, and only DMA to them is affected.
+    fn remap_dma_survivors(
+        &self,
+        region_range: MemoryRange,
+        region_writable: bool,
+        mapping_type: MappingType,
+        survivors: &[RegionMapping],
+    ) {
+        for survivor in survivors {
+            let range = range_within(region_range, survivor.params.range_in_region);
+            for dma_mapper in &self.dma_mappers {
+                if let Err(e) = dma_mapper.map_dma(SubMapping {
+                    range,
+                    backing: &survivor.params.backing,
+                    writable: survivor.params.writable && region_writable,
+                    mapping_type,
+                }) {
+                    tracelimit::warn_ratelimited!(
+                        error = &*e as &dyn std::error::Error,
+                        %range,
+                        "failed to re-map DMA for split mapping"
+                    );
+                }
+            }
+        }
+    }
+
     async fn enable_region(&mut self, region: &mut Region) -> anyhow::Result<()> {
         assert!(!region.is_active);
         let map_params = region.map_params.unwrap();
@@ -1078,7 +1159,10 @@ impl RegionHandle {
     /// mappings additionally drive DMA targets only by host VA, since they have
     /// no backing fd.
     ///
-    /// TODO: allow this to split+overwrite existing mappings.
+    /// Like `mmap` with `MAP_FIXED`, this replaces the overlapped part of any
+    /// existing mappings in `range_in_region`; the parts outside it survive.
+    /// If establishing the new mapping fails, `range_in_region` is left
+    /// unmapped.
     pub async fn add_mapping(
         &self,
         range_in_region: MemoryRange,
@@ -1105,7 +1189,8 @@ impl RegionHandle {
 
     /// Removes the mappings in `range` within this region.
     ///
-    /// TODO: allow this to split mappings.
+    /// Mappings that straddle the edges of `range` are split, keeping the
+    /// parts outside it.
     pub async fn remove_mappings(&self, range: MemoryRange) {
         let _ = self
             .req_send
@@ -1595,6 +1680,127 @@ mod tests {
             .await;
 
         assert!(result.is_err(), "add_mapping should propagate DMA failure");
+    }
+
+    fn region_mappings(t: &DmaTestTask, id: RegionId) -> Vec<(MemoryRange, u64)> {
+        let region = &t.task.regions[t.task.region_index(id)];
+        let mut v: Vec<_> = region
+            .mappings
+            .iter()
+            .map(|m| (m.params.range_in_region, m.params.backing.file_offset()))
+            .collect();
+        v.sort_by_key(|(r, _)| r.start());
+        v
+    }
+
+    fn file_mapping(t: &DmaTestTask, range: Range<u64>, file_offset: u64) -> RegionMappingParams {
+        RegionMappingParams {
+            range_in_region: MemoryRange::new(range),
+            backing: MappingBacking::File {
+                mappable: t.mappable.clone(),
+                file_offset,
+            },
+            writable: true,
+            policy: MemoryPolicy::none(),
+        }
+    }
+
+    /// Replacing part of a mapping unmaps the old mapping from DMA whole, then
+    /// re-maps its survivors and maps the replacement.
+    #[async_test]
+    async fn test_dma_replace_overlap(spawn: impl Spawn) {
+        let mut t = DmaTestTask::new(&spawn);
+        let r = t.add_region(0x10000..0x20000).await;
+        t.add_mapping(r, 0x0..0x10000).await;
+
+        let target = Arc::new(RecordingDmaTarget::default());
+        let _id = t.task.add_dma_mapper(target.clone(), false).await.unwrap();
+        target.take_events();
+
+        let params = file_mapping(&t, 0x4000..0x8000, 0x1000);
+        t.task.add_mapping(r, params).await.unwrap();
+        assert_eq!(
+            target.take_events(),
+            vec![
+                DmaEvent::Unmap(MemoryRange::new(0x10000..0x20000)),
+                DmaEvent::Map(MemoryRange::new(0x10000..0x14000)),
+                DmaEvent::Map(MemoryRange::new(0x18000..0x20000)),
+                DmaEvent::Map(MemoryRange::new(0x14000..0x18000)),
+            ]
+        );
+        assert_eq!(
+            region_mappings(&t, r),
+            [
+                (MemoryRange::new(0x0..0x4000), 0),
+                (MemoryRange::new(0x4000..0x8000), 0x1000),
+                (MemoryRange::new(0x8000..0x10000), 0x8000),
+            ]
+        );
+    }
+
+    /// Removing part of a mapping unmaps it from DMA whole and re-maps the
+    /// parts outside the removed range.
+    #[async_test]
+    async fn test_dma_partial_remove(spawn: impl Spawn) {
+        let mut t = DmaTestTask::new(&spawn);
+        let r = t.add_region(0x0..0x10000).await;
+        t.add_mapping(r, 0x0..0x10000).await;
+
+        let target = Arc::new(RecordingDmaTarget::default());
+        let _id = t.task.add_dma_mapper(target.clone(), false).await.unwrap();
+        target.take_events();
+
+        t.task
+            .remove_mappings(r, MemoryRange::new(0x4000..0x8000))
+            .await;
+        assert_eq!(
+            target.take_events(),
+            vec![
+                DmaEvent::Unmap(MemoryRange::new(0x0..0x10000)),
+                DmaEvent::Map(MemoryRange::new(0x0..0x4000)),
+                DmaEvent::Map(MemoryRange::new(0x8000..0x10000)),
+            ]
+        );
+        assert_eq!(
+            region_mappings(&t, r),
+            [
+                (MemoryRange::new(0x0..0x4000), 0),
+                (MemoryRange::new(0x8000..0x10000), 0x8000),
+            ]
+        );
+    }
+
+    /// A replacement that fails leaves its range unmapped, keeping the
+    /// survivors of the mapping it overlapped.
+    #[async_test]
+    async fn test_replace_failure_leaves_hole(spawn: impl Spawn) {
+        let mut t = DmaTestTask::new(&spawn);
+        let r = t.add_region(0x0..0x10000).await;
+        t.add_mapping(r, 0x0..0x10000).await;
+
+        // Succeed for the replayed mapping and the two re-mapped survivors,
+        // then fail the replacement.
+        let target = Arc::new(FailAfterDmaTarget::new(3));
+        let _id = t.task.add_dma_mapper(target.clone(), false).await.unwrap();
+        target.take_events();
+
+        let params = file_mapping(&t, 0x4000..0x8000, 0x1000);
+        t.task.add_mapping(r, params).await.unwrap_err();
+        assert_eq!(
+            target.take_events(),
+            vec![
+                DmaEvent::Unmap(MemoryRange::new(0x0..0x10000)),
+                DmaEvent::Map(MemoryRange::new(0x0..0x4000)),
+                DmaEvent::Map(MemoryRange::new(0x8000..0x10000)),
+            ]
+        );
+        assert_eq!(
+            region_mappings(&t, r),
+            [
+                (MemoryRange::new(0x0..0x4000), 0),
+                (MemoryRange::new(0x8000..0x10000), 0x8000),
+            ]
+        );
     }
 
     #[async_test]
