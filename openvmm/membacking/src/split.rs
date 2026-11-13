@@ -30,34 +30,95 @@ pub(crate) fn remainder(outer: MemoryRange, cut: MemoryRange) -> impl Iterator<I
     before.into_iter().chain(after)
 }
 
+fn affected_indices<T: SplitMapping>(mappings: &[T], range: MemoryRange) -> std::ops::Range<usize> {
+    let start = mappings.partition_point(|mapping| mapping.range().end() <= range.start());
+    let end = start
+        + mappings[start..].partition_point(|mapping| mapping.range().start() < range.end());
+    start..end
+}
+
+/// Returns the number of mappings that would remain after carving `range`.
+///
+/// `mappings` must be sorted by start address and contain no overlapping
+/// ranges.
+pub(crate) fn count_after_carve<T: SplitMapping>(mappings: &[T], range: MemoryRange) -> usize {
+    if range.is_empty() {
+        return mappings.len();
+    }
+
+    let affected = affected_indices(mappings, range);
+    mappings.len()
+        - affected.len()
+        + mappings[affected.clone()]
+            .iter()
+            .map(|mapping| remainder(mapping.range(), range).count())
+            .sum::<usize>()
+}
+
 /// Removes `range` from `mappings`, splitting any mapping that straddles one
 /// of its boundaries.
 ///
-/// Each mapping that overlaps `range` is replaced in place by its surviving
-/// pieces (see [`remainder`]), so the relative order of `mappings` is
-/// preserved. Returns the original, unclipped mappings that overlapped
-/// `range`, in their previous order.
+/// `mappings` must be sorted by start address and contain no overlapping
+/// ranges. Returns the original, unclipped mappings that overlapped `range`,
+/// in address order.
 pub(crate) fn carve<T: SplitMapping>(mappings: &mut Vec<T>, range: MemoryRange) -> Vec<T> {
-    if range.is_empty() || !mappings.iter().any(|m| m.range().overlaps(&range)) {
+    if range.is_empty() {
         return Vec::new();
     }
-    let mut removed = Vec::new();
-    for mapping in std::mem::take(mappings) {
-        let mapping_range = mapping.range();
-        if !mapping_range.overlaps(&range) {
-            mappings.push(mapping);
-            continue;
-        }
-        mappings.extend(remainder(mapping_range, range).map(|sub| mapping.slice(sub)));
-        removed.push(mapping);
+
+    let affected = affected_indices(mappings, range);
+    if affected.is_empty() {
+        return Vec::new();
     }
+
+    let removed: Vec<_> = mappings.drain(affected.clone()).collect();
+    let survivors = removed
+        .iter()
+        .flat_map(|mapping| remainder(mapping.range(), range).map(|sub| mapping.slice(sub)))
+        .collect::<Vec<_>>();
+    mappings.splice(affected.start..affected.start, survivors);
     removed
+}
+
+/// Inserts a mapping in address order.
+///
+/// `mappings` must contain non-overlapping ranges.
+pub(crate) fn insert_sorted<T: SplitMapping>(mappings: &mut Vec<T>, mapping: T) {
+    let range = mapping.range();
+    let index = mappings.partition_point(|existing| existing.range().start() < range.start());
+    assert!(
+        index == 0 || !mappings[index - 1].range().overlaps(&range),
+        "mapping overlaps its predecessor"
+    );
+    assert!(
+        index == mappings.len() || !mappings[index].range().overlaps(&range),
+        "mapping overlaps its successor"
+    );
+    mappings.insert(index, mapping);
+}
+
+/// Carves `range` only if no more than `limit` mappings would remain.
+///
+/// On error, `mappings` is left unchanged.
+pub(crate) fn carve_with_limit<T: SplitMapping>(
+    mappings: &mut Vec<T>,
+    range: MemoryRange,
+    limit: usize,
+) -> Result<Vec<T>, usize> {
+    let count = count_after_carve(mappings, range);
+    if count > limit {
+        return Err(count);
+    }
+    Ok(carve(mappings, range))
 }
 
 #[cfg(test)]
 mod tests {
     use super::SplitMapping;
     use super::carve;
+    use super::carve_with_limit;
+    use super::count_after_carve;
+    use super::insert_sorted;
     use super::remainder;
     use memory_range::MemoryRange;
     use test_with_tracing::test;
@@ -156,5 +217,43 @@ mod tests {
         assert!(carve(&mut v, r(0x1000, 0x2000)).is_empty());
         assert!(carve(&mut v, MemoryRange::EMPTY).is_empty());
         assert_eq!(v, [m(0, 0x1000, 0)]);
+    }
+
+    #[test]
+    fn carve_uses_sorted_ranges_and_preserves_order() {
+        let mut v = vec![m(0, 0x1000, 0), m(0x2000, 0x4000, 0x10000)];
+        let removed = carve(&mut v, r(0x2800, 0x3000));
+        assert_eq!(removed, [m(0x2000, 0x4000, 0x10000)]);
+        assert_eq!(
+            v,
+            [
+                m(0, 0x1000, 0),
+                m(0x2000, 0x2800, 0x10000),
+                m(0x3000, 0x4000, 0x11000),
+            ]
+        );
+    }
+
+    #[test]
+    fn insert_sorted_out_of_order() {
+        let mut v = vec![m(0, 0x1000, 0), m(0x2000, 0x3000, 0x2000)];
+        insert_sorted(&mut v, m(0x1000, 0x2000, 0x1000));
+        assert_eq!(
+            v,
+            [
+                m(0, 0x1000, 0),
+                m(0x1000, 0x2000, 0x1000),
+                m(0x2000, 0x3000, 0x2000),
+            ]
+        );
+    }
+
+    #[test]
+    fn bounded_carve_does_not_mutate_on_limit_error() {
+        let mut v = vec![m(0, 0x5000, 0)];
+        let original = vec![m(0, 0x5000, 0)];
+        assert_eq!(count_after_carve(&v, r(0x1000, 0x2000)), 2);
+        assert_eq!(carve_with_limit(&mut v, r(0x1000, 0x2000), 1), Err(2));
+        assert_eq!(v, original);
     }
 }

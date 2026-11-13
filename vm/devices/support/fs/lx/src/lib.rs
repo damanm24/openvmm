@@ -209,6 +209,7 @@ impl From<io::Error> for Error {
             io::ErrorKind::WouldBlock => EAGAIN,
             io::ErrorKind::TimedOut => ETIMEDOUT,
             io::ErrorKind::Interrupted => EINTR,
+            io::ErrorKind::OutOfMemory => ENOMEM,
             _ => EINVAL,
         };
 

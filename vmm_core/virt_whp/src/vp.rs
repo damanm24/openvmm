@@ -730,9 +730,9 @@ mod x86 {
                 let mut generation = None;
                 if self.state.active_vtl == Vtl::Vtl0 {
                     if let Some(resolver) = self.vp.partition.fault_resolver.as_ref() {
-                        generation = Some(resolver.mapping_generation());
                         let page = access.Gpa & !(hvdef::HV_PAGE_SIZE - 1);
                         let fault = MemoryRange::new(page..page + hvdef::HV_PAGE_SIZE);
+                        generation = Some((resolver.mapping_generation(), fault));
                         let write =
                             access.AccessInfo.AccessType() == whp::abi::WHvMemoryAccessWrite;
                         match resolver.resolve(fault, write) {
@@ -781,10 +781,10 @@ mod x86 {
                         // (e.g. a virtiofs DAX window being remapped). If so,
                         // re-execute the access against the new mapping
                         // instead of treating the GPA as unmapped.
-                        if let (Some(generation), Some(resolver)) =
+                        if let (Some((generation, fault)), Some(resolver)) =
                             (generation, self.vp.partition.fault_resolver.as_ref())
                         {
-                            if resolver.wait_for_mapping_change(generation) {
+                            if resolver.wait_for_mapping_change(generation, fault) {
                                 return Ok(());
                             }
                         }

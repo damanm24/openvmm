@@ -23,10 +23,10 @@
 //! the surviving parts are briefly unmapped too, even though the guest asked
 //! to change only the requested range and may be using the rest. To cover this:
 //!
-//! - Host accesses through guest memory that fault in this window wait for the
-//!   change to finish and are retried.
-//! - Guest accesses that fault in this window are re-executed when the
-//!   hypervisor backend resolves memory faults through
+//! - On Windows, host accesses through guest memory that fault in this window
+//!   wait for the change to finish and are retried.
+//! - On Windows, guest accesses that fault in this window are re-executed when
+//!   the hypervisor backend resolves memory faults through
 //!   [`virt::ResolveMemoryFault`] (WHP on x86-64). Other backends do not retry
 //!   them, so they are handled like accesses to unmapped memory.
 //! - DMA targets unmap each overlapped mapping in full and then remap its
@@ -42,8 +42,8 @@ use crate::region_manager::MapParams;
 use crate::region_manager::RegionHandle;
 use crate::region_manager::RegionManagerClient;
 use crate::split::SplitMapping;
-use crate::split::carve;
-use crate::split::remainder;
+use crate::split::carve_with_limit;
+use crate::split::insert_sorted;
 use futures::executor::block_on;
 use guestmem::MappableGuestMemory;
 use guestmem::MappedMemoryRegion;
@@ -130,30 +130,9 @@ impl SplitMapping for DeviceMapping {
 /// view (on Windows, a separately mapped section view), an IOMMU entry per DMA
 /// target, and linear work on every later map or unmap. This bounds that cost.
 /// It allows a 64 GiB virtio-fs DAX window to be fully mapped in 2 MiB chunks.
-const MAX_MAPPINGS_PER_REGION: usize = 32768;
-
-/// Returns how many mappings remain after removing `range` from `mappings`.
-fn count_after_carve(mappings: &[DeviceMapping], range: MemoryRange) -> usize {
-    mappings
-        .iter()
-        .map(|m| {
-            if m.range.overlaps(&range) {
-                remainder(m.range, range).count()
-            } else {
-                1
-            }
-        })
-        .sum()
-}
-
-fn check_mapping_limit(count: usize) -> io::Result<()> {
-    if count > MAX_MAPPINGS_PER_REGION {
-        return Err(io::Error::other(format!(
-            "device memory region would exceed {MAX_MAPPINGS_PER_REGION} mappings"
-        )));
-    }
-    Ok(())
-}
+const MAX_DEVICE_MEMORY_SIZE_BYTES: usize = 64 << 30;
+const MIN_MAPPING_SIZE_BYTES: usize = 2 << 20;
+const MAX_MAPPINGS_PER_REGION: usize = MAX_DEVICE_MEMORY_SIZE_BYTES / MIN_MAPPING_SIZE_BYTES;
 
 impl DeviceMemoryRegion {
     fn validated_memory_range(&self, offset: usize, len: usize) -> io::Result<MemoryRange> {
@@ -200,8 +179,18 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
         // Like `mmap` with `MAP_FIXED`, replace the overlapped part of any
         // existing mappings. If mapping fails, the range is left unmapped.
         let mut state = self.state.lock();
-        check_mapping_limit(count_after_carve(&state.mappings, range) + 1)?;
-        carve(&mut state.mappings, range);
+        carve_with_limit(&mut state.mappings, range, MAX_MAPPINGS_PER_REGION - 1).map_err(
+            |count| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!(
+                        "device memory region would exceed {MAX_MAPPINGS_PER_REGION} mappings \
+                         after adding mapping (would have {})",
+                        count + 1
+                    ),
+                )
+            },
+        )?;
         if let Some(handle) = &state.handle {
             block_on(handle.add_mapping(
                 new_mapping.range,
@@ -214,15 +203,24 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
             ))
             .map_err(io::Error::other)?;
         }
-        state.mappings.push(new_mapping);
+        insert_sorted(&mut state.mappings, new_mapping);
         Ok(())
     }
 
     fn unmap(&self, offset: usize, len: usize) -> io::Result<()> {
         let range = self.validated_memory_range(offset, len)?;
         let mut state = self.state.lock();
-        check_mapping_limit(count_after_carve(&state.mappings, range))?;
-        carve(&mut state.mappings, range);
+        carve_with_limit(&mut state.mappings, range, MAX_MAPPINGS_PER_REGION).map_err(
+            |count| {
+                io::Error::new(
+                    io::ErrorKind::OutOfMemory,
+                    format!(
+                        "device memory region would exceed {MAX_MAPPINGS_PER_REGION} mappings \
+                         after unmap (would have {count})"
+                    ),
+                )
+            },
+        )?;
         if let Some(handle) = &state.handle {
             block_on(handle.remove_mappings(range));
         }

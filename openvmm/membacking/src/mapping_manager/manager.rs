@@ -15,6 +15,7 @@ use crate::RemoteProcess;
 use crate::region_manager::MappingType;
 use crate::split::SplitMapping;
 use crate::split::carve;
+use crate::split::insert_sorted;
 use futures::StreamExt;
 use futures::future::join_all;
 use guestmem::ProvideShareableRegions;
@@ -237,8 +238,9 @@ impl MappingManagerClient {
     ///
     /// Like `mmap(MAP_FIXED)`, this replaces any part of an existing mapping
     /// that overlaps `params.range`; the parts of existing mappings outside
-    /// the range survive. If this fails for any reason, `params.range` is left
-    /// unmapped.
+    /// the range survive. If a failure occurs after replacement begins,
+    /// `params.range` is left unmapped. Requests rejected before replacement
+    /// begins leave existing mappings unchanged.
     pub async fn add_mapping(&self, params: MappingParams) -> anyhow::Result<()> {
         self.req_send
             .call_failable(MappingRequest::AddMapping, params)
@@ -714,13 +716,16 @@ impl MappingManagerTask {
     /// `NoMapping` so the mapper task can wake waiters with failure.
     fn send_mappings(&mut self, id: MapperId, mut range: MemoryRange) {
         while !range.is_empty() {
-            // Find the next mapping that overlaps range.
-            let (this_end, params) = if let Some(mapping) = self
+            // Mappings are kept sorted and non-overlapping, so the first
+            // range ending after `range.start()` is the only possible match.
+            let index = self
                 .mappings
-                .iter_mut()
-                .filter(|mapping| mapping.params.range.overlaps(&range))
-                .min_by_key(|mapping| mapping.params.range.start())
-            {
+                .partition_point(|mapping| mapping.params.range.end() <= range.start());
+            let mapping = self
+                .mappings
+                .get_mut(index)
+                .filter(|mapping| mapping.params.range.start() < range.end());
+            let (this_end, params) = if let Some(mapping) = mapping {
                 if mapping.params.range.start() <= range.start() {
                     if !mapping.active_mappers.contains(&id) {
                         mapping.active_mappers.push(id);
@@ -756,10 +761,9 @@ impl MappingManagerTask {
 
         // Private memory is anonymous and lives in a single mapper's address
         // space, so it requires at most one mapper. Reject adding private RAM
-        // (e.g. via hotplug) while more than one mapper is present. Like any
-        // other failure, this leaves the range unmapped.
+        // (e.g. via hotplug) while more than one mapper is present. This
+        // validation happens before replacement, so existing mappings survive.
         if matches!(params.backing, MappingBacking::Private) && self.mappers.mappers.len() > 1 {
-            self.remove_mappings(params.range).await;
             anyhow::bail!("cannot add private memory while multiple mappers are present");
         }
 
@@ -814,10 +818,13 @@ impl MappingManagerTask {
             }
         }
 
-        self.mappings.push(Mapping {
-            params,
-            active_mappers,
-        });
+        insert_sorted(
+            &mut self.mappings,
+            Mapping {
+                params,
+                active_mappers,
+            },
+        );
         Ok(())
     }
 
@@ -1847,10 +1854,10 @@ mod tests {
         );
     }
 
-    /// A rejected private mapping leaves its range unmapped, like any other
-    /// failed `add_mapping`.
+    /// Validation rejection happens before replacement, so existing mappings
+    /// in the requested range remain intact.
     #[pal_async::async_test]
-    async fn test_rejected_private_mapping_leaves_hole(_spawn: impl Spawn) {
+    async fn test_rejected_private_mapping_preserves_existing_mapping(_spawn: impl Spawn) {
         let (mut task, _params) = task_with_mapping().await;
         let (send1, _recv1) = mesh::channel();
         let (send2, _recv2) = mesh::channel();
@@ -1866,13 +1873,7 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert_eq!(
-            ranges(&task),
-            [
-                (MemoryRange::new(0..0x2000), 0),
-                (MemoryRange::new(0x3000..0x10000), 0x3000),
-            ]
-        );
+        assert_eq!(ranges(&task), [(MemoryRange::new(0..0x10000), 0)]);
     }
 
     /// End-to-end check against a real eager mapper: replaced and partially
@@ -1938,6 +1939,7 @@ mod tests {
     /// Each change that can unmap something in use advances the mapper's
     /// generation, so a fault handler can tell that a failure may have raced
     /// with a remap. Mapping into an empty range does not.
+    #[cfg(windows)]
     #[pal_async::async_test]
     async fn test_mapping_generation(_spawn: impl Spawn) {
         use virt::ResolveMemoryFault;
@@ -1950,90 +1952,33 @@ mod tests {
         let mappable: Mappable = sparse_mmap::alloc_shared_memory(0x10000, "a")
             .unwrap()
             .into();
+        let fault = MemoryRange::new(0x2000..0x3000);
 
         let g0 = mapper.mapping_generation();
         assert!(g0.is_multiple_of(2));
-        assert!(!mapper.wait_for_mapping_change(g0));
-        // A generation read mid-change always reports a change.
-        assert!(mapper.wait_for_mapping_change(g0 + 1));
+        assert!(!mapper.wait_for_mapping_change(g0, fault));
+        // A generation read mid-change still requires a current mapping.
+        assert!(!mapper.wait_for_mapping_change(g0 + 1, fault));
 
         client
             .add_mapping(file_params(MemoryRange::new(0..0x10000), &mappable, 0))
             .await
             .unwrap();
         assert_eq!(mapper.mapping_generation(), g0);
+        assert!(!mapper.wait_for_mapping_change(g0, fault));
 
         client
-            .add_mapping(file_params(MemoryRange::new(0x2000..0x3000), &mappable, 0))
+            .add_mapping(file_params(fault, &mappable, 0))
             .await
             .unwrap();
         let g1 = mapper.mapping_generation();
         assert!(g1 > g0 && g1.is_multiple_of(2));
-        assert!(mapper.wait_for_mapping_change(g0));
-        assert!(!mapper.wait_for_mapping_change(g1));
+        assert!(mapper.wait_for_mapping_change(g0, fault));
+        assert!(!mapper.wait_for_mapping_change(g1, fault));
 
-        client.remove_mappings(MemoryRange::new(0..0x1000)).await;
-        assert!(mapper.wait_for_mapping_change(g1));
-
-        drop(mapper);
-        drop(client);
-        drop(mm);
-        drop(manager_driver);
-        manager_thread.join().unwrap();
-    }
-
-    /// An unexpected fault on an eager mapping is retried once in case it
-    /// raced with a remap, but a fault that persists without an intervening
-    /// change fails rather than retrying forever.
-    #[pal_async::async_test]
-    async fn test_eager_fault_retry_is_bounded(_spawn: impl Spawn) {
-        use guestmem::GuestMemoryAccess;
-        use guestmem::PageFaultAction;
-
-        let (manager_thread, manager_driver) =
-            pal_async::DefaultPool::spawn_on_thread("mapping-manager-test");
-        let mm = MappingManager::new_without_primary(&manager_driver, 0x10000, None);
-        let client = mm.client().clone();
-        let mapper = client.new_mapper(true).await.unwrap();
-        let mappable: Mappable = sparse_mmap::alloc_shared_memory(0x10000, "a")
-            .unwrap()
-            .into();
-        let retried = |address, write| {
-            matches!(
-                mapper.page_fault(address, 1, write, false),
-                PageFaultAction::Retry
-            )
-        };
-
-        client
-            .add_mapping(file_params(MemoryRange::new(0..0x4000), &mappable, 0))
-            .await
-            .unwrap();
-        client
-            .add_mapping(MappingParams {
-                writable: false,
-                ..file_params(MemoryRange::new(0x4000..0x8000), &mappable, 0x4000)
-            })
-            .await
-            .unwrap();
-
-        assert!(retried(0x1000, true));
-        assert!(!retried(0x1000, true));
-        // A different address gets its own retry.
-        assert!(retried(0x2000, false));
-
-        // Writes to a read-only mapping and faults outside any mapping are
-        // never retried.
-        assert!(!retried(0x5000, true));
-        assert!(retried(0x5000, false));
-        assert!(!retried(0x9000, false));
-
-        // A mapping change allows another retry at the same address.
-        client
-            .remove_mappings(MemoryRange::new(0x3000..0x4000))
-            .await;
-        assert!(retried(0x2000, false));
-        assert!(!retried(0x2000, false));
+        let unmapped = MemoryRange::new(0..0x1000);
+        client.remove_mappings(unmapped).await;
+        assert!(!mapper.wait_for_mapping_change(g1, unmapped));
 
         drop(mapper);
         drop(client);
