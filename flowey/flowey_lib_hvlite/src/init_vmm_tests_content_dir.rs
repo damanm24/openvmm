@@ -11,6 +11,7 @@ use crate::build_openvmm::OpenvmmOutput;
 use crate::build_openvmm_vhost::OpenvmmVhostOutput;
 use crate::build_pipette::PipetteOutput;
 use crate::build_prep_steps::PrepStepsOutput;
+use crate::build_snp_linux_direct_igvm::SnpLinuxDirectIgvmOutput;
 use crate::build_test_igvm_agent_rpc_server::TestIgvmAgentRpcServerOutput;
 use crate::build_tmk_vmm::TmkVmmOutput;
 use crate::build_tmks::TmksOutput;
@@ -157,7 +158,7 @@ macro_rules! define_vmm_tests_built_artifacts {
                 }
             }
 
-            #[derive(Serialize, Deserialize, Default, Debug)]
+            #[derive(Serialize, Deserialize, Default, Debug, Clone)]
             pub struct [<$name Selections>] {$($(
                 pub [<$artifact _ $variant>]: bool,
             )*)*}
@@ -259,8 +260,12 @@ define_vmm_tests_built_artifacts!(
             host_tools::FLOWEY_HVLITE_WINDOWS_AARCH64
         ),
         linux_x64(
-            (FloweyHvliteOutput::LinuxBin { bin, dbg}, bin, dbg),
+            (FloweyHvliteOutput::LinuxBin { bin, dbg }, bin, dbg),
             host_tools::FLOWEY_HVLITE_LINUX_X64
+        ),
+        linux_musl_x64(
+            (FloweyHvliteOutput::LinuxBin { bin, dbg }, bin, dbg),
+            host_tools::FLOWEY_HVLITE_LINUX_X64_MUSL
         ),
     ) => FloweyHvliteOutput,
     nextest_vmm_tests_archive(
@@ -413,6 +418,18 @@ define_vmm_tests_built_artifacts!(
             openhcl_igvm::LATEST_LINUX_DIRECT_TEST_X64
         ),
     ) => OpenhclIgvmOutput,
+    openhcl_sivm(
+        x64(
+            (OpenhclIgvmOutput::X64TestSivm { igvm_bin }, igvm_bin),
+            openhcl_igvm::LATEST_SIVM_TEST_X64
+        ),
+    ) => OpenhclIgvmOutput,
+    snp_linux_direct_igvm(
+        x64(
+            (SnpLinuxDirectIgvmOutput { igvm_bin, igvm_map }, igvm_bin, igvm_map),
+            snp_igvm::SNP_LINUX_DIRECT_IGVM_X64
+        ),
+    ) => SnpLinuxDirectIgvmOutput,
     tmks(
         x64(
             (TmksOutput { bin, dbg}, bin, dbg),
@@ -889,6 +906,7 @@ pub mod vmm_tests_artifact_builders {
             openvmm_vhost_linux_x64 => OpenvmmVhostOutput,
             pipette_linux_musl_x64 => PipetteOutput,
             prep_steps_linux_musl_x64 => PrepStepsOutput,
+            snp_linux_direct_igvm_x64 => SnpLinuxDirectIgvmOutput,
             tmk_vmm_linux_musl_x64 => TmkVmmOutput,
             // any machine
             guest_test_uefi_x64 => GuestTestUefiOutput,
@@ -911,14 +929,11 @@ pub mod vmm_tests_artifact_builders {
             openvmm_vhost_linux_musl_x64 => OpenvmmVhostOutput,
             pipette_linux_musl_x64 => PipetteOutput,
             prep_steps_linux_musl_x64 => PrepStepsOutput,
+            snp_linux_direct_igvm_x64 => SnpLinuxDirectIgvmOutput,
             tmk_vmm_linux_musl_x64 => TmkVmmOutput,
             // any machine
             guest_test_uefi_x64 => GuestTestUefiOutput,
             tmks_x64 => TmksOutput,
-            // aarch64 emulated binaries
-            nextest_vmm_tests_archive_linux_musl_aarch64 => NextestVmmTestsArchive,
-            openvmm_linux_musl_aarch64 => OpenvmmOutput,
-            pipette_linux_musl_aarch64 => PipetteOutput,
         )
     );
 
@@ -940,6 +955,7 @@ pub mod vmm_tests_artifact_builders {
             openhcl_standard_x64 => OpenhclIgvmOutput,
             openhcl_cvm_x64 => OpenhclIgvmOutput,
             openhcl_linux_direct_x64 => OpenhclIgvmOutput,
+            openhcl_sivm_x64 => OpenhclIgvmOutput,
             pipette_linux_musl_x64 => PipetteOutput,
             tmk_vmm_linux_musl_x64 => TmkVmmOutput,
             tpm_guest_tests_linux_x64 => TpmGuestTestsOutput,
