@@ -406,6 +406,24 @@ pub trait ResolveMemoryFault: Send + Sync {
         fault: MemoryRange,
         write: bool,
     ) -> Result<MemoryRange, GuestMemoryBackingError>;
+
+    /// Returns a counter of changes to the backing's mappings, for use with
+    /// [`wait_for_mapping_change`](Self::wait_for_mapping_change).
+    ///
+    /// Read this before resolving a fault.
+    fn mapping_generation(&self) -> u64;
+
+    /// Returns whether the backing's mappings may have changed since
+    /// `generation` was read from
+    /// [`mapping_generation`](Self::mapping_generation), first waiting for
+    /// any change in progress to finish.
+    ///
+    /// Replacing a mapping can briefly leave its range unmapped in the host.
+    /// A backend that fails to map a faulting GPA can call this to tell such a
+    /// transient failure from a permanent one: if it returns `true`, the
+    /// backend should retry the access (for example, by re-executing the
+    /// faulting instruction) rather than treating the GPA as unmapped.
+    fn wait_for_mapping_change(&self, generation: u64) -> bool;
 }
 
 /// Trait for a prototype partition, one that is partially created but still

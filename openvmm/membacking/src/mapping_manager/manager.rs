@@ -1904,4 +1904,44 @@ mod tests {
         drop(manager_driver);
         manager_thread.join().unwrap();
     }
+
+    /// Each structural change advances the mapper's generation, so a fault
+    /// handler can tell that a failure may have raced with a remap.
+    #[pal_async::async_test]
+    async fn test_mapping_generation(_spawn: impl Spawn) {
+        use virt::ResolveMemoryFault;
+
+        let (manager_thread, manager_driver) =
+            pal_async::DefaultPool::spawn_on_thread("mapping-manager-test");
+        let mm = MappingManager::new_without_primary(&manager_driver, 0x10000, None);
+        let client = mm.client().clone();
+        let mapper = client.new_mapper(true).await.unwrap();
+        let mappable: Mappable = sparse_mmap::alloc_shared_memory(0x10000, "a")
+            .unwrap()
+            .into();
+
+        let g0 = mapper.mapping_generation();
+        assert!(g0.is_multiple_of(2));
+        assert!(!mapper.wait_for_mapping_change(g0));
+        // A generation read mid-change always reports a change.
+        assert!(mapper.wait_for_mapping_change(g0 + 1));
+
+        client
+            .add_mapping(file_params(MemoryRange::new(0..0x10000), &mappable, 0))
+            .await
+            .unwrap();
+        let g1 = mapper.mapping_generation();
+        assert!(g1 > g0 && g1.is_multiple_of(2));
+        assert!(mapper.wait_for_mapping_change(g0));
+        assert!(!mapper.wait_for_mapping_change(g1));
+
+        client.remove_mappings(MemoryRange::new(0..0x1000)).await;
+        assert!(mapper.wait_for_mapping_change(g1));
+
+        drop(mapper);
+        drop(client);
+        drop(mm);
+        drop(manager_driver);
+        manager_thread.join().unwrap();
+    }
 }
