@@ -16,6 +16,7 @@ use crate::mapping_manager::VaMapper;
 use crate::partition_mapper::PartitionMapper;
 use crate::split::SplitMapping;
 use crate::split::carve;
+use crate::split::insert_sorted;
 use crate::split::remainder;
 use anyhow::Context as _;
 use futures::StreamExt;
@@ -762,7 +763,7 @@ impl RegionManagerTask {
             }
         }
 
-        region.mappings.push(RegionMapping { params });
+        insert_sorted(&mut region.mappings, RegionMapping { params });
         Ok(())
     }
 

@@ -47,6 +47,14 @@
 #[cfg_attr(not(windows), path = "va_mapper/soft_lp_stub.rs")]
 mod soft_lp;
 
+// Replacing a mapping is only non-atomic on Windows; other targets get a stub
+// with the same interface that tracks nothing, so the mapper and fault paths
+// compile without per-item `cfg`s.
+#[cfg_attr(not(windows), path = "va_mapper/change_tracker_stub.rs")]
+mod change_tracker;
+
+use self::change_tracker::ChangeTracker;
+use self::change_tracker::MappingChange;
 use self::soft_lp::SoftLp;
 use super::manager::DmaRegionProvider;
 use super::manager::MapperId;
@@ -74,12 +82,10 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use range_map_vec::RangeMap;
 use sparse_mmap::SparseMapping;
-use std::cell::Cell;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
 use thiserror::Error;
@@ -255,29 +261,9 @@ struct MapperInner {
     req_send: mesh::Sender<MappingRequest>,
     /// Maintains a weak reference to avoid a reference cycle with the partition.
     host_access: OnceLock<HostAccess>,
-    /// Counts structural changes to the VA mapping: incremented when a change
-    /// begins and again when it ends, so it is odd while one is in progress.
-    /// See [`MapperInner::begin_change`].
-    generation: AtomicU64,
-    /// Held by the mapper task for the duration of each structural change, so
-    /// that fault handlers can wait one out.
-    change_lock: Mutex<()>,
-}
-
-/// A structural change to the VA mapping in progress. See
-/// [`MapperInner::begin_change`].
-#[must_use]
-struct MappingChange<'a> {
-    generation: &'a AtomicU64,
-    _lock: parking_lot::MutexGuard<'a, ()>,
-}
-
-impl Drop for MappingChange<'_> {
-    fn drop(&mut self) {
-        // Runs before `_lock` is released, so a waiter that acquires the lock
-        // always observes the completed (even) generation.
-        self.generation.fetch_add(1, Ordering::SeqCst);
-    }
+    /// Brackets each structural change that can unmap something in use, so
+    /// that fault handlers can wait one out and retry.
+    changes: ChangeTracker,
 }
 
 #[derive(Clone)]
@@ -329,7 +315,7 @@ impl MapperTask {
             match req {
                 MapperRequest::Unmap(rpc) => rpc.handle_sync(|range| {
                     tracing::debug!(%range, "invalidate received");
-                    let _change = self.inner.begin_change();
+                    let _change = self.inner.changes.begin();
                     self.inner
                         .mapping
                         .unmap(range.start() as usize, range.len() as usize)
@@ -692,24 +678,6 @@ fn carve_index(mappings: &mut RangeMap<u64, MappingProps>, range: MemoryRange) {
 }
 
 impl MapperInner {
-    /// Begins a structural change to the VA mapping, which lasts until the
-    /// returned guard is dropped.
-    ///
-    /// Replacing a mapping can briefly leave its range unmapped (on Windows,
-    /// the old view is unmapped before the new one is mapped), and a fault
-    /// that lands in that gap would otherwise look like an access to unmapped
-    /// memory. Bracketing each change lets fault handlers detect that a
-    /// failure raced with one and retry. See
-    /// [`ResolveMemoryFault::wait_for_mapping_change`].
-    fn begin_change(&self) -> MappingChange<'_> {
-        let lock = self.change_lock.lock();
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        MappingChange {
-            generation: &self.generation,
-            _lock: lock,
-        }
-    }
-
     /// Begins a structural change for mapping `range`, if that replaces any
     /// existing mapping.
     ///
@@ -723,22 +691,24 @@ impl MapperInner {
                 .read()
                 .get_range_entry(range.start()..=range.end() - 1)
                 .is_some();
-        replaces.then(|| self.begin_change())
+        replaces.then(|| self.changes.begin())
     }
 
     /// Returns the current mapping generation.
     fn mapping_generation(&self) -> u64 {
-        self.generation.load(Ordering::SeqCst)
+        self.changes.generation()
     }
 
-    /// Returns whether the mapping may have changed since `generation`,
-    /// waiting for any in-progress change to finish first.
-    fn wait_for_mapping_change(&self, generation: u64) -> bool {
-        if generation.is_multiple_of(2) && self.mapping_generation() == generation {
-            return false;
-        }
-        drop(self.change_lock.lock());
-        true
+    /// Returns whether the mapping of `range` may have changed since
+    /// `generation`, waiting for any in-progress change to finish first.
+    fn wait_for_mapping_change(&self, generation: u64, range: MemoryRange) -> bool {
+        self.changes.changed_since(generation)
+            && !range.is_empty()
+            && self
+                .mappings
+                .read()
+                .get_range_entry(range.start()..=range.end() - 1)
+                .is_some()
     }
 
     /// Records an established mapping in the index, replacing the overlapped
@@ -896,8 +866,7 @@ impl VaMapper {
             supports_memory_fault_resolution,
             req_send,
             host_access: OnceLock::new(),
-            generation: AtomicU64::new(0),
-            change_lock: Mutex::new(()),
+            changes: ChangeTracker::default(),
         });
 
         // Spawn the mapper thread *before* the AddMapper RPC. The manager
@@ -987,36 +956,44 @@ impl VaMapper {
     /// may have raced with a structural change, so that the access should be
     /// retried.
     ///
-    /// Replacing a mapping can briefly leave its VA unmapped (see
-    /// [`MapperInner::begin_change`]). This waits out any change in progress
-    /// and then retries if the index now covers `address` with the needed
-    /// access. Since the generation at the time of the access is not known,
-    /// a retry is allowed once per address per generation on each thread; a
-    /// fault that persists without an intervening change fails.
-    ///
-    /// This is a workaround for `GuestMemoryAccess::page_fault` not carrying
-    /// the generation observed before the access. The retry key includes the
-    /// mapper's VA base, which is unique among live mappers in the process.
+    /// Replacing a mapping can briefly leave its VA unmapped (see the
+    /// `change_tracker` module). This waits out any change in progress and
+    /// retries if the index covers `address` with the needed access and a probe
+    /// of the faulting byte succeeds. A probe that faults with no change in the
+    /// meantime means the fault is persistent (for example, an I/O error paging
+    /// in a file-backed view), so the access fails instead of retrying forever.
     fn retry_after_mapping_change(&self, address: u64, write: bool) -> bool {
-        thread_local! {
-            static LAST_RETRY: Cell<Option<(usize, u64, u64)>> = const { Cell::new(None) };
-        }
+        self.inner.changes.should_retry(|| {
+            let covered = self
+                .inner
+                .mappings
+                .read()
+                .get_entry(&address)
+                .is_some_and(|(_, _, props)| props.writable || !write);
+            covered && probe(&self.inner.mapping, address as usize, write)
+        })
+    }
+}
 
-        let generation = {
-            let _lock = self.inner.change_lock.lock();
-            self.inner.mapping_generation()
-        };
-        let covered = self
-            .inner
-            .mappings
-            .read()
-            .get_entry(&address)
-            .is_some_and(|(_, _, props)| props.writable || !write);
-        if !covered {
+/// Returns whether the byte at `offset` in `mapping` can be read or, if
+/// `write`, written.
+fn probe(mapping: &SparseMapping, offset: usize, write: bool) -> bool {
+    loop {
+        let Ok(value) = mapping.read_volatile::<u8>(offset) else {
             return false;
+        };
+        if !write {
+            return true;
         }
-        let key = Some((self.inner.mapping.as_ptr().addr(), address, generation));
-        LAST_RETRY.with(|last| last.replace(key) != key)
+        // Exchanging the byte for itself needs write access but leaves the data
+        // unchanged, and is atomic, so it cannot lose a concurrent write. A
+        // failed comparison may not check write access, so if the byte changed
+        // since the read, read it again.
+        match mapping.compare_exchange(offset, value, value) {
+            Ok(Ok(_)) => return true,
+            Ok(Err(_)) => {}
+            Err(_) => return false,
+        }
     }
 }
 
@@ -1195,8 +1172,8 @@ impl ResolveMemoryFault for VaMapper {
         self.inner.mapping_generation()
     }
 
-    fn wait_for_mapping_change(&self, generation: u64) -> bool {
-        self.inner.wait_for_mapping_change(generation)
+    fn wait_for_mapping_change(&self, generation: u64, range: MemoryRange) -> bool {
+        self.inner.wait_for_mapping_change(generation, range)
     }
 }
 
@@ -1248,5 +1225,82 @@ mod tests {
         let mut buf = vec![0u8; 64];
         mapping.read_at(0, &mut buf).unwrap();
         assert_eq!(buf, pattern);
+    }
+
+    /// An unexpected fault on an eager mapping is retried only if the page is
+    /// accessible once any mapping change completes, so a fault that persists
+    /// without an intervening change fails instead of retrying forever.
+    #[cfg(windows)]
+    #[pal_async::async_test]
+    async fn test_eager_fault_retry(_spawn: impl pal_async::task::Spawn) {
+        use crate::mapping_manager::Mappable;
+        use crate::mapping_manager::MappingBacking;
+        use crate::mapping_manager::MappingManager;
+        use crate::mapping_manager::MappingParams;
+        use crate::mapping_manager::MemoryPolicy;
+        use crate::region_manager::MappingType;
+        use guestmem::GuestMemoryAccess;
+        use guestmem::PageFaultAction;
+        use memory_range::MemoryRange;
+
+        let (manager_thread, manager_driver) =
+            pal_async::DefaultPool::spawn_on_thread("mapping-manager-test");
+        let mm = MappingManager::new_without_primary(&manager_driver, 0x10000, None);
+        let client = mm.client().clone();
+        let mapper = client.new_mapper(true).await.unwrap();
+        let mappable: Mappable = sparse_mmap::alloc_shared_memory(0x10000, "a")
+            .unwrap()
+            .into();
+        for (start, end, writable) in [
+            (0, 0x4000, true),
+            (0x4000, 0x8000, false),
+            (0x8000, 0x9000, true),
+        ] {
+            client
+                .add_mapping(MappingParams {
+                    range: MemoryRange::new(start..end),
+                    backing: MappingBacking::File {
+                        mappable: mappable.clone(),
+                        file_offset: start,
+                    },
+                    writable,
+                    mapping_type: MappingType::Device,
+                    policy: MemoryPolicy::none(),
+                })
+                .await
+                .unwrap();
+        }
+        let retried = |address, write| {
+            matches!(
+                mapper.page_fault(address, 1, write, false),
+                PageFaultAction::Retry
+            )
+        };
+
+        assert!(retried(0x1000, true));
+        assert!(retried(0x5000, false));
+
+        // Writes to a read-only mapping and faults outside any mapping fail.
+        assert!(!retried(0x5000, true));
+        assert!(!retried(0x9000, false));
+
+        // A page that stays inaccessible while recorded as mapped fails.
+        // Remapping it read-only behind the index's back keeps reads working,
+        // but a write still faults, so it must not be retried.
+        mapper
+            .inner
+            .mapping
+            .map_file(0x8000, 0x1000, &mappable, 0x8000, false)
+            .unwrap();
+        assert!(retried(0x8000, false));
+        assert!(!retried(0x8000, true));
+        mapper.inner.mapping.unmap(0x8000, 0x1000).unwrap();
+        assert!(!retried(0x8000, false));
+
+        drop(mapper);
+        drop(client);
+        drop(mm);
+        drop(manager_driver);
+        manager_thread.join().unwrap();
     }
 }

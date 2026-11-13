@@ -111,6 +111,30 @@ impl SparseMapping {
             .map_err(SparseMappingError::Memory)
     }
 
+    /// Atomically replaces the `T` at `offset` in the sparse mapping with `new`
+    /// if it equals `current`, using a sequentially-consistent ordering.
+    ///
+    /// Returns `Ok(Ok(new))` if the value was replaced, or `Ok(Err(actual))`
+    /// with the value found if it was not.
+    ///
+    /// Fails to compile if `T` is not 1, 2, 4, or 8 bytes in size, or is less
+    /// aligned than its size.
+    pub fn compare_exchange<T: IntoBytes + FromBytes + Immutable + KnownLayout + Copy>(
+        &self,
+        offset: usize,
+        current: T,
+        new: T,
+    ) -> Result<Result<T, T>, SparseMappingError> {
+        assert!(self.is_local(), "cannot write to remote mappings");
+
+        self.check(offset, size_of::<T>())?;
+        // SAFETY: the bounds have been checked above.
+        unsafe {
+            trycopy::try_compare_exchange(self.as_ptr().byte_add(offset).cast(), current, new)
+        }
+        .map_err(SparseMappingError::Memory)
+    }
+
     /// Tries to write into the sparse mapping.
     pub fn write_at(&self, offset: usize, data: &[u8]) -> Result<(), SparseMappingError> {
         assert!(self.is_local(), "cannot write to remote mappings");
@@ -244,6 +268,23 @@ mod tests {
         let mut bytes = [0; 15];
         mapping.read_at(page_size + 1, &mut bytes).unwrap();
         assert_eq!(bytes.as_slice(), expected);
+
+        assert_eq!(
+            mapping
+                .compare_exchange(page_size + 4, 0x789abcdeu32, 0x13579bdf)
+                .unwrap(),
+            Ok(0x13579bdf)
+        );
+        assert_eq!(
+            mapping
+                .compare_exchange(page_size + 4, 0x789abcdeu32, 0x2468ace0)
+                .unwrap(),
+            Err(0x13579bdf)
+        );
+        assert_eq!(
+            mapping.read_volatile::<u32>(page_size + 4).unwrap(),
+            0x13579bdf
+        );
     }
 
     #[test]
@@ -289,6 +330,10 @@ mod tests {
             ));
             assert!(matches!(
                 mapping.write_volatile(offset, &0u16),
+                Err(SparseMappingError::OutOfBounds)
+            ));
+            assert!(matches!(
+                mapping.compare_exchange(offset, 0u16, 0),
                 Err(SparseMappingError::OutOfBounds)
             ));
             assert!(matches!(
@@ -392,6 +437,11 @@ mod tests {
         ));
         assert!(matches!(
             mapping.fill_at(0, 1, page_size),
+            Err(SparseMappingError::Memory(_))
+        ));
+        // The comparison succeeds, so the exchange needs write access.
+        assert!(matches!(
+            mapping.compare_exchange(0, 0u8, 0),
             Err(SparseMappingError::Memory(_))
         ));
         mapping.read_at(0, &mut bytes).unwrap();

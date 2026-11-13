@@ -416,20 +416,22 @@ pub trait ResolveMemoryFault: Send + Sync {
         0
     }
 
-    /// Returns whether the backing's mappings may have changed since
-    /// `generation` was read from
+    /// Returns whether `range` is currently mapped and the backing's mappings
+    /// may have changed since `generation` was read from
     /// [`mapping_generation`](Self::mapping_generation), first waiting for
     /// any change in progress to finish.
     ///
     /// Replacing a mapping can briefly leave its range unmapped in the host.
     /// A backend that fails to map a faulting GPA can call this to tell such a
     /// transient failure from a permanent one: if it returns `true`, the
-    /// backend should retry the access (for example, by re-executing the
-    /// faulting instruction) rather than treating the GPA as unmapped.
+    /// faulting range has a mapping after the change, and the backend should
+    /// retry the access (for example, by re-executing the faulting
+    /// instruction) rather than treating the GPA as unmapped.
     ///
     /// The default implementation always returns `false`.
-    fn wait_for_mapping_change(&self, generation: u64) -> bool {
+    fn wait_for_mapping_change(&self, generation: u64, range: MemoryRange) -> bool {
         let _ = generation;
+        let _ = range;
         false
     }
 }

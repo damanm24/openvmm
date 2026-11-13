@@ -916,6 +916,7 @@ impl SparseMapping {
                 } => {
                     // Windows does not support doing partial unmaps. So do our best
                     // to remap, panicking if anything goes wrong.
+                    // TODO: Return host mapping failures to callers instead of panicking.
                     unmap_view_of_file(
                         self.process.as_ref(),
                         self.address.wrapping_add(mapping.offset),
