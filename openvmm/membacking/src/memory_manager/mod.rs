@@ -1220,4 +1220,68 @@ mod tests {
         assert_eq!(locked.pages()[0][0].load(Ordering::SeqCst), 0);
         drop(locked);
     }
+
+    /// Device memory mappings follow `mmap` replace semantics: mapping over
+    /// part of an existing mapping replaces just that part, unmapping part of
+    /// one keeps the rest, and the split mappings survive re-mapping the
+    /// region into the guest.
+    #[async_test]
+    async fn test_device_memory_overlapping_map_unmap() {
+        use guestmem::MemoryMapper as _;
+
+        const DEV: u64 = 0x100000;
+        const LEN: usize = 0x10000;
+        let mgr = GuestMemoryBuilder::new()
+            .add_backing(RamBackingRequest::new(vec![MemoryRange::new(0..0x10000)]))
+            .build(DEV + LEN as u64)
+            .await
+            .unwrap();
+        let gm = mgr.client().guest_memory().await.unwrap();
+        let (mut control, region) = mgr
+            .device_memory_mapper()
+            .new_region(LEN, "dev".into())
+            .unwrap();
+        control.map_to_guest(DEV, true).unwrap();
+
+        // Fill each page of `a` with 0xa0 + page and each page of `b` with
+        // 0xb0 + page by mapping each over the whole region in turn.
+        let a = sparse_mmap::alloc_shared_memory(LEN, "a").unwrap();
+        let b = sparse_mmap::alloc_shared_memory(LEN, "b").unwrap();
+        for (section, tag) in [(&b, 0xb0u8), (&a, 0xa0)] {
+            region.map(0, section, 0, LEN, true).unwrap();
+            for page in 0..16u8 {
+                gm.fill_at(DEV + page as u64 * 0x1000, tag + page, 0x1000)
+                    .unwrap();
+            }
+        }
+
+        region.map(0x4000, &b, 0x1000, 0x4000, true).unwrap();
+        region.unmap(0x9000, 0x1000).unwrap();
+
+        let check = |gm: &GuestMemory| {
+            let page = |offset: u64| gm.read_plain::<u8>(DEV + offset).ok();
+            assert_eq!(page(0x3000), Some(0xa3));
+            assert_eq!(page(0x4000), Some(0xb1));
+            assert_eq!(page(0x7000), Some(0xb4));
+            assert_eq!(page(0x8000), Some(0xa8));
+            assert_eq!(page(0x9000), None);
+            assert_eq!(page(0xa000), Some(0xaa));
+        };
+        check(&gm);
+
+        // Re-mapping the region replays the split mappings.
+        control.unmap_from_guest();
+        control.map_to_guest(DEV, true).unwrap();
+        check(&gm);
+
+        // Ranges beyond the region are rejected.
+        assert_eq!(
+            region.map(0xf000, &a, 0, 0x2000, true).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            region.unmap(0x10000, 0x1000).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
 }
