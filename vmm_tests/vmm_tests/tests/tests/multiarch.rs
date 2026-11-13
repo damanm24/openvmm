@@ -72,6 +72,9 @@ mod tpm138;
 mod vlan;
 /// Tests of vmbus relay functionality.
 mod vmbus_relay;
+/// virtio-fs DAX tests using section-backed shares.
+#[cfg(windows)]
+mod virtiofs_dax;
 /// Tests for VMDK disk functionality.
 mod vmdk;
 /// Tests involving VMGS functionality
