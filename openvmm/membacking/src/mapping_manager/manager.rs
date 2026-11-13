@@ -237,7 +237,8 @@ impl MappingManagerClient {
     ///
     /// Like `mmap(MAP_FIXED)`, this replaces any part of an existing mapping
     /// that overlaps `params.range`; the parts of existing mappings outside
-    /// the range survive. If this fails, `params.range` is left unmapped.
+    /// the range survive. If this fails for any reason, `params.range` is left
+    /// unmapped.
     pub async fn add_mapping(&self, params: MappingParams) -> anyhow::Result<()> {
         self.req_send
             .call_failable(MappingRequest::AddMapping, params)
@@ -755,8 +756,10 @@ impl MappingManagerTask {
 
         // Private memory is anonymous and lives in a single mapper's address
         // space, so it requires at most one mapper. Reject adding private RAM
-        // (e.g. via hotplug) while more than one mapper is present.
+        // (e.g. via hotplug) while more than one mapper is present. Like any
+        // other failure, this leaves the range unmapped.
         if matches!(params.backing, MappingBacking::Private) && self.mappers.mappers.len() > 1 {
+            self.remove_mappings(params.range).await;
             anyhow::bail!("cannot add private memory while multiple mappers are present");
         }
 
@@ -1844,11 +1847,38 @@ mod tests {
         );
     }
 
+    /// A rejected private mapping leaves its range unmapped, like any other
+    /// failed `add_mapping`.
+    #[pal_async::async_test]
+    async fn test_rejected_private_mapping_leaves_hole(_spawn: impl Spawn) {
+        let (mut task, _params) = task_with_mapping().await;
+        let (send1, _recv1) = mesh::channel();
+        let (send2, _recv2) = mesh::channel();
+        task.add_mapper(send1, false).await.unwrap();
+        task.add_mapper(send2, false).await.unwrap();
+
+        task.add_mapping(MappingParams {
+            range: MemoryRange::new(0x2000..0x3000),
+            backing: MappingBacking::Private,
+            writable: true,
+            mapping_type: MappingType::Ram,
+            policy: MemoryPolicy::none(),
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            ranges(&task),
+            [
+                (MemoryRange::new(0..0x2000), 0),
+                (MemoryRange::new(0x3000..0x10000), 0x3000),
+            ]
+        );
+    }
+
     /// End-to-end check against a real eager mapper: replaced and partially
     /// unmapped ranges expose the expected backing pages.
     #[pal_async::async_test]
-    async fn test_eager_mapper_overlap_contents(spawn: impl Spawn) {
-        let _ = spawn;
+    async fn test_eager_mapper_overlap_contents(_spawn: impl Spawn) {
         let (manager_thread, manager_driver) =
             pal_async::DefaultPool::spawn_on_thread("mapping-manager-test");
         let mm = MappingManager::new_without_primary(&manager_driver, 0x20000, None);
@@ -1905,8 +1935,9 @@ mod tests {
         manager_thread.join().unwrap();
     }
 
-    /// Each structural change advances the mapper's generation, so a fault
-    /// handler can tell that a failure may have raced with a remap.
+    /// Each change that can unmap something in use advances the mapper's
+    /// generation, so a fault handler can tell that a failure may have raced
+    /// with a remap. Mapping into an empty range does not.
     #[pal_async::async_test]
     async fn test_mapping_generation(_spawn: impl Spawn) {
         use virt::ResolveMemoryFault;
@@ -1928,6 +1959,12 @@ mod tests {
 
         client
             .add_mapping(file_params(MemoryRange::new(0..0x10000), &mappable, 0))
+            .await
+            .unwrap();
+        assert_eq!(mapper.mapping_generation(), g0);
+
+        client
+            .add_mapping(file_params(MemoryRange::new(0x2000..0x3000), &mappable, 0))
             .await
             .unwrap();
         let g1 = mapper.mapping_generation();

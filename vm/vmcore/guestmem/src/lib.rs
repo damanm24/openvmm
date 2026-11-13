@@ -2475,7 +2475,9 @@ pub trait MappedMemoryRegion: Send + Sync {
     /// Unmaps any mappings in the specified range within the region, splitting
     /// mappings that partially overlap it.
     ///
-    /// Fails if the range is not within the region.
+    /// Fails if the range is not within the region. Implementations may also
+    /// fail, without changing anything, if splitting would exceed a limit on
+    /// the number of mappings.
     fn unmap(&self, offset: usize, len: usize) -> io::Result<()>;
 }
 
