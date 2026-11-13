@@ -10,21 +10,29 @@
 //! overlapped parts of existing mappings in the region, splitting any that
 //! partially overlap, and [`MappedMemoryRegion::unmap`] removes just the
 //! requested range. This lets a device such as a virtio-fs DAX window remap
-//! parts of its region arbitrarily. Ranges must lie within the region. If a
-//! map fails, the requested range is left unmapped rather than restored.
+//! parts of its region arbitrarily.
 //!
-//! A replacement is not atomic everywhere. On Windows, the old view is unmapped
-//! before the new one is mapped, so the range is briefly unmapped:
+//! Requests whose range lies outside the region, or that would leave the
+//! region with more than `MAX_MAPPINGS_PER_REGION` mappings, fail without
+//! changing anything. If a map fails otherwise, the requested range is left
+//! unmapped rather than restored.
+//!
+//! A replacement or partial unmap is not atomic everywhere. Windows cannot
+//! unmap part of a view, so the host unmaps every overlapped view in full and
+//! then maps the new view and the surviving parts of the old ones. Until then,
+//! the surviving parts are briefly unmapped too, even though the guest asked
+//! to change only the requested range and may be using the rest. To cover this:
 //!
 //! - Host accesses through guest memory that fault in this window wait for the
 //!   change to finish and are retried.
 //! - Guest accesses that fault in this window are re-executed when the
 //!   hypervisor backend resolves memory faults through
-//!   [`virt::ResolveMemoryFault`] (WHP on x86-64). Otherwise (for example, WHP
-//!   on aarch64) such an access may be handled as an access to unmapped memory.
-//! - DMA targets unmap each affected mapping in full and then remap any
-//!   surviving parts, so DMA to the surviving parts of a split mapping can
-//!   briefly fail.
+//!   [`virt::ResolveMemoryFault`] (WHP on x86-64). Other backends do not retry
+//!   them, so they are handled like accesses to unmapped memory.
+//! - DMA targets unmap each overlapped mapping in full and then remap its
+//!   surviving parts, so DMA to those parts can briefly fail. Remapping
+//!   failures are logged, since DMA targets already treat device memory that
+//!   cannot be mapped for DMA as non-fatal.
 
 use super::DEVICE_PRIORITY;
 use crate::mapping_manager::Mappable;
@@ -35,6 +43,7 @@ use crate::region_manager::RegionHandle;
 use crate::region_manager::RegionManagerClient;
 use crate::split::SplitMapping;
 use crate::split::carve;
+use crate::split::remainder;
 use futures::executor::block_on;
 use guestmem::MappableGuestMemory;
 use guestmem::MappedMemoryRegion;
@@ -115,6 +124,37 @@ impl SplitMapping for DeviceMapping {
     }
 }
 
+/// The maximum number of mappings in one device memory region.
+///
+/// A device can fragment its region arbitrarily, and each mapping costs a host
+/// view (on Windows, a separately mapped section view), an IOMMU entry per DMA
+/// target, and linear work on every later map or unmap. This bounds that cost.
+/// It allows a 64 GiB virtio-fs DAX window to be fully mapped in 2 MiB chunks.
+const MAX_MAPPINGS_PER_REGION: usize = 32768;
+
+/// Returns how many mappings remain after removing `range` from `mappings`.
+fn count_after_carve(mappings: &[DeviceMapping], range: MemoryRange) -> usize {
+    mappings
+        .iter()
+        .map(|m| {
+            if m.range.overlaps(&range) {
+                remainder(m.range, range).count()
+            } else {
+                1
+            }
+        })
+        .sum()
+}
+
+fn check_mapping_limit(count: usize) -> io::Result<()> {
+    if count > MAX_MAPPINGS_PER_REGION {
+        return Err(io::Error::other(format!(
+            "device memory region would exceed {MAX_MAPPINGS_PER_REGION} mappings"
+        )));
+    }
+    Ok(())
+}
+
 impl DeviceMemoryRegion {
     fn validated_memory_range(&self, offset: usize, len: usize) -> io::Result<MemoryRange> {
         let end = offset
@@ -158,8 +198,9 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
         };
 
         // Like `mmap` with `MAP_FIXED`, replace the overlapped part of any
-        // existing mappings. If this fails, the range is left unmapped.
+        // existing mappings. If mapping fails, the range is left unmapped.
         let mut state = self.state.lock();
+        check_mapping_limit(count_after_carve(&state.mappings, range) + 1)?;
         carve(&mut state.mappings, range);
         if let Some(handle) = &state.handle {
             block_on(handle.add_mapping(
@@ -180,6 +221,7 @@ impl MappedMemoryRegion for DeviceMemoryRegion {
     fn unmap(&self, offset: usize, len: usize) -> io::Result<()> {
         let range = self.validated_memory_range(offset, len)?;
         let mut state = self.state.lock();
+        check_mapping_limit(count_after_carve(&state.mappings, range))?;
         carve(&mut state.mappings, range);
         if let Some(handle) = &state.handle {
             block_on(handle.remove_mappings(range));

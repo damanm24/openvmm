@@ -339,7 +339,7 @@ impl MapperTask {
                 MapperRequest::MapEager(rpc) => {
                     rpc.handle_failable_sync(|params| {
                         tracing::debug!(range = %params.range, "eager mapping received");
-                        let _change = self.inner.begin_change();
+                        let _change = self.inner.begin_replace(params.range);
                         self.map(params)
                     });
                 }
@@ -347,7 +347,7 @@ impl MapperTask {
                     tracing::debug!(range = %params.range, "lazy mapping received");
                     let (range, writable) = (params.range, params.writable);
                     let result = {
-                        let _change = self.inner.begin_change();
+                        let _change = self.inner.begin_replace(range);
                         self.map(params)
                     };
                     match result {
@@ -710,6 +710,22 @@ impl MapperInner {
         }
     }
 
+    /// Begins a structural change for mapping `range`, if that replaces any
+    /// existing mapping.
+    ///
+    /// Mapping into a range with no existing mappings cannot unmap anything
+    /// that is in use, so it needs no change bracket. This keeps fault
+    /// handlers from waiting out long mappings of fresh guest RAM.
+    fn begin_replace(&self, range: MemoryRange) -> Option<MappingChange<'_>> {
+        let replaces = !range.is_empty()
+            && self
+                .mappings
+                .read()
+                .get_range_entry(range.start()..=range.end() - 1)
+                .is_some();
+        replaces.then(|| self.begin_change())
+    }
+
     /// Returns the current mapping generation.
     fn mapping_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
@@ -977,9 +993,13 @@ impl VaMapper {
     /// access. Since the generation at the time of the access is not known,
     /// a retry is allowed once per address per generation on each thread; a
     /// fault that persists without an intervening change fails.
+    ///
+    /// This is a workaround for `GuestMemoryAccess::page_fault` not carrying
+    /// the generation observed before the access. The retry key includes the
+    /// mapper's VA base, which is unique among live mappers in the process.
     fn retry_after_mapping_change(&self, address: u64, write: bool) -> bool {
         thread_local! {
-            static LAST_RETRY: Cell<Option<(MapperId, u64, u64)>> = const { Cell::new(None) };
+            static LAST_RETRY: Cell<Option<(usize, u64, u64)>> = const { Cell::new(None) };
         }
 
         let generation = {
@@ -995,7 +1015,7 @@ impl VaMapper {
         if !covered {
             return false;
         }
-        let key = Some((self.id, address, generation));
+        let key = Some((self.inner.mapping.as_ptr().addr(), address, generation));
         LAST_RETRY.with(|last| last.replace(key) != key)
     }
 }

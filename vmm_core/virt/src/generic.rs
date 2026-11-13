@@ -410,8 +410,11 @@ pub trait ResolveMemoryFault: Send + Sync {
     /// Returns a counter of changes to the backing's mappings, for use with
     /// [`wait_for_mapping_change`](Self::wait_for_mapping_change).
     ///
-    /// Read this before resolving a fault.
-    fn mapping_generation(&self) -> u64;
+    /// Read this before resolving a fault. The default implementation, for
+    /// backings whose mapping changes are atomic, always returns zero.
+    fn mapping_generation(&self) -> u64 {
+        0
+    }
 
     /// Returns whether the backing's mappings may have changed since
     /// `generation` was read from
@@ -423,7 +426,12 @@ pub trait ResolveMemoryFault: Send + Sync {
     /// transient failure from a permanent one: if it returns `true`, the
     /// backend should retry the access (for example, by re-executing the
     /// faulting instruction) rather than treating the GPA as unmapped.
-    fn wait_for_mapping_change(&self, generation: u64) -> bool;
+    ///
+    /// The default implementation always returns `false`.
+    fn wait_for_mapping_change(&self, generation: u64) -> bool {
+        let _ = generation;
+        false
+    }
 }
 
 /// Trait for a prototype partition, one that is partially created but still

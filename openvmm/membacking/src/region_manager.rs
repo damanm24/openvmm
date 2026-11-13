@@ -732,10 +732,7 @@ impl RegionManagerTask {
                 })
                 .await;
             if let Err(e) = result {
-                // The mapping manager may have rejected the request before
-                // replacing anything, so clear the range explicitly to match
-                // the region's mapping list.
-                self.inner.mapping_manager.remove_mappings(range).await;
+                // The mapping manager left the range unmapped.
                 self.inner.remap_dma_survivors(
                     region_range,
                     region_writable,
@@ -813,7 +810,10 @@ impl RegionManagerTaskInner {
     /// Maps the surviving parts of split mappings back into every DMA mapper.
     ///
     /// Failures are logged rather than returned: the survivors remain mapped
-    /// for the CPU, and only DMA to them is affected.
+    /// for the CPU, and only DMA to them is affected. Splitting only happens
+    /// to device memory, which DMA targets already treat as best effort (for
+    /// example, a survivor whose file offset no longer matches an exported
+    /// dmabuf falls back to mapping by host VA, which may fail).
     fn remap_dma_survivors(
         &self,
         region_range: MemoryRange,
@@ -1161,8 +1161,9 @@ impl RegionHandle {
     ///
     /// Like `mmap` with `MAP_FIXED`, this replaces the overlapped part of any
     /// existing mappings in `range_in_region`; the parts outside it survive.
-    /// If establishing the new mapping fails, `range_in_region` is left
-    /// unmapped.
+    /// A mapping with no backing fd is rejected without changing anything
+    /// while a DMA target that requires one is registered. If establishing
+    /// the new mapping fails, `range_in_region` is left unmapped.
     pub async fn add_mapping(
         &self,
         range_in_region: MemoryRange,
