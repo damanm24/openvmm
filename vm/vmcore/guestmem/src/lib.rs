@@ -2460,7 +2460,9 @@ pub trait MappableGuestMemory: Send + Sync {
 pub trait MappedMemoryRegion: Send + Sync {
     /// Maps an object at `offset` in the region.
     ///
-    /// Behaves like mmap--overwrites and splits existing mappings.
+    /// Behaves like mmap--overwrites and splits existing mappings. Fails if
+    /// the range is not within the region. On failure, the range may be left
+    /// unmapped.
     fn map(
         &self,
         offset: usize,
@@ -2470,7 +2472,10 @@ pub trait MappedMemoryRegion: Send + Sync {
         writable: bool,
     ) -> io::Result<()>;
 
-    /// Unmaps any mappings in the specified range within the region.
+    /// Unmaps any mappings in the specified range within the region, splitting
+    /// mappings that partially overlap it.
+    ///
+    /// Fails if the range is not within the region.
     fn unmap(&self, offset: usize, len: usize) -> io::Result<()>;
 }
 

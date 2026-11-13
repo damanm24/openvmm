@@ -3,6 +3,28 @@
 
 //! This implements the [`MemoryMapper`] trait and related functionality for
 //! [`GuestMemoryManager`](super::GuestMemoryManager).
+//!
+//! # Overlapping mappings
+//!
+//! Like `mmap` with `MAP_FIXED`, [`MappedMemoryRegion::map`] replaces the
+//! overlapped parts of existing mappings in the region, splitting any that
+//! partially overlap, and [`MappedMemoryRegion::unmap`] removes just the
+//! requested range. This lets a device such as a virtio-fs DAX window remap
+//! parts of its region arbitrarily. Ranges must lie within the region. If a
+//! map fails, the requested range is left unmapped rather than restored.
+//!
+//! A replacement is not atomic everywhere. On Windows, the old view is unmapped
+//! before the new one is mapped, so the range is briefly unmapped:
+//!
+//! - Host accesses through guest memory that fault in this window wait for the
+//!   change to finish and are retried.
+//! - Guest accesses that fault in this window are re-executed when the
+//!   hypervisor backend resolves memory faults through
+//!   [`virt::ResolveMemoryFault`] (WHP on x86-64). Otherwise (for example, WHP
+//!   on aarch64) such an access may be handled as an access to unmapped memory.
+//! - DMA targets unmap each affected mapping in full and then remap any
+//!   surviving parts, so DMA to the surviving parts of a split mapping can
+//!   briefly fail.
 
 use super::DEVICE_PRIORITY;
 use crate::mapping_manager::Mappable;
