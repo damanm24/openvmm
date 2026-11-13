@@ -838,6 +838,11 @@ fn grpc_error(err: anyhow::Error) -> Status {
             CancelReason::Cancelled => Code::Cancelled,
             CancelReason::DeadlineExceeded => Code::DeadlineExceeded,
         }
+    } else if let Some(io_err) = err
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+    {
+        io_error_code(io_err.kind())
     } else {
         Code::Unknown
     };
@@ -846,6 +851,58 @@ fn grpc_error(err: anyhow::Error) -> Status {
         code: code.into(),
         message: format!("{:#}", err),
         details: vec![],
+    }
+}
+
+/// Maps a host I/O error kind to a portable gRPC status code, so that clients
+/// can react to host failures without decoding OS-specific error codes. The
+/// raw OS error, if any, remains visible in the status message.
+///
+/// Every stable [`std::io::ErrorKind`] is mapped, so this only needs updating
+/// when std adds new kinds.
+fn io_error_code(kind: std::io::ErrorKind) -> Code {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::NotFound => Code::NotFound,
+        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => Code::PermissionDenied,
+        // A host port that is already bound is reported as an existing
+        // resource rather than UNAVAILABLE, which clients cannot distinguish
+        // from transport failures.
+        ErrorKind::AlreadyExists | ErrorKind::AddrInUse => Code::AlreadyExists,
+        ErrorKind::InvalidInput
+        | ErrorKind::InvalidData
+        | ErrorKind::InvalidFilename
+        | ErrorKind::ArgumentListTooLong => Code::InvalidArgument,
+        ErrorKind::TimedOut => Code::DeadlineExceeded,
+        ErrorKind::Unsupported => Code::Unimplemented,
+        ErrorKind::OutOfMemory
+        | ErrorKind::StorageFull
+        | ErrorKind::QuotaExceeded
+        | ErrorKind::FileTooLarge
+        | ErrorKind::TooManyLinks => Code::ResourceExhausted,
+        ErrorKind::NotADirectory
+        | ErrorKind::IsADirectory
+        | ErrorKind::DirectoryNotEmpty
+        | ErrorKind::NotSeekable
+        | ErrorKind::CrossesDevices
+        | ErrorKind::ResourceBusy
+        | ErrorKind::ExecutableFileBusy => Code::FailedPrecondition,
+        ErrorKind::ConnectionRefused
+        | ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::NotConnected
+        | ErrorKind::HostUnreachable
+        | ErrorKind::NetworkUnreachable
+        | ErrorKind::NetworkDown
+        | ErrorKind::AddrNotAvailable
+        | ErrorKind::BrokenPipe
+        | ErrorKind::StaleNetworkFileHandle
+        | ErrorKind::WouldBlock
+        | ErrorKind::Interrupted => Code::Unavailable,
+        ErrorKind::Deadlock => Code::Aborted,
+        ErrorKind::UnexpectedEof => Code::OutOfRange,
+        ErrorKind::WriteZero => Code::Internal,
+        _ => Code::Unknown,
     }
 }
 
@@ -3353,6 +3410,28 @@ mod tests {
     use vfio_assigned_device_resources::BarAddressConfig;
     #[cfg(target_os = "linux")]
     use vmservice::vfio_bar_address::Source;
+
+    #[test]
+    fn grpc_error_maps_remoted_addr_in_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let io_err = std::net::TcpListener::bind(listener.local_addr().unwrap()).unwrap_err();
+        assert_eq!(io_err.kind(), std::io::ErrorKind::AddrInUse);
+        // Mirror how consomme reports bind failures through `call_failable`.
+        let remote = RemoteError::new(anyhow::Error::new(io_err).context("failed to bind"));
+        let status = grpc_error(anyhow::Error::new(remote).context("BindPorts failed"));
+        assert_eq!(status.code, Code::AlreadyExists as i32);
+        assert!(status.message.contains("failed to bind"));
+    }
+
+    #[test]
+    fn grpc_error_maps_contextual_io_errors() {
+        let io_err = File::open("this-file-does-not-exist").unwrap_err();
+        let status = grpc_error(anyhow::Error::new(io_err).context("failed to open kernel"));
+        assert_eq!(status.code, Code::NotFound as i32);
+
+        let status = grpc_error(anyhow::Error::new(std::io::Error::other("unexpected")));
+        assert_eq!(status.code, Code::Unknown as i32);
+    }
 
     fn service(
         driver: DefaultDriver,

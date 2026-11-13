@@ -45,6 +45,16 @@ before their implementation is connected end to end.
 * RemoveVpciDevice
 * Quit
 
+## Error status codes
+
+Failed requests return a `google.rpc.Status`. Validation and lifecycle errors
+use specific codes such as `INVALID_ARGUMENT` or `FAILED_PRECONDITION`. Host I/O
+failures map the platform error to a portable code, so clients do not need to
+decode Windows, Linux, or macOS error numbers. For example, a missing file
+returns `NOT_FOUND`, and binding a host port that is already in use returns
+`ALREADY_EXISTS`. Unclassified failures return `UNKNOWN`. The status message
+includes the full error chain, including any raw OS error number.
+
 ## Snapshots (SaveVM and RestoreVM)
 
 `SaveVM` is a compound operation that pauses the VM and writes `manifest.bin`,
