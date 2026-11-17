@@ -2449,6 +2449,10 @@ fn parse_endpoint(
             }
             .into_resource()
         }
+        EndpointConfigCli::Minestrone { cidr } => {
+            net_backend_resources::minestrone::MinestroneHandle { cidr: cidr.clone() }
+                .into_resource()
+        }
         EndpointConfigCli::None => net_backend_resources::null::NullHandle.into_resource(),
         EndpointConfigCli::Dio { id } => {
             #[cfg(windows)]

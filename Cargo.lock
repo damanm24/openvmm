@@ -4966,6 +4966,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "minestrone"
+version = "0.0.0"
+dependencies = [
+ "heapless",
+ "libc",
+ "pal_async",
+ "resolv-conf",
+ "smoltcp",
+ "socket2",
+ "test_with_tracing",
+ "thiserror 2.0.16",
+ "tracelimit",
+ "tracing",
+]
+
+[[package]]
 name = "minimal_rt"
 version = "0.0.0"
 dependencies = [
@@ -5244,6 +5260,26 @@ dependencies = [
  "user_driver_emulated_mock",
  "vmcore",
  "zerocopy",
+]
+
+[[package]]
+name = "net_minestrone"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inspect",
+ "inspect_counters",
+ "minestrone",
+ "net_backend",
+ "net_backend_resources",
+ "pal_async",
+ "parking_lot",
+ "smoltcp",
+ "thiserror 2.0.16",
+ "tracelimit",
+ "tracing",
+ "vm_resource",
 ]
 
 [[package]]
@@ -6436,6 +6472,7 @@ dependencies = [
  "net_backend",
  "net_consomme",
  "net_dio",
+ "net_minestrone",
  "net_tap",
  "netvsp",
  "nvme",

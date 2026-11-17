@@ -1,0 +1,29 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "minestrone"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pal_async.workspace = true
+tracelimit.workspace = true
+
+heapless.workspace = true
+# smoltcp 0.14 does not build without at least one socket feature, even
+# though only `smoltcp::wire` is used.
+smoltcp = { workspace = true, features = ["proto-ipv4", "proto-ipv6", "proto-dhcpv4", "medium-ethernet", "socket-raw"] }
+socket2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+resolv-conf.workspace = true
+
+[dev-dependencies]
+test_with_tracing.workspace = true
+
+[lints]
+workspace = true

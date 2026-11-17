@@ -7,9 +7,11 @@
 //! UDP packet rate (pps) between the guest and host across multiple iterations.
 //! Uses warm mode: the VM is booted once and reused for all iterations.
 //!
-//! Supports two network backends:
+//! Supports three network backends:
 //! - **Consomme**: userspace TCP stack (single NIC, no root required).
 //!   Uses linux_direct with a read-only erofs image carrying iperf3.
+//! - **Minestrone**: experimental passt-style userspace translator, set up
+//!   the same way as Consomme.
 //! - **TAP**: kernel networking via a TAP device in a network namespace
 //!   (Linux only)
 //!
@@ -44,6 +46,8 @@ impl std::fmt::Display for NicBackend {
 pub enum NetBackend {
     /// Consomme userspace networking (single NIC).
     Consomme,
+    /// Minestrone passt-style userspace networking (single NIC).
+    Minestrone,
     /// TAP device in a network namespace (Linux only).
     Tap,
 }
@@ -107,6 +111,8 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         match (self.backend, self.nic) {
             (NetBackend::Consomme, NicBackend::Vmbus) => "network_vmbus",
             (NetBackend::Consomme, NicBackend::VirtioNet) => "network_virtio",
+            (NetBackend::Minestrone, NicBackend::Vmbus) => "network_minestrone_vmbus",
+            (NetBackend::Minestrone, NicBackend::VirtioNet) => "network_minestrone_virtio",
             (NetBackend::Tap, NicBackend::Vmbus) => "network_tap_vmbus",
             (NetBackend::Tap, NicBackend::VirtioNet) => "network_tap_virtio",
         }
@@ -136,7 +142,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         // Spawn the iperf3 helper child process. For TAP, use the
         // namespace variant which calls unshare() before connecting.
         let helper_name = match self.backend {
-            NetBackend::Consomme => "iperf-helper",
+            NetBackend::Consomme | NetBackend::Minestrone => "iperf-helper",
             #[cfg(target_os = "linux")]
             NetBackend::Tap => "tap-ns-helper",
             #[cfg(not(target_os = "linux"))]
@@ -194,6 +200,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         let log_source = crate::log_source();
         let test_name = match self.backend {
             NetBackend::Consomme => "network_consomme",
+            NetBackend::Minestrone => "network_minestrone",
             NetBackend::Tap => "network_tap",
         };
 
@@ -214,19 +221,38 @@ impl crate::harness::WarmPerfTest for NetworkTest {
 
         // Configure NICs and erofs device based on backend.
         match self.backend {
-            NetBackend::Consomme => {
+            NetBackend::Consomme | NetBackend::Minestrone => {
                 builder = builder.modify_backend({
                     let nic = self.nic;
+                    let backend = self.backend;
                     move |c| {
-                        let (c, blk_port) = match nic {
-                            NicBackend::Vmbus => {
-                                (c.with_pcie_root_topology(1, 1, 1).with_nic(), "s0rc0rp0")
+                        use vm_resource::IntoResource;
+                        let endpoint = match backend {
+                            NetBackend::Minestrone => {
+                                net_backend_resources::minestrone::MinestroneHandle { cidr: None }
+                                    .into_resource()
                             }
+                            _ => net_backend_resources::consomme::ConsommeHandle {
+                                cidr: None,
+                                params: Default::default(),
+                                ports: Vec::new(),
+                                internal_dns: true,
+                                recv: None,
+                            }
+                            .into_resource(),
+                        };
+                        let (c, blk_port) = match nic {
+                            NicBackend::Vmbus => (
+                                c.with_pcie_root_topology(1, 1, 1)
+                                    .with_nic_endpoint(endpoint),
+                                "s0rc0rp0",
+                            ),
                             NicBackend::VirtioNet => (
-                                c.with_pcie_root_topology(1, 1, 2).with_virtio_nic_rx_gso(
+                                c.with_pcie_root_topology(1, 1, 2).with_virtio_nic_endpoint(
                                     "s0rc0rp0",
                                     petri::openvmm::NIC_MAC_ADDRESS,
                                     true,
+                                    endpoint,
                                 ),
                                 "s0rc0rp1",
                             ),
@@ -273,7 +299,7 @@ impl crate::harness::WarmPerfTest for NetworkTest {
         // Guest networking and iperf3 setup depends on backend.
         let host_ip;
         match self.backend {
-            NetBackend::Consomme => {
+            NetBackend::Consomme | NetBackend::Minestrone => {
                 // Bring up networking on the real root (busybox in initrd).
                 cmd!(sh, "ifconfig eth0 up").run().await?;
                 cmd!(sh, "udhcpc eth0").run().await?;

@@ -62,6 +62,8 @@ vm_resource::register_static_resolvers! {
     net_backend::null::NullResolver,
     #[cfg(feature = "net_consomme")]
     net_consomme::resolver::ConsommeResolver,
+    #[cfg(feature = "net_minestrone")]
+    net_minestrone::resolver::MinestroneResolver,
     #[cfg(all(feature = "net_tap", target_os = "linux"))]
     net_tap::resolver::TapResolver,
     #[cfg(windows)]

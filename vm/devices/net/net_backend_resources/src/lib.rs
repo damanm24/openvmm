@@ -151,6 +151,24 @@ pub mod consomme {
     }
 }
 
+/// Minestrone (passt-style user-mode translation) backend.
+pub mod minestrone {
+    use mesh::MeshPayload;
+    use vm_resource::ResourceId;
+    use vm_resource::kind::NetEndpointHandleKind;
+
+    /// Handle to a Minestrone network endpoint.
+    #[derive(Debug, MeshPayload)]
+    pub struct MinestroneHandle {
+        /// The CIDR of the guest network, e.g. `10.0.0.0/24`.
+        pub cidr: Option<String>,
+    }
+
+    impl ResourceId<NetEndpointHandleKind> for MinestroneHandle {
+        const ID: &'static str = "minestrone";
+    }
+}
+
 /// Windows vmswitch DirectIO backend.
 pub mod dio {
     use guid::Guid;

@@ -607,7 +607,7 @@ options:
     #[clap(long)]
     pub nic: bool,
 
-    /// expose a virtual NIC with the given backend (consomme | dio | tap | none)
+    /// expose a virtual NIC with the given backend (consomme | minestrone | dio | tap | none)
     ///
     /// Prefix with `uh:` to add this NIC via Mana emulation through OpenHCL,
     /// `vtl2:` to assign this NIC to VTL2, or `pcie_port=<port_name>:` to
@@ -622,6 +622,9 @@ options:
     ///   --net consomme:hostfwd=tcp:127.0.0.1:8080-:80
     ///   --net consomme:hostfwd=tcp:\[::1\]:8080-:80
     ///   --net consomme:10.0.0.0/24,hostfwd=tcp::22-:22,hostfwd=udp::5000-:5000
+    ///
+    /// `minestrone[:<cidr>]` is an experimental passt-style alternative to
+    /// consomme that translates guest TCP onto host sockets without buffering.
     #[clap(long)]
     pub net: Vec<NicConfigCli>,
 
@@ -3012,6 +3015,9 @@ pub enum EndpointConfigCli {
         cidr: Option<String>,
         host_fwd: Vec<HostPortConfigCli>,
     },
+    Minestrone {
+        cidr: Option<String>,
+    },
     Dio {
         id: Option<String>,
     },
@@ -3132,6 +3138,10 @@ impl FromStr for EndpointConfigCli {
                 }
                 EndpointConfigCli::Consomme { cidr, host_fwd }
             }
+            ["minestrone"] => EndpointConfigCli::Minestrone { cidr: None },
+            ["minestrone", cidr] => EndpointConfigCli::Minestrone {
+                cidr: Some((*cidr).to_owned()),
+            },
             ["dio", s @ ..] => EndpointConfigCli::Dio {
                 id: s.first().map(|s| (*s).to_owned()),
             },

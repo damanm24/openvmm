@@ -33,6 +33,8 @@ use openvmm_defs::config::PcieSwitchConfig;
 use openvmm_defs::config::VpciDeviceConfig;
 use openvmm_defs::config::Vtl2BaseAddressType;
 use vm_resource::IntoResource;
+use vm_resource::Resource;
+use vm_resource::kind::NetEndpointHandleKind;
 use vmotherboard::ChipsetDeviceHandle;
 
 impl PetriVmConfigOpenVmm {
@@ -119,7 +121,7 @@ impl PetriVmConfigOpenVmm {
     /// Enable a synthnic for the VM.
     ///
     /// Uses a mana emulator and the paravisor if a paravisor is present.
-    pub fn with_nic(mut self) -> Self {
+    pub fn with_nic(self) -> Self {
         let endpoint = net_backend_resources::consomme::ConsommeHandle {
             cidr: None,
             params: Default::default(),
@@ -128,6 +130,13 @@ impl PetriVmConfigOpenVmm {
             recv: None,
         }
         .into_resource();
+        self.with_nic_endpoint(endpoint)
+    }
+
+    /// Enable a synthnic for the VM backed by `endpoint`.
+    ///
+    /// Uses a mana emulator and the paravisor if a paravisor is present.
+    pub fn with_nic_endpoint(mut self, endpoint: Resource<NetEndpointHandleKind>) -> Self {
         if let Some(vtl2_settings) = self.runtime_config.vtl2_settings.as_mut() {
             self.config.vpci_devices.push(VpciDeviceConfig {
                 vtl: DeviceVtl::Vtl2,
@@ -276,7 +285,7 @@ impl PetriVmConfigOpenVmm {
 
     /// Enable a Consomme-backed virtio-net NIC with configurable receive GSO.
     pub fn with_virtio_nic_rx_gso(
-        mut self,
+        self,
         port_name: &str,
         mac_address: MacAddress,
         enable_rx_gso: bool,
@@ -289,7 +298,17 @@ impl PetriVmConfigOpenVmm {
             recv: None,
         }
         .into_resource();
+        self.with_virtio_nic_endpoint(port_name, mac_address, enable_rx_gso, endpoint)
+    }
 
+    /// Enable a virtio-net NIC backed by `endpoint`.
+    pub fn with_virtio_nic_endpoint(
+        mut self,
+        port_name: &str,
+        mac_address: MacAddress,
+        enable_rx_gso: bool,
+        endpoint: Resource<NetEndpointHandleKind>,
+    ) -> Self {
         self.config.pcie_devices.push(PcieDeviceConfig {
             port_name: port_name.to_string(),
             resource: virtio_resources::VirtioPciDeviceHandle(

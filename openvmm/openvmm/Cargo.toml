@@ -16,6 +16,7 @@ default = [
   "virt_mshv",
   "virt_whp",
   "net_consomme",
+  "net_minestrone",
   "net_tap",
   "disk_blob",
   "disklayer_sqlite",
@@ -35,6 +36,7 @@ virt_mshv = ["openvmm_resources/virt_mshv", "openvmm_hypervisors/virt_mshv"]
 virt_whp = ["openvmm_resources/virt_whp", "openvmm_hypervisors/virt_whp"]
 
 net_consomme = ["openvmm_resources/net_consomme"]
+net_minestrone = ["openvmm_resources/net_minestrone"]
 net_tap = ["openvmm_resources/net_tap"]
 
 disk_blob = ["openvmm_resources/disk_blob"]

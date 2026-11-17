@@ -305,7 +305,9 @@ net_backend = { path = "vm/devices/net/net_backend" }
 net_backend_core = { path = "vm/devices/net/net_backend_core" }
 net_backend_resources = { path = "vm/devices/net/net_backend_resources" }
 net_consomme = { path = "vm/devices/net/net_consomme" }
+net_minestrone = { path = "vm/devices/net/net_minestrone" }
 consomme = { path = "vm/devices/net/net_consomme/consomme" }
+minestrone = { path = "vm/devices/net/net_minestrone/minestrone" }
 net_dio = { path = "vm/devices/net/net_dio" }
 net_mana = { path = "vm/devices/net/net_mana" }
 net_tap = { path = "vm/devices/net/net_tap" }
