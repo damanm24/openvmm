@@ -2332,6 +2332,7 @@ async fn feature_negotiation_with_offloads_and_rx_gso(driver: DefaultDriver) {
     let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
 
     let endpoint = MockEndpointWithTxOffloads {
+        mtu: 1500,
         offloads: TxOffloadSupport {
             ipv4_header: true,
             tcp: true,
@@ -2392,6 +2393,7 @@ async fn receive_gso_is_disabled_by_default(driver: DefaultDriver) {
     let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
 
     let endpoint = MockEndpointWithTxOffloads {
+        mtu: 1500,
         offloads: TxOffloadSupport::default(),
         link_speed: 10_000 * BITS_PER_MEGABIT,
     };
@@ -2416,6 +2418,7 @@ async fn advertises_in_order(driver: DefaultDriver) {
     let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
     let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
     let endpoint = MockEndpointWithTxOffloads {
+        mtu: 1500,
         offloads: TxOffloadSupport::default(),
         link_speed: 10_000 * BITS_PER_MEGABIT,
     };
@@ -2455,6 +2458,7 @@ async fn feature_negotiation_no_offloads(driver: DefaultDriver) {
     let mac = MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]);
 
     let endpoint = MockEndpointWithTxOffloads {
+        mtu: 1500,
         offloads: TxOffloadSupport::default(),
         link_speed: 10_000 * BITS_PER_MEGABIT,
     };
@@ -2504,6 +2508,7 @@ async fn link_speed_boundaries(driver: DefaultDriver) {
             .build(
                 &driver_source,
                 Box::new(MockEndpointWithTxOffloads {
+                    mtu: 1500,
                     offloads: TxOffloadSupport::default(),
                     link_speed,
                 }),
@@ -2527,8 +2532,30 @@ async fn link_speed_boundaries(driver: DefaultDriver) {
     );
 }
 
+#[async_test]
+async fn mtu_comes_from_endpoint(driver: DefaultDriver) {
+    let driver_source = VmTaskDriverSource::new(SingleDriverBackend::new(driver));
+    for mtu in [1500, 9000, 65520] {
+        let endpoint = MockEndpointWithTxOffloads {
+            mtu,
+            offloads: TxOffloadSupport::default(),
+            link_speed: 10_000 * BITS_PER_MEGABIT,
+        };
+        let device = Device::builder()
+            .build(
+                &driver_source,
+                Box::new(endpoint),
+                MacAddress::new([0x00, 0x15, 0x5d, 0x01, 0x02, 0x03]),
+            )
+            .unwrap();
+        assert_eq!(device.registers.mtu, mtu);
+        assert_eq!(device.adapter.mtu, mtu);
+    }
+}
+
 // Mock endpoint that reports specific transmit offload support.
 struct MockEndpointWithTxOffloads {
+    mtu: u16,
     offloads: TxOffloadSupport,
     link_speed: u64,
 }
@@ -2541,6 +2568,9 @@ impl InspectMut for MockEndpointWithTxOffloads {
 
 #[async_trait]
 impl Endpoint for MockEndpointWithTxOffloads {
+    fn max_mtu(&self) -> u16 {
+        self.mtu
+    }
     fn endpoint_type(&self) -> &'static str {
         "mock-offloads"
     }

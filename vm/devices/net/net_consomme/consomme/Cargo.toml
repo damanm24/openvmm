@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 mesh_channel_core.workspace = true
+net_usermode.workspace = true
 futures.workspace = true
 getrandom.workspace = true
 heapless.workspace = true
@@ -27,7 +28,6 @@ tracelimit.workspace = true
 [target.'cfg(unix)'.dependencies]
 blocking.workspace = true
 libc.workspace = true
-resolv-conf.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 pal.workspace = true

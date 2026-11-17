@@ -7,6 +7,7 @@ mod limits;
 use super::*;
 use pal_async::DefaultDriver;
 use pal_async::DefaultPool;
+use pal_async::driver::Driver;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::DnsQueryType;
 use smoltcp::wire::EthernetFrame;
@@ -46,17 +47,19 @@ impl TestClient {
     }
 }
 
-impl Client for TestClient {
-    fn driver(&self) -> &dyn Driver {
-        &self.driver
-    }
-
+impl FrameSink for TestClient {
     fn recv(&mut self, data: &[u8], _checksum: &ChecksumState) {
         self.received_packets.push(data.to_vec());
     }
 
     fn rx_mtu(&mut self) -> usize {
         1514
+    }
+}
+
+impl Client for TestClient {
+    fn driver(&self) -> &dyn Driver {
+        &self.driver
     }
 }
 
@@ -569,45 +572,8 @@ async fn ipv4_normal_destination_not_blocked(driver: DefaultDriver) {
     );
 }
 
-#[test]
-fn test_is_same_ipv6_subnet_basic() {
-    let a = Ipv6Address::new(0x2001, 0x0db8, 0x0001, 0, 0, 0, 0, 1);
-    let b = Ipv6Address::new(0x2001, 0x0db8, 0x0001, 0, 0, 0, 0, 2);
-    assert!(is_same_ipv6_subnet(a, b, 48));
-    assert!(!is_same_ipv6_subnet(a, b, 128));
-}
-
-#[test]
-fn test_is_same_ipv6_subnet_prefix_zero() {
-    let a = Ipv6Address::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
-    let b = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
-    assert!(is_same_ipv6_subnet(a, b, 0));
-}
-
-#[test]
-fn test_is_same_ipv6_subnet_prefix_128_exact_match() {
-    let a = Ipv6Address::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
-    assert!(is_same_ipv6_subnet(a, a, 128));
-}
-
-#[test]
-fn test_is_same_ipv6_subnet_prefix_128_no_match() {
-    let a = Ipv6Address::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
-    let b = Ipv6Address::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2);
-    assert!(!is_same_ipv6_subnet(a, b, 128));
-}
-
-#[test]
-fn test_is_same_ipv6_subnet_prefix_above_128_does_not_panic() {
-    let a = Ipv6Address::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1);
-    let b = Ipv6Address::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2);
-    // prefix_len > 128 should behave like /128 (exact match), not panic.
-    assert!(is_same_ipv6_subnet(a, a, 200));
-    assert!(!is_same_ipv6_subnet(a, b, 255));
-}
-
 fn eui64_routable_address(params: &ConsommeParams) -> Ipv6Address {
-    let mut octets = ConsommeParams::compute_link_local_address(params.client_mac).octets();
+    let mut octets = link_local_from_mac(params.client_mac).octets();
     octets[..8].copy_from_slice(&[0xfd, 0x00, 0x0d, 0xb8, 0, 0, 0, 0]);
     Ipv6Address::from_octets(octets)
 }
@@ -616,7 +582,7 @@ fn eui64_routable_address(params: &ConsommeParams) -> Ipv6Address {
 fn infer_client_link_local_from_routable_with_matching_eui64_iid() {
     let mut params = ConsommeParams::new().unwrap();
     params.client_ip_ipv6 = None;
-    let expected_link_local = ConsommeParams::compute_link_local_address(params.client_mac);
+    let expected_link_local = link_local_from_mac(params.client_mac);
 
     params.infer_client_link_local_from_routable(eui64_routable_address(&params), "test");
 
@@ -649,15 +615,17 @@ fn infer_client_link_local_from_routable_does_not_overwrite_existing_address() {
 /// new connections and therefore never call `driver()`.
 struct NoDriverClient;
 
-impl Client for NoDriverClient {
-    fn driver(&self) -> &dyn Driver {
-        unreachable!("IPv6 address learning tests do not use the client driver")
-    }
-
+impl FrameSink for NoDriverClient {
     fn recv(&mut self, _data: &[u8], _checksum: &ChecksumState) {}
 
     fn rx_mtu(&mut self) -> usize {
         MIN_MTU
+    }
+}
+
+impl Client for NoDriverClient {
+    fn driver(&self) -> &dyn Driver {
+        unreachable!("IPv6 address learning tests do not use the client driver")
     }
 }
 
@@ -797,17 +765,19 @@ impl CapturingClient {
     }
 }
 
-impl Client for CapturingClient {
-    fn driver(&self) -> &dyn Driver {
-        &self.driver
-    }
-
+impl FrameSink for CapturingClient {
     fn recv(&mut self, data: &[u8], _checksum: &ChecksumState) {
         self.received.push(data.to_vec());
     }
 
     fn rx_mtu(&mut self) -> usize {
         1514
+    }
+}
+
+impl Client for CapturingClient {
+    fn driver(&self) -> &dyn Driver {
+        &self.driver
     }
 }
 

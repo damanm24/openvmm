@@ -70,6 +70,10 @@ pub use net_backend_core::*;
 /// [`Queue::rx_avail`] after queue creation.
 pub struct QueueConfig {
     pub driver: Box<dyn Driver>,
+    /// Negotiated IP MTU, excluding Ethernet headers and segmentation-offload
+    /// superframes. Identical for every queue and no greater than
+    /// [`Endpoint::max_mtu`]. Both sides must support frames of this size.
+    pub mtu: u16,
     /// Receive offloads enabled by the frontend after capability negotiation.
     pub enabled_rx_offloads: RxOffloadSupport,
 }
@@ -88,6 +92,12 @@ pub struct QueueConfig {
 pub trait Endpoint: Send + Sync + InspectMut {
     /// Returns an informational endpoint type.
     fn endpoint_type(&self) -> &'static str;
+
+    /// Largest supported IP MTU, excluding Ethernet headers. The frontend
+    /// selects its MTU within this limit and passes it in [`QueueConfig`].
+    fn max_mtu(&self) -> u16 {
+        1500
+    }
 
     /// Initializes the queues associated with the endpoint.
     async fn get_queues(
@@ -314,10 +324,17 @@ enum DisconnectableEndpointUpdate {
 pub struct DisconnectableEndpointControl {
     send_update: mesh::Sender<DisconnectableEndpointUpdate>,
     is_ordered: Option<bool>,
+    max_mtu: Option<u16>,
 }
 
 impl DisconnectableEndpointControl {
     pub fn connect(&mut self, endpoint: Box<dyn Endpoint>) -> anyhow::Result<()> {
+        if let Some(max_mtu) = self.max_mtu {
+            anyhow::ensure!(
+                endpoint.max_mtu() >= max_mtu,
+                "network endpoint cannot be reattached with a smaller maximum MTU"
+            );
+        }
         let new_is_ordered = endpoint.is_ordered();
         if let Some(is_ordered) = self.is_ordered {
             anyhow::ensure!(
@@ -327,6 +344,7 @@ impl DisconnectableEndpointControl {
         } else {
             self.is_ordered = Some(new_is_ordered);
         }
+        self.max_mtu.get_or_insert(endpoint.max_mtu());
         self.send_update
             .send(DisconnectableEndpointUpdate::EndpointConnected(endpoint));
         Ok(())
@@ -341,6 +359,7 @@ impl DisconnectableEndpointControl {
 }
 
 pub struct DisconnectableEndpointCachedState {
+    max_mtu: u16,
     is_ordered: bool,
     tx_offload_support: TxOffloadSupport,
     multiqueue_support: MultiQueueSupport,
@@ -371,6 +390,7 @@ impl DisconnectableEndpoint {
         let control = DisconnectableEndpointControl {
             send_update: endpoint_tx,
             is_ordered: None,
+            max_mtu: None,
         };
         (
             Self {
@@ -401,6 +421,12 @@ impl DisconnectableEndpoint {
 
 #[async_trait]
 impl Endpoint for DisconnectableEndpoint {
+    fn max_mtu(&self) -> u16 {
+        self.cached_state
+            .as_ref()
+            .expect("Endpoint needs connected at least once before use")
+            .max_mtu
+    }
     fn endpoint_type(&self) -> &'static str {
         self.current().endpoint_type()
     }
@@ -499,6 +525,10 @@ impl Endpoint for DisconnectableEndpoint {
                     new_is_ordered
                 };
                 self.cached_state = Some(DisconnectableEndpointCachedState {
+                    max_mtu: self
+                        .cached_state
+                        .as_ref()
+                        .map_or_else(|| self.current().max_mtu(), |cached| cached.max_mtu),
                     is_ordered,
                     tx_offload_support: self.current().tx_offload_support(),
                     multiqueue_support: self.current().multiqueue_support(),
@@ -538,10 +568,14 @@ mod disconnectable_endpoint_tests {
     #[derive(InspectMut)]
     struct TestEndpoint {
         is_ordered: bool,
+        max_mtu: u16,
     }
 
     #[async_trait]
     impl Endpoint for TestEndpoint {
+        fn max_mtu(&self) -> u16 {
+            self.max_mtu
+        }
         fn endpoint_type(&self) -> &'static str {
             "test"
         }
@@ -565,14 +599,45 @@ mod disconnectable_endpoint_tests {
     }
 
     #[test]
+    fn reconnect_preserves_advertised_mtu() {
+        let (_endpoint, mut control) = DisconnectableEndpoint::new();
+        control
+            .connect(Box::new(TestEndpoint {
+                is_ordered: true,
+                max_mtu: 9000,
+            }))
+            .unwrap();
+        assert!(
+            control
+                .connect(Box::new(TestEndpoint {
+                    is_ordered: true,
+                    max_mtu: 1500
+                }))
+                .is_err()
+        );
+        control
+            .connect(Box::new(TestEndpoint {
+                is_ordered: true,
+                max_mtu: 65520,
+            }))
+            .unwrap();
+    }
+
+    #[test]
     fn connect_pins_endpoint_ordering() {
         let (_endpoint, mut control) = DisconnectableEndpoint::new();
         control
-            .connect(Box::new(TestEndpoint { is_ordered: true }))
+            .connect(Box::new(TestEndpoint {
+                is_ordered: true,
+                max_mtu: 1500,
+            }))
             .unwrap();
 
         let err = control
-            .connect(Box::new(TestEndpoint { is_ordered: false }))
+            .connect(Box::new(TestEndpoint {
+                is_ordered: false,
+                max_mtu: 1500,
+            }))
             .unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -581,10 +646,16 @@ mod disconnectable_endpoint_tests {
 
         let (_endpoint, mut control) = DisconnectableEndpoint::new();
         control
-            .connect(Box::new(TestEndpoint { is_ordered: false }))
+            .connect(Box::new(TestEndpoint {
+                is_ordered: false,
+                max_mtu: 1500,
+            }))
             .unwrap();
         control
-            .connect(Box::new(TestEndpoint { is_ordered: true }))
+            .connect(Box::new(TestEndpoint {
+                is_ordered: true,
+                max_mtu: 1500,
+            }))
             .unwrap();
     }
 }

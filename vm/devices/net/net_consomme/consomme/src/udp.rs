@@ -835,11 +835,7 @@ mod tests {
         }
     }
 
-    impl Client for TestClient {
-        fn driver(&self) -> &dyn pal_async::driver::Driver {
-            &*self.driver
-        }
-
+    impl crate::FrameSink for TestClient {
         fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
             self.received_packets.lock().push(data.to_vec());
             self.received_checksums.push(*checksum);
@@ -847,6 +843,12 @@ mod tests {
 
         fn rx_mtu(&mut self) -> usize {
             self.rx_mtu
+        }
+    }
+
+    impl Client for TestClient {
+        fn driver(&self) -> &dyn pal_async::driver::Driver {
+            &*self.driver
         }
 
         fn rx_checksum_supported(&self) -> bool {

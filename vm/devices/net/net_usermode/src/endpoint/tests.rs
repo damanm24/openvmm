@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 use super::*;
-use consomme::Client as _;
 use guestmem::GuestMemory;
 use net_backend::tests::Bufs;
 use pal_async::DefaultDriver;
@@ -20,18 +19,15 @@ async fn receive_gso_metadata(driver: DefaultDriver) {
         pool.set_capacity(RxId(0), 65536);
         let mut state = QueueState {
             rx_avail: [RxId(0)].into(),
-            rx_ready: VecDeque::new(),
-            tx_avail: VecDeque::new(),
-            tx_ready: VecDeque::new(),
-            tx_scratch: Vec::new(),
+            ..Default::default()
         };
-        let mut stats = Stats::default();
-        let mut client = Client {
+        let mut stats = QueueStats::default();
+        let mut client = QueueClient {
             state: &mut state,
             stats: &mut stats,
             driver: &driver,
             pool: &mut pool,
-            enabled_rx_offloads: RxOffloadSupport {
+            offloads: RxOffloadSupport {
                 checksum: true,
                 tcpv4_gso: !ipv6,
                 tcpv6_gso: ipv6,
@@ -94,18 +90,15 @@ async fn receive_partial_checksum_metadata_without_gso(driver: DefaultDriver) {
                 pool.set_capacity(RxId(0), 1514);
                 let mut state = QueueState {
                     rx_avail: [RxId(0)].into(),
-                    rx_ready: VecDeque::new(),
-                    tx_avail: VecDeque::new(),
-                    tx_ready: VecDeque::new(),
-                    tx_scratch: Vec::new(),
+                    ..Default::default()
                 };
-                let mut stats = Stats::default();
-                let mut client = Client {
+                let mut stats = QueueStats::default();
+                let mut client = QueueClient {
                     state: &mut state,
                     stats: &mut stats,
                     driver: &driver,
                     pool: &mut pool,
-                    enabled_rx_offloads: RxOffloadSupport {
+                    offloads: RxOffloadSupport {
                         checksum: partial,
                         ..Default::default()
                     },
@@ -159,23 +152,17 @@ async fn receive_partial_checksum_metadata_without_gso(driver: DefaultDriver) {
 #[pal_async::async_test]
 async fn receive_gso_requires_negotiated_checksum_and_ip_version(driver: DefaultDriver) {
     let mut pool = Bufs::new(GuestMemory::empty());
-    let mut state = QueueState {
-        rx_avail: VecDeque::new(),
-        rx_ready: VecDeque::new(),
-        tx_avail: VecDeque::new(),
-        tx_ready: VecDeque::new(),
-        tx_scratch: Vec::new(),
-    };
-    let mut stats = Stats::default();
+    let mut state = QueueState::default();
+    let mut stats = QueueStats::default();
     for checksum in [false, true] {
         for tcpv4_gso in [false, true] {
             for tcpv6_gso in [false, true] {
-                let client = Client {
+                let client = QueueClient {
                     state: &mut state,
                     stats: &mut stats,
                     driver: &driver,
                     pool: &mut pool,
-                    enabled_rx_offloads: RxOffloadSupport {
+                    offloads: RxOffloadSupport {
                         checksum,
                         tcpv4_gso,
                         tcpv6_gso,
@@ -187,4 +174,69 @@ async fn receive_gso_requires_negotiated_checksum_and_ip_version(driver: Default
             }
         }
     }
+}
+
+fn tx_packet(id: u32, len: u32, segments: &[(u64, u32)]) -> Vec<TxSegment> {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(i, &(gpa, seg_len))| TxSegment {
+            ty: if i == 0 {
+                TxSegmentType::Head(TxMetadata {
+                    id: TxId(id),
+                    segment_count: segments.len() as u8,
+                    len,
+                    flags: net_backend::TxFlags::new()
+                        .with_offload_tcp_checksum(true)
+                        .with_offload_tcp_segmentation(true),
+                    max_segment_size: 1400,
+                    ..Default::default()
+                })
+            } else {
+                TxSegmentType::Tail
+            },
+            gpa,
+            len: seg_len,
+        })
+        .collect()
+}
+
+#[test]
+fn take_tx_gathers_segments_and_completes_packets() {
+    let mem = GuestMemory::allocate(4096);
+    mem.write_at(0, b"head").unwrap();
+    mem.write_at(100, b"tail").unwrap();
+    let mut state = QueueState::default();
+    // The segments cover only 8 of 10 bytes.
+    state.tx_avail(&tx_packet(1, 10, &[(0, 4), (100, 4)]));
+    // The segments overrun the packet length.
+    state.tx_avail(&tx_packet(2, 4, &[(0, 4), (100, 4)]));
+    state.tx_avail(&tx_packet(3, 4, &[(0, 4)]));
+
+    let packet = state.next_tx().unwrap();
+    assert_eq!(packet.segment_count, 2);
+    assert!(packet.checksum.tcp && !packet.checksum.ipv4);
+    assert_eq!(packet.checksum.tso, Some(1400));
+    let mut dest = [0xff; 10];
+    state.take_tx(&packet, &mem, &mut dest).unwrap();
+    assert_eq!(&dest, b"headtail\0\0");
+
+    let packet = state.next_tx().unwrap();
+    let mut dest = [0xff; 4];
+    assert!(matches!(
+        state.take_tx(&packet, &mem, &mut dest),
+        Err(TxReadError::Length)
+    ));
+
+    let packet = state.next_tx().unwrap();
+    state.drop_tx(&packet);
+    assert!(state.next_tx().is_none());
+
+    let mut done = [TxId(0); 4];
+    assert_eq!(state.tx_poll(&mut done), 3);
+    assert_eq!(
+        done[..3].iter().map(|id| id.0).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert!(!state.has_completions());
 }

@@ -351,6 +351,7 @@ pub trait VirtualFunction: Sync + Send {
 }
 
 struct Adapter {
+    max_mtu: u32,
     driver: VmTaskDriver,
     mac_address: MacAddress,
     max_queues: u16,
@@ -1236,6 +1237,7 @@ impl NicBuilder {
             get_guest_os_id: self.get_guest_os_id,
             num_sub_channels_opened: AtomicUsize::new(0),
             link_speed: endpoint.link_speed(),
+            max_mtu: u32::from(endpoint.max_mtu()) + net_backend::ETHERNET_HEADER_LEN,
         });
 
         let coordinator = TaskControl::new(CoordinatorState {
@@ -3457,6 +3459,15 @@ const DEFAULT_MTU: u32 = 1514;
 const MIN_MTU: u32 = DEFAULT_MTU;
 const MAX_MTU: u32 = 9216;
 
+fn negotiated_frame_size(requested: u32, backend_max: u32) -> u32 {
+    let requested = if (MIN_MTU..=MAX_MTU).contains(&requested) {
+        requested
+    } else {
+        DEFAULT_MTU
+    };
+    requested.min(backend_max)
+}
+
 impl Adapter {
     fn get_guest_vf_serial_number(&self, vfid: u32) -> u32 {
         if let Some(guest_os_id) = self.get_guest_os_id.as_ref().map(|f| f()) {
@@ -4830,6 +4841,7 @@ impl Coordinator {
                     // indirection table, it is assigned just the reserved
                     // buffers.
                     queue_config.push(QueueConfig {
+                        mtu: (buffers.ndis_config.mtu - net_backend::ETHERNET_HEADER_LEN) as u16,
                         driver: Box::new(drivers[0].clone()),
                         enabled_rx_offloads: Default::default(),
                     });
@@ -4866,6 +4878,7 @@ impl Coordinator {
 
                     let (this, rest) = initial_rx.split_at(end);
                     queue_config.push(QueueConfig {
+                        mtu: (buffers.ndis_config.mtu - net_backend::ETHERNET_HEADER_LEN) as u16,
                         driver: Box::new(drivers[queue_index as usize].clone()),
                         enabled_rx_offloads: Default::default(),
                     });
@@ -5211,11 +5224,7 @@ impl<T: 'static + RingMem> NetChannel<T> {
                         }
 
                         // As in the vmswitch, if the MTU is invalid then use the default.
-                        let mtu = if config.mtu >= MIN_MTU && config.mtu <= MAX_MTU {
-                            config.mtu
-                        } else {
-                            DEFAULT_MTU
-                        };
+                        let mtu = negotiated_frame_size(config.mtu, self.adapter.max_mtu);
 
                         // The UEFI client expects a completion packet, which can be empty.
                         self.send_completion(packet.transaction_id, None)?;

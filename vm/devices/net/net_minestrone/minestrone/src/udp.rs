@@ -113,7 +113,7 @@ impl Udp {
         let mut next = None::<Instant>;
         self.flows.retain(|&guest, flow| {
             loop {
-                let max = client.max_frame_len();
+                let max = client.rx_mtu();
                 let header = frame::l3_header_len(&guest) + UDP_HEADER_LEN;
                 if max <= header {
                     break;
@@ -135,7 +135,10 @@ impl Udp {
                         }
                         Poll::Pending => break,
                     };
-                if header + n > max || n > u16::MAX as usize - UDP_HEADER_LEN {
+                if header + n > max
+                    || header + n > usize::from(cfg.mtu) + 14
+                    || n > u16::MAX as usize - UDP_HEADER_LEN
+                {
                     tracelimit::warn_ratelimited!(len = n, "dropping oversized udp datagram");
                     continue;
                 }

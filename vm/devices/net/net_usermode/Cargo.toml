@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "net_usermode"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+
+# Guest queue plumbing for `net_backend` endpoints built on a user-mode stack.
+endpoint = ["dep:net_backend", "dep:guestmem", "dep:inspect", "dep:inspect_counters"]
+
+[dependencies]
+guestmem = { workspace = true, optional = true }
+inspect = { workspace = true, optional = true }
+inspect_counters = { workspace = true, optional = true }
+net_backend = { workspace = true, optional = true }
+pal_async.workspace = true
+tracelimit.workspace = true
+
+smoltcp = { workspace = true, features = ["proto-ipv4", "proto-ipv6", "medium-ethernet", "socket-raw"] }
+thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+resolv-conf.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+
+[dev-dependencies]
+guestmem.workspace = true
+test_with_tracing.workspace = true
+
+[lints]
+workspace = true

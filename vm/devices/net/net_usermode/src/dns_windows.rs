@@ -4,6 +4,7 @@
 // UNSAFETY: Calling Win32 APIs to get DNS server information.
 #![expect(unsafe_code)]
 
+use super::ScopedIpv6;
 use smoltcp::wire::IpAddress;
 use std::alloc::Layout;
 use std::io;
@@ -27,13 +28,15 @@ use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN;
 use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN6;
 
+/// An error reading the host's nameservers.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// The adapter addresses could not be queried.
     #[error("failed to query adapter DNS addresses")]
     AdapterAddresses(#[source] io::Error),
 }
 
-pub fn nameservers() -> Result<Vec<IpAddress>, Error> {
+pub(super) fn nameservers(_scoped_ipv6: ScopedIpv6) -> Result<Vec<IpAddress>, Error> {
     let flags = GAA_FLAG_SKIP_UNICAST
         | GAA_FLAG_SKIP_ANYCAST
         | GAA_FLAG_SKIP_MULTICAST

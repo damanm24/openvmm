@@ -139,7 +139,6 @@ struct NetStatus {
     _reserved: u16,
 }
 
-const DEFAULT_MTU: u16 = 1500;
 const BITS_PER_MEGABIT: u64 = 1_000_000;
 
 #[expect(dead_code)]
@@ -228,6 +227,7 @@ struct Adapter {
     mac_address: MacAddress,
     tx_offload_support: TxOffloadSupport,
     enable_rx_gso: bool,
+    mtu: u16,
 }
 
 pub struct Device {
@@ -616,6 +616,8 @@ impl NicBuilder {
 
         let driver = driver_source.simple();
         let tx_offload_support = endpoint.tx_offload_support();
+        let mtu = endpoint.max_mtu();
+        anyhow::ensure!(mtu >= 1280, "network backend MTU is below the IPv6 minimum");
         let speed = u32::try_from(endpoint.link_speed() / BITS_PER_MEGABIT)
             .ok()
             .filter(|speed| *speed <= i32::MAX as u32)
@@ -627,6 +629,7 @@ impl NicBuilder {
             mac_address,
             tx_offload_support,
             enable_rx_gso: self.enable_rx_gso,
+            mtu,
         });
 
         let coordinator = TaskControl::new(CoordinatorState {
@@ -638,7 +641,7 @@ impl NicBuilder {
             mac: mac_address.to_bytes(),
             status: NetStatus::new().with_link_up(true).into(),
             max_virtqueue_pairs: max_queue_pairs,
-            mtu: DEFAULT_MTU,
+            mtu,
             speed,
             duplex: 0xff,
             rss_max_key_size: 0,
@@ -825,6 +828,7 @@ impl Coordinator {
             .workers
             .iter()
             .map(|worker| QueueConfig {
+                mtu: c_state.adapter.mtu,
                 driver: Box::new(worker.state().unwrap().driver.clone()),
                 enabled_rx_offloads: self.enabled_rx_offloads,
             })

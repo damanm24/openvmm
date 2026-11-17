@@ -8326,3 +8326,9 @@ async fn subchannel_tx_restart(driver: DefaultDriver) {
             .unwrap_or_else(|_| panic!("sub-channel {idx} RX packet after restart cycle"));
     }
 }
+#[test_with_tracing::test]
+fn mtu_negotiation_respects_backend_and_frontend_limits() {
+    assert_eq!(negotiated_frame_size(9014, 1514), 1514);
+    assert_eq!(negotiated_frame_size(9014, 65534), 9014);
+    assert_eq!(negotiated_frame_size(65534, 65534), 1514);
+}

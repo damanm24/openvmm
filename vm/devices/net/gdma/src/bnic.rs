@@ -391,6 +391,7 @@ impl BasicNic {
                                 .endpoint
                                 .get_queues(
                                     vec![QueueConfig {
+                                        mtu: 1500.min(vport.endpoint.max_mtu()),
                                         driver: Box::new(state.queues.driver.clone()),
                                         enabled_rx_offloads: Default::default(),
                                     }],

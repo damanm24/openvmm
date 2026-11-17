@@ -262,6 +262,7 @@ mod tap_tests {
     async fn test_tap_get_queues(driver: DefaultDriver) {
         let mut endpoint = new_endpoint("tap0").unwrap();
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];
@@ -284,6 +285,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];
@@ -331,6 +333,7 @@ mod tap_tests {
         let (mut pool, mem) = make_pool();
         let initial_rx: Vec<_> = (1..128).map(RxId).collect();
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];
@@ -390,6 +393,7 @@ mod tap_tests {
         pool.set_capacity(undersized, 64);
 
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];
@@ -444,6 +448,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];
@@ -491,6 +496,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];
@@ -568,6 +574,7 @@ mod tap_tests {
 
         let (mut pool, mem) = make_pool();
         let config = vec![QueueConfig {
+            mtu: 1500,
             driver: Box::new(driver.clone()),
             enabled_rx_offloads: Default::default(),
         }];

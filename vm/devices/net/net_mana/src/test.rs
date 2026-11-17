@@ -973,6 +973,7 @@ async fn test_endpoint(
     endpoint
         .get_queues(
             vec![QueueConfig {
+                mtu: 1500,
                 driver: Box::new(driver.clone()),
                 enabled_rx_offloads: Default::default(),
             }],

@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 
 //! Minimal DHCPv4 server that leases the single configured guest address.
+//!
+//! As in passt, if the gateway is outside the guest's subnet, as can happen
+//! when the guest mirrors a host address, classless static routes (RFC 3442)
+//! make the gateway reachable on the link.
 
 use super::ChecksumState;
 use super::FrameSink;
@@ -9,9 +13,11 @@ use super::GatewayConfig;
 use super::MIN_MTU;
 use super::ServiceError;
 use heapless::Vec as HeaplessVec;
+use net_usermode::addr::is_same_ipv4_subnet;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::DHCP_MAX_DNS_SERVER_COUNT;
 use smoltcp::wire::DhcpMessageType;
+use smoltcp::wire::DhcpOption;
 use smoltcp::wire::DhcpPacket;
 use smoltcp::wire::DhcpRepr;
 use smoltcp::wire::EthernetAddress;
@@ -30,7 +36,8 @@ pub(crate) const DHCP_SERVER: u16 = 67;
 const DHCP_CLIENT: u16 = 68;
 // RFC 1542 section 2.1 requires every BOOTP message to be at least 300 octets.
 const BOOTP_MIN_MESSAGE_LEN: usize = 300;
-const LEASE_SECS: u32 = 86400;
+const LEASE_SECS: u32 = u32::MAX;
+const OPTION_CLASSLESS_STATIC_ROUTE: u8 = 121;
 
 pub(crate) fn handle_dhcp(
     cfg: &GatewayConfig,
@@ -41,6 +48,9 @@ pub(crate) fn handle_dhcp(
     let req = DhcpRepr::parse(&packet)?;
     let gateway_ip = cfg.gateway_ip;
     let client_ip = cfg.client_ip;
+    if gateway_ip.is_unspecified() {
+        return Ok(());
+    }
 
     // There is no relay-facing network path; ignore relayed requests.
     if req.relay_agent_ip != Ipv4Address::UNSPECIFIED {
@@ -106,6 +116,29 @@ pub(crate) fn handle_dhcp(
         rebind_duration: None,
         additional_options: &[],
     };
+    // A host route to the gateway, then the default route through it. Clients
+    // that support this option ignore the router option.
+    let g = gateway_ip.octets();
+    let routes = [
+        32, g[0], g[1], g[2], g[3], 0, 0, 0, 0, 0, g[0], g[1], g[2], g[3],
+    ];
+    let route_option = [DhcpOption {
+        kind: OPTION_CLASSLESS_STATIC_ROUTE,
+        data: &routes,
+    }];
+    let mtu_bytes = cfg.mtu.to_be_bytes();
+    let mtu_option = DhcpOption {
+        kind: 26,
+        data: &mtu_bytes,
+    };
+    let options_with_routes = [mtu_option, route_option[0]];
+    let options_without_routes = [mtu_option];
+    let additional_options: &[DhcpOption<'_>] =
+        if is_same_ipv4_subnet(client_ip, gateway_ip, cfg.net_mask) {
+            &options_without_routes
+        } else {
+            &options_with_routes
+        };
     let resp = match your_ip {
         Some(your_ip) => DhcpRepr {
             client_ip: response_client_ip,
@@ -114,6 +147,7 @@ pub(crate) fn handle_dhcp(
             subnet_mask: Some(cfg.net_mask),
             dns_servers: Some(dns_servers),
             lease_duration: Some(LEASE_SECS),
+            additional_options,
             ..base
         },
         None => DhcpRepr {
@@ -167,6 +201,6 @@ pub(crate) fn handle_dhcp(
     emit_result?;
 
     let len = eth.buffer_len() + ipv4.buffer_len() + udp.header_len() + dhcp_len;
-    sink.send_frame(&buffer[..len], &ChecksumState::UDP4);
+    sink.recv(&buffer[..len], &ChecksumState::UDP4);
     Ok(())
 }

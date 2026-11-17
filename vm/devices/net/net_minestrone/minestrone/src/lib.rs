@@ -10,11 +10,13 @@
 //! host kernel's TCP, and data stays in the host kernel's socket buffers
 //! rather than in per-connection buffers here. See the `tcp` module.
 //!
-//! ARP, DHCPv4, DHCPv6, and NDP are answered by the `services` module. There
-//! is no internal DNS resolver: the guest is handed the host's nameservers.
-//! ICMP is not translated.
+//! ARP, DHCPv4, DHCPv6, and NDP are answered by the `services` module. As in
+//! passt, by default they give the guest the addresses and default gateways
+//! of the host. There is no internal DNS resolver: the guest is handed the
+//! host's nameservers. ICMP is not translated.
 
 mod frame;
+mod host;
 mod services;
 mod sys;
 mod tcp;
@@ -22,11 +24,16 @@ mod tcp;
 mod tests;
 mod udp;
 
-pub use services::ChecksumState;
-pub use services::FrameSink;
+pub use net_usermode::ChecksumState;
+pub use net_usermode::Client;
+pub use net_usermode::FrameSink;
+pub use net_usermode::addr::InvalidCidr;
 pub use services::GatewayConfig;
 
-use pal_async::driver::Driver;
+use net_usermode::addr::Ipv4Network;
+use net_usermode::addr::is_host_local_ipv4;
+use net_usermode::addr::is_host_local_ipv6;
+use net_usermode::dns;
 use pal_async::timer::Instant;
 use pal_async::timer::PolledTimer;
 use services::Disposition;
@@ -43,6 +50,7 @@ use smoltcp::wire::IpAddress;
 use smoltcp::wire::IpProtocol;
 use smoltcp::wire::Ipv4Address;
 use smoltcp::wire::Ipv4Packet;
+use smoltcp::wire::Ipv6Address;
 use smoltcp::wire::Ipv6Packet;
 use smoltcp::wire::TcpPacket;
 use smoltcp::wire::TcpRepr;
@@ -104,91 +112,164 @@ pub struct MinestroneParams {
     /// unspecified, link-local). Traffic to the gateway address is then sent
     /// to the host's loopback address.
     pub allow_host_local_access: bool,
+    /// The IPv4 gateway is the host's own default gateway rather than a
+    /// virtual address, so guest traffic to it is translated like traffic to
+    /// any other address unless `allow_host_local_access` is set.
+    pub host_ipv4_gateway: bool,
+    /// IPv6 default gateway mirrored from the host, when available.
+    pub host_ipv6_gateway: Option<Ipv6Addr>,
+    /// Host interface scope for link-local IPv6 resolvers.
+    pub host_ipv6_interface_index: u32,
+    /// Optional alias for reaching `gateway.client_ip` on the host.
+    /// Disabled by default, like passt's --map-guest-addr.
+    pub map_guest_addr4: Option<Ipv4Addr>,
+    /// IPv6 counterpart of `map_guest_addr4`, for `gateway.assigned_ipv6`.
+    pub map_guest_addr6: Option<Ipv6Addr>,
+    /// DNS-only address translations: (advertised address, host resolver).
+    /// These take precedence over gateway-to-loopback translation on port 53.
+    pub dns_mappings: Vec<(IpAddr, IpAddr)>,
     /// Idle timeout for UDP flows.
     pub udp_timeout: Duration,
 }
 
+/// The gateway's MAC address, as in passt.
+const GATEWAY_MAC: EthernetAddress = EthernetAddress([0x9a, 0x55, 0x9a, 0x55, 0x9a, 0x55]);
+/// The guest's IPv4 address when the host has no usable IPv4 configuration.
+const LOCAL_CLIENT_IP: Ipv4Address = Ipv4Address::new(169, 254, 2, 1);
+/// The IPv4 gateway when the host has no usable IPv4 configuration.
+const LOCAL_GATEWAY_IP: Ipv4Address = Ipv4Address::new(169, 254, 2, 2);
+const LOCAL_PREFIX_LEN: u8 = 16;
+/// The IPv6 gateway when the host has no usable IPv6 configuration.
+const LOCAL_GATEWAY_IPV6: Ipv6Address = Ipv6Address::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+
 impl MinestroneParams {
-    /// Returns the default NAT configuration: the gateway is 10.0.0.1, the
-    /// guest is 10.0.0.2/24, IPv6 is configured by the guest with SLAAC, and
-    /// the guest uses the host's nameservers.
+    /// Returns a configuration that mirrors the host, as passt does. For each
+    /// IP version, the guest is given the address of the host interface with
+    /// the first default route, and that route's gateway. The IPv6 address is
+    /// assigned with DHCPv6. The guest uses the host's nameservers.
+    ///
+    /// With no default route, the first interface with a non-link-local route
+    /// is used instead. Without a usable interface address, or on hosts other
+    /// than Linux, that IP version falls back to
+    /// [`local`](Self::local) addressing.
     pub fn new() -> Self {
-        let gateway_mac_ipv6 = EthernetAddress([0x52, 0x55, 10, 0, 1, 2]);
-        Self {
+        let mut params = Self::local();
+        if let Some(v4) = host::ipv4() {
+            params.gateway.client_ip = v4.addr;
+            params.gateway.net_mask = Ipv4Address::from_bits(prefix_mask(v4.prefix_len));
+            params.gateway.gateway_ip = v4.gateway;
+            params.host_ipv4_gateway = true;
+        }
+        if let Some(v6) = host::ipv6() {
+            params.gateway.assigned_ipv6 = Some(v6.addr);
+            params.gateway.gateway_link_local_ipv6 = v6.gateway_link_local;
+            params.host_ipv6_gateway = (!v6.gateway.is_unspecified()).then_some(v6.gateway);
+            params.host_ipv6_interface_index = v6.interface_index;
+        }
+        params.configure_dns(host_nameservers());
+        params
+    }
+
+    /// Returns a configuration for a host without connectivity, as passt
+    /// uses: the guest is 169.254.2.1/16 with gateway 169.254.2.2, and has
+    /// only its link-local IPv6 address, with router fe80::1. The guest uses
+    /// the host's nameservers.
+    pub fn local() -> Self {
+        let mut params = Self {
             gateway: GatewayConfig {
-                gateway_mac: EthernetAddress([0x52, 0x55, 10, 0, 0, 1]),
-                gateway_ip: Ipv4Address::new(10, 0, 0, 1),
+                mtu: 1500,
+                gateway_mac: GATEWAY_MAC,
+                gateway_ip: LOCAL_GATEWAY_IP,
                 client_mac: EthernetAddress([0, 0, 0, 0, 1, 0]),
-                client_ip: Ipv4Address::new(10, 0, 0, 2),
-                net_mask: Ipv4Address::new(255, 255, 255, 0),
-                gateway_mac_ipv6,
-                gateway_link_local_ipv6: services::link_local_from_mac(gateway_mac_ipv6),
-                prefix_len_ipv6: 64,
-                advertise_routable_ipv6: true,
+                client_ip: LOCAL_CLIENT_IP,
+                net_mask: Ipv4Address::from_bits(prefix_mask(LOCAL_PREFIX_LEN)),
+                gateway_link_local_ipv6: LOCAL_GATEWAY_IPV6,
+                assigned_ipv6: None,
                 client_ip_ipv6: None,
                 client_ip_ipv6_routable: None,
-                nameservers: host_nameservers(),
+                nameservers: Vec::new(),
                 internal_dns: false,
             },
             flow_limits: FlowLimits::default(),
-            allow_host_local_access: false,
+            allow_host_local_access: true,
+            host_ipv4_gateway: false,
+            host_ipv6_gateway: Some(LOCAL_GATEWAY_IPV6),
+            host_ipv6_interface_index: 0,
+            map_guest_addr4: None,
+            map_guest_addr6: None,
+            dns_mappings: Vec::new(),
             udp_timeout: Duration::from_secs(300),
-        }
+        };
+        params.configure_dns(host_nameservers());
+        params
     }
 
-    /// Sets the IPv4 network. For `192.168.0.0/24`, the gateway becomes
-    /// 192.168.0.1 and the guest 192.168.0.2.
+    /// Places the guest on a private IPv4 network instead. For
+    /// `192.168.0.0/24`, the gateway becomes 192.168.0.1 and the guest
+    /// 192.168.0.2. IPv6 is unchanged.
     pub fn set_cidr(&mut self, cidr: &str) -> Result<(), InvalidCidr> {
-        let cidr: smoltcp::wire::Ipv4Cidr = cidr.parse().map_err(|()| InvalidCidr)?;
-        if cidr.prefix_len() > 30 {
-            return Err(InvalidCidr);
-        }
-        let base = cidr.network().address().to_bits();
-        self.gateway.gateway_ip = Ipv4Address::from_bits(base + 1);
-        self.gateway.client_ip = Ipv4Address::from_bits(base + 2);
-        self.gateway.net_mask = cidr.netmask();
+        let network = Ipv4Network::parse(cidr)?;
+        self.gateway.gateway_ip = network.gateway;
+        self.gateway.client_ip = network.client;
+        self.gateway.net_mask = network.net_mask;
+        self.host_ipv4_gateway = false;
+        // Recompute DNS aliases for the new virtual gateway.
+        self.configure_dns(host_nameservers());
         Ok(())
+    }
+
+    fn configure_dns(&mut self, nameservers: Vec<IpAddress>) {
+        self.dns_mappings.clear();
+        let first_v4 = nameservers.iter().find_map(|server| match server {
+            IpAddress::Ipv4(addr) => Some(IpAddr::V4(*addr)),
+            _ => None,
+        });
+        let first_v6 = nameservers.iter().find_map(|server| match server {
+            IpAddress::Ipv6(addr) => Some(IpAddr::V6(*addr)),
+            _ => None,
+        });
+        self.gateway.nameservers = nameservers
+            .into_iter()
+            .filter_map(|server| {
+                let host: IpAddr = server.into();
+                let gateway: IpAddr = match host {
+                    IpAddr::V4(_) => self.gateway.gateway_ip.into(),
+                    IpAddr::V6(_) => self.host_ipv6_gateway?.into(),
+                };
+                if self.allow_host_local_access && (host.is_loopback() || host == gateway) {
+                    if gateway.is_unspecified() {
+                        return None;
+                    }
+                    let resolver = if host.is_ipv4() { first_v4 } else { first_v6 }?;
+                    if !self.dns_mappings.iter().any(|(alias, _)| *alias == gateway) {
+                        self.dns_mappings.push((gateway, resolver));
+                    }
+                    Some(gateway.into())
+                } else {
+                    (!host.is_loopback()).then_some(server)
+                }
+            })
+            .collect();
     }
 }
 
-/// An error indicating that a CIDR is invalid or too small for a gateway and
-/// a guest.
-#[derive(Debug, Error)]
-#[error("invalid CIDR")]
-pub struct InvalidCidr;
+/// Returns the IPv4 netmask with `prefix_len` leading ones.
+fn prefix_mask(prefix_len: u8) -> u32 {
+    (!0u32)
+        .checked_shl(32 - u32::from(prefix_len.min(32)))
+        .unwrap_or(0)
+}
 
-/// Returns the host's nameservers that a guest can reach. Loopback servers
-/// (such as systemd-resolved's stub) are skipped in favor of the upstream
-/// servers they forward to.
+/// Reads the host's nameservers, as passt does from `/etc/resolv.conf`.
+/// `configure_dns` makes host-local resolvers reachable from the guest.
 fn host_nameservers() -> Vec<IpAddress> {
-    #[cfg(unix)]
-    {
-        for path in ["/etc/resolv.conf", "/run/systemd/resolve/resolv.conf"] {
-            let Ok(contents) = std::fs::read(path) else {
-                continue;
-            };
-            let Ok(config) = resolv_conf::Config::parse(contents) else {
-                continue;
-            };
-            let servers: Vec<IpAddress> = config
-                .nameservers
-                .iter()
-                .filter_map(|ns| match ns {
-                    resolv_conf::ScopedIp::V4(a) if !a.is_loopback() => Some(IpAddress::Ipv4(*a)),
-                    resolv_conf::ScopedIp::V6(a, None) if !a.is_loopback() => {
-                        Some(IpAddress::Ipv6(*a))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if !servers.is_empty() {
-                return servers;
-            }
-        }
+    dns::nameservers(dns::ScopedIpv6::Strip).unwrap_or_else(|err| {
+        tracing::warn!(
+            error = &err as &dyn std::error::Error,
+            "failed to read host nameservers"
+        );
         Vec::new()
-    }
-    #[cfg(not(unix))]
-    Vec::new()
+    })
 }
 
 /// The reason a guest frame was dropped.
@@ -226,22 +307,6 @@ pub enum DropReason {
     Io(#[source] std::io::Error),
 }
 
-/// The guest-facing side of a Minestrone instance.
-pub trait Client: FrameSink {
-    /// Gets the driver used to poll host sockets and timers.
-    fn driver(&self) -> &dyn Driver;
-
-    /// Whether the client can complete partial TCP and UDP receive checksums.
-    fn rx_checksum_supported(&self) -> bool {
-        false
-    }
-
-    /// Whether the client can receive TCP GSO frames with partial checksums.
-    fn rx_gso_supported(&self, _ipv6: bool) -> bool {
-        false
-    }
-}
-
 /// A Minestrone instance.
 pub struct Minestrone {
     params: MinestroneParams,
@@ -253,6 +318,10 @@ pub struct Minestrone {
 }
 
 impl Minestrone {
+    /// Applies the frontend's negotiated IP MTU before queues start.
+    pub fn set_mtu(&mut self, mtu: u16) {
+        self.params.gateway.mtu = mtu;
+    }
     /// Creates a new instance.
     pub fn new(params: MinestroneParams) -> Self {
         Self {
@@ -319,9 +388,8 @@ impl<T: Client> Access<'_, T> {
         let now = Instant::now();
         let cfg = &params.gateway;
         let tcp_next = tcp.poll(cx, cfg, self.client, scratch, now);
-        let allow_local = params.allow_host_local_access;
         let udp_next = udp.poll(cx, cfg, self.client, scratch, |src| {
-            guest_visible(cfg, allow_local, src)
+            guest_visible(params, src)
         });
         let next = match (tcp_next, udp_next) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -392,10 +460,9 @@ impl<T: Client> Access<'_, T> {
             EthernetProtocol::Ipv6 => parse_ipv6(payload, checksum)?,
             other => return Err(DropReason::UnsupportedEthertype(other)),
         };
-        let host_dst = self.host_destination(ip.dst)?;
         match ip.protocol {
-            IpProtocol::Tcp => self.handle_tcp(&ip, host_dst, checksum, pending),
-            IpProtocol::Udp => self.handle_udp(&ip, host_dst, checksum),
+            IpProtocol::Tcp => self.handle_tcp(&ip, checksum, pending),
+            IpProtocol::Udp => self.handle_udp(&ip, checksum),
             other => Err(DropReason::UnsupportedIpProtocol(other)),
         }
     }
@@ -405,15 +472,33 @@ impl<T: Client> Access<'_, T> {
         let params = &self.inner.params;
         let cfg = &params.gateway;
         let allow = params.allow_host_local_access;
+        if match dst {
+            IpAddr::V4(addr) => params.map_guest_addr4 == Some(addr),
+            IpAddr::V6(addr) => params.map_guest_addr6 == Some(addr),
+        } {
+            return match dst {
+                IpAddr::V4(_) => Ok(cfg.client_ip.into()),
+                IpAddr::V6(_) => cfg
+                    .assigned_ipv6
+                    .map(IpAddr::V6)
+                    .ok_or(DropReason::DestinationNotAllowed),
+            };
+        }
         match dst {
-            IpAddr::V4(v4) if v4 == cfg.gateway_ip => {
+            IpAddr::V4(v4)
+                if !v4.is_unspecified()
+                    && v4 == cfg.gateway_ip
+                    && (allow || !params.host_ipv4_gateway) =>
+            {
                 if allow {
                     Ok(Ipv4Addr::LOCALHOST.into())
                 } else {
                     Err(DropReason::DestinationNotAllowed)
                 }
             }
-            IpAddr::V6(v6) if v6 == cfg.gateway_link_local_ipv6 => {
+            IpAddr::V6(v6)
+                if v6 == cfg.gateway_link_local_ipv6 || Some(v6) == params.host_ipv6_gateway =>
+            {
                 if allow {
                     Ok(Ipv6Addr::LOCALHOST.into())
                 } else {
@@ -421,10 +506,7 @@ impl<T: Client> Access<'_, T> {
                 }
             }
             IpAddr::V4(v4)
-                if v4.is_multicast()
-                    || v4.is_broadcast()
-                    || (!allow
-                        && (v4.is_loopback() || v4.is_unspecified() || v4.is_link_local())) =>
+                if v4.is_multicast() || v4.is_broadcast() || (!allow && is_host_local_ipv4(v4)) =>
             {
                 Err(DropReason::DestinationNotAllowed)
             }
@@ -433,7 +515,7 @@ impl<T: Client> Access<'_, T> {
             IpAddr::V6(v6)
                 if v6.is_multicast()
                     || v6.is_unicast_link_local()
-                    || (!allow && (v6.is_loopback() || v6.is_unspecified())) =>
+                    || (!allow && is_host_local_ipv6(v6)) =>
             {
                 Err(DropReason::DestinationNotAllowed)
             }
@@ -441,10 +523,43 @@ impl<T: Client> Access<'_, T> {
         }
     }
 
+    fn host_destination_port(&self, dst: IpAddr, port: u16) -> Result<IpAddr, DropReason> {
+        if port == services::DNS_PORT {
+            if let Some((_, resolver)) = self
+                .inner
+                .params
+                .dns_mappings
+                .iter()
+                .find(|(a, _)| *a == dst)
+            {
+                return Ok(*resolver);
+            }
+            if matches!(dst, IpAddr::V6(addr) if addr.is_unicast_link_local())
+                && self.inner.params.gateway.nameservers.contains(&dst.into())
+            {
+                return Ok(dst);
+            }
+        }
+        self.host_destination(dst)
+    }
+
+    fn host_socket_address(&self, dst: IpAddr, port: u16) -> Result<SocketAddr, DropReason> {
+        let mut address = SocketAddr::new(self.host_destination_port(dst, port)?, port);
+        if let SocketAddr::V6(ref mut v6) = address {
+            if v6.ip().is_unicast_link_local() {
+                let scope = self.inner.params.host_ipv6_interface_index;
+                if scope == 0 {
+                    return Err(DropReason::DestinationNotAllowed);
+                }
+                v6.set_scope_id(scope);
+            }
+        }
+        Ok(address)
+    }
+
     fn handle_tcp<'f>(
         &mut self,
         ip: &IpView<'f>,
-        host_dst: IpAddr,
         checksum: &ChecksumState,
         pending: &mut tcp::PendingWrites<'f>,
     ) -> Result<(), DropReason> {
@@ -458,22 +573,18 @@ impl<T: Client> Access<'_, T> {
             guest: SocketAddr::new(ip.src, repr.src_port),
             remote: SocketAddr::new(ip.dst, repr.dst_port),
         };
+        let host_dst = self.host_socket_address(ip.dst, repr.dst_port)?;
         self.inner.tcp.handle(
             &self.inner.params.gateway,
             self.client,
             key,
-            SocketAddr::new(host_dst, repr.dst_port),
+            host_dst,
             &repr,
             pending,
         )
     }
 
-    fn handle_udp(
-        &mut self,
-        ip: &IpView<'_>,
-        host_dst: IpAddr,
-        checksum: &ChecksumState,
-    ) -> Result<(), DropReason> {
+    fn handle_udp(&mut self, ip: &IpView<'_>, checksum: &ChecksumState) -> Result<(), DropReason> {
         let packet = UdpPacket::new_checked(ip.payload)?;
         let (src, dst) = (IpAddress::from(ip.src), IpAddress::from(ip.dst));
         // A zero UDP checksum over IPv4 means none was computed.
@@ -484,24 +595,44 @@ impl<T: Client> Access<'_, T> {
             return Err(DropReason::Checksum);
         }
         let guest = SocketAddr::new(ip.src, packet.src_port());
-        self.inner.udp.handle(
-            self.client,
-            guest,
-            SocketAddr::new(host_dst, packet.dst_port()),
-            packet.payload(),
-        )
+        let host_dst = self.host_socket_address(ip.dst, packet.dst_port())?;
+        self.inner
+            .udp
+            .handle(self.client, guest, host_dst, packet.payload())
     }
 }
 
 /// Maps a host source address to the address the guest should see.
-fn guest_visible(cfg: &GatewayConfig, allow_local: bool, src: SocketAddr) -> SocketAddr {
+fn guest_visible(params: &MinestroneParams, src: SocketAddr) -> SocketAddr {
+    let cfg = &params.gateway;
+    if src.port() == services::DNS_PORT {
+        if let Some((alias, _)) = params
+            .dns_mappings
+            .iter()
+            .find(|(_, host)| *host == src.ip())
+        {
+            return SocketAddr::new(*alias, src.port());
+        }
+    }
     match src.ip() {
-        IpAddr::V4(v4) if allow_local && v4.is_loopback() => {
+        IpAddr::V4(v4) if params.allow_host_local_access && v4 == Ipv4Addr::LOCALHOST => {
             SocketAddr::new(cfg.gateway_ip.into(), src.port())
         }
-        IpAddr::V6(v6) if allow_local && v6.is_loopback() => {
-            SocketAddr::new(cfg.gateway_link_local_ipv6.into(), src.port())
+        IpAddr::V6(v6) if params.allow_host_local_access && v6 == Ipv6Addr::LOCALHOST => {
+            SocketAddr::new(
+                params
+                    .host_ipv6_gateway
+                    .unwrap_or(cfg.gateway_link_local_ipv6)
+                    .into(),
+                src.port(),
+            )
         }
+        IpAddr::V4(addr) if addr == cfg.client_ip => params
+            .map_guest_addr4
+            .map_or(src, |alias| SocketAddr::new(alias.into(), src.port())),
+        IpAddr::V6(addr) if Some(addr) == cfg.assigned_ipv6 => params
+            .map_guest_addr6
+            .map_or(src, |alias| SocketAddr::new(alias.into(), src.port())),
         _ => src,
     }
 }

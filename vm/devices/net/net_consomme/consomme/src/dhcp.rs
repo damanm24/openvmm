@@ -218,17 +218,19 @@ mod tests {
         frames: Vec<(Vec<u8>, ChecksumState)>,
     }
 
-    impl Client for CaptureClient {
-        fn driver(&self) -> &dyn Driver {
-            &self.driver
-        }
-
+    impl crate::FrameSink for CaptureClient {
         fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
             self.frames.push((data.to_vec(), *checksum));
         }
 
         fn rx_mtu(&mut self) -> usize {
             MIN_MTU
+        }
+    }
+
+    impl Client for CaptureClient {
+        fn driver(&self) -> &dyn Driver {
+            &self.driver
         }
     }
 

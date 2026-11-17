@@ -304,7 +304,23 @@ impl crate::harness::WarmPerfTest for NetworkTest {
                 cmd!(sh, "ifconfig eth0 up").run().await?;
                 cmd!(sh, "udhcpc eth0").run().await?;
 
-                host_ip = detect_host_ip().context("failed to detect host IP")?;
+                host_ip = if self.backend == NetBackend::Minestrone {
+                    // Mirrored addressing shadows the host's IP; the gateway
+                    // maps to host loopback instead.
+                    let routes = cmd!(sh, "ip -4 route show default").read().await?;
+                    routes
+                        .lines()
+                        .find_map(|line| {
+                            let mut words = line.split_whitespace();
+                            (words.next() == Some("default") && words.next() == Some("via"))
+                                .then(|| words.next())
+                                .flatten()
+                        })
+                        .context("guest has no IPv4 default gateway")?
+                        .to_owned()
+                } else {
+                    detect_host_ip().context("failed to detect host IP")?
+                };
                 tracing::info!(host_ip = %host_ip, "detected host IP");
             }
             #[cfg(target_os = "linux")]
@@ -313,6 +329,13 @@ impl crate::harness::WarmPerfTest for NetworkTest {
             }
             #[cfg(not(target_os = "linux"))]
             NetBackend::Tap => unreachable!(),
+        }
+
+        if self.diag {
+            let script =
+                "ip addr show && ip route show && ip -6 route show && cat /etc/resolv.conf";
+            let config = cmd!(sh, "sh -c {script}").read().await?;
+            tracing::info!(%config, "guest network configuration");
         }
 
         // Mount the erofs image (iperf3 pre-installed) and prepare chroot.

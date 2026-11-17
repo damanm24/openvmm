@@ -290,11 +290,7 @@ impl TestClient {
     }
 }
 
-impl Client for TestClient {
-    fn driver(&self) -> &dyn Driver {
-        &self.driver
-    }
-
+impl crate::FrameSink for TestClient {
     fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
         if let Some(rx_buffers) = &mut self.rx_buffers {
             assert_ne!(*rx_buffers, 0, "packet sent without an RX buffer");
@@ -310,6 +306,12 @@ impl Client for TestClient {
         } else {
             self.rx_capacity
         }
+    }
+}
+
+impl Client for TestClient {
+    fn driver(&self) -> &dyn Driver {
+        &self.driver
     }
 
     fn rx_checksum_supported(&self) -> bool {

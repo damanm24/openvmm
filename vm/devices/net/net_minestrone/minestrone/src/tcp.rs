@@ -344,7 +344,11 @@ impl Tcp {
             snd_nxt: isn.add(1),
             snd_wnd: syn.window_len.into(),
             guest_wscale,
-            mss: syn.max_seg_size.map_or(default_mss, usize::from).max(64),
+            mss: syn
+                .max_seg_size
+                .map_or(default_mss, usize::from)
+                .max(64)
+                .min(usize::from(cfg.mtu) - if key.guest.is_ipv4() { 40 } else { 60 }),
             data_end: None,
             fin_sent: false,
             fin_acked: false,
@@ -479,7 +483,7 @@ fn reset_unknown<C: Client + ?Sized>(
     key: FlowKey,
     tcp: &TcpRepr<'_>,
 ) {
-    if client.max_frame_len() == 0 {
+    if client.rx_mtu() == 0 {
         return;
     }
     let seg_seq = Seq(tcp.seq_number.0 as u32);
@@ -761,7 +765,7 @@ impl TcpFlow {
 
     fn reset<C: Client + ?Sized>(&self, cfg: &GatewayConfig, client: &mut C, key: FlowKey) {
         let _ = self.socket.get().set_linger(Some(Duration::ZERO));
-        if client.max_frame_len() == 0 {
+        if client.rx_mtu() == 0 {
             return;
         }
         let seq = if self.phase == Phase::Connecting {
@@ -814,7 +818,7 @@ impl TcpFlow {
             } else if self.snd_wnd == 0 && self.phase == Phase::Established {
                 // Zero-window probe: an old sequence number elicits an ACK
                 // carrying the guest's current window.
-                if client.max_frame_len() != 0 {
+                if client.rx_mtu() != 0 {
                     let repr = segment(
                         key,
                         TcpControl::None,
@@ -830,13 +834,13 @@ impl TcpFlow {
         }
 
         if self.send_synack {
-            if client.max_frame_len() == 0 {
+            if client.rx_mtu() == 0 {
                 return Verdict::Keep;
             }
             let window = self.advertised_window().min(u16::MAX.into()) as u16;
             let mss = match key.guest {
-                SocketAddr::V4(_) => 1460,
-                SocketAddr::V6(_) => 1440,
+                SocketAddr::V4(_) => cfg.mtu.saturating_sub(40),
+                SocketAddr::V6(_) => cfg.mtu.saturating_sub(60),
             };
             let mut repr = segment(key, TcpControl::Syn, self.isn, Some(self.rcv_nxt), window);
             repr.max_seg_size = Some(mss);
@@ -915,8 +919,7 @@ impl TcpFlow {
         {
             return Verdict::Reset;
         }
-        if (self.ack_due || self.request_retransmit && !self.write_blocked)
-            && client.max_frame_len() != 0
+        if (self.ack_due || self.request_retransmit && !self.write_blocked) && client.rx_mtu() != 0
         {
             let repr = segment(
                 key,
@@ -932,7 +935,7 @@ impl TcpFlow {
                 // trigger the guest's fast retransmit rather than waiting for
                 // its retransmission timeout.
                 let mut sent = 0;
-                while sent < DUP_ACK_THRESHOLD && client.max_frame_len() != 0 {
+                while sent < DUP_ACK_THRESHOLD && client.rx_mtu() != 0 {
                     emit(cfg, client, key, &repr, &[], None);
                     sent += 1;
                 }
@@ -966,7 +969,7 @@ impl TcpFlow {
         let gso = client.rx_gso_supported(key.guest.is_ipv6());
         while !self.fin_sent {
             if self.data_end == Some(self.snd_nxt) {
-                if client.max_frame_len() == 0 {
+                if client.rx_mtu() == 0 {
                     break;
                 }
                 let repr = segment(
@@ -990,7 +993,7 @@ impl TcpFlow {
                 }
                 break;
             }
-            if client.max_frame_len() <= l3 {
+            if client.rx_mtu() <= l3 {
                 break;
             }
             let sent = match &mut self.host_rx {
@@ -1096,7 +1099,7 @@ fn emit_data<C: Client + ?Sized>(
     let total: usize = payload.iter().map(|p| p.len()).sum();
     let mut offset = 0;
     while offset < total {
-        let max = client.max_frame_len();
+        let max = client.rx_mtu();
         if max <= l3 {
             break;
         }

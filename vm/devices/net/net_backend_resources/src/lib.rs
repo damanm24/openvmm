@@ -160,7 +160,8 @@ pub mod minestrone {
     /// Handle to a Minestrone network endpoint.
     #[derive(Debug, MeshPayload)]
     pub struct MinestroneHandle {
-        /// The CIDR of the guest network, e.g. `10.0.0.0/24`.
+        /// A private IPv4 network for the guest, e.g. `10.0.0.0/24`. If
+        /// `None`, the guest mirrors the host's IPv4 address and gateway.
         pub cidr: Option<String>,
     }
 

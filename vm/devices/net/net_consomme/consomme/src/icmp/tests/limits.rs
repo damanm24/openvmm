@@ -16,15 +16,17 @@ struct TestClient {
     driver: DefaultDriver,
 }
 
-impl Client for TestClient {
-    fn driver(&self) -> &dyn Driver {
-        &self.driver
-    }
-
+impl crate::FrameSink for TestClient {
     fn recv(&mut self, _data: &[u8], _checksum: &ChecksumState) {}
 
     fn rx_mtu(&mut self) -> usize {
         MIN_MTU
+    }
+}
+
+impl Client for TestClient {
+    fn driver(&self) -> &dyn Driver {
+        &self.driver
     }
 }
 

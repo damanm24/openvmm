@@ -1,19 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Neighbor Discovery (RFC 4861) for SLAAC (RFC 4862).
+//! Neighbor Discovery (RFC 4861).
 //!
-//! Router Solicitations are answered with a Router Advertisement carrying a
-//! SLAAC prefix and RDNSS (RFC 8106). Neighbor Solicitations for on-link
-//! addresses other than the guest's are answered with the gateway's MAC. The
-//! guest's addresses are learned from its Duplicate Address Detection probes.
+//! As in passt, Router Solicitations are answered, when the guest has an
+//! assigned IPv6 address, with a Router Advertisement that directs the guest
+//! to DHCPv6 for that address and advertises its /64 prefix as on-link and
+//! for SLAAC (RFC 4862), with RDNSS (RFC 8106). Neighbor Solicitations for
+//! any address other than the guest's are answered with the gateway's MAC.
+//! The guest's addresses are learned from its Duplicate Address Detection
+//! probes.
 
 use super::ChecksumState;
 use super::FrameSink;
 use super::GatewayConfig;
 use super::MIN_MTU;
 use super::ServiceError;
-use super::is_same_ipv6_subnet;
 use smoltcp::phy::Medium;
 use smoltcp::wire::EthernetAddress;
 use smoltcp::wire::EthernetFrame;
@@ -32,8 +34,11 @@ use smoltcp::wire::NdiscRepr;
 use smoltcp::wire::NdiscRouterFlags;
 use smoltcp::wire::RawHardwareAddress;
 
-// Locally assigned ULA with the pseudorandom RFC 4193 Global ID 64:a0:50:ce:a6.
-const NETWORK_PREFIX_BASE: Ipv6Address = Ipv6Address::new(0xfd64, 0xa050, 0xcea6, 0, 0, 0, 0, 0);
+/// Length of the advertised prefix of the assigned address.
+const PREFIX_LEN: u8 = 64;
+/// Infinite prefix lifetime (RFC 4861 section 4.6.2).
+const INFINITE_LIFETIME: smoltcp::time::Duration =
+    smoltcp::time::Duration::from_secs(u32::MAX as u64);
 const LINK_LOCAL_ALL_NODES: Ipv6Address =
     Ipv6Address::from_octets([0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 const NDP_OPTION_RDNSS: u8 = 25;
@@ -82,6 +87,10 @@ fn router_solicit(
     if lladdr.is_some_and(|l| !lladdr_is_client(cfg, l)) {
         return Ok(());
     }
+    // Without an address to assign, the guest has no IPv6 router.
+    let Some(assigned) = cfg.assigned_ipv6 else {
+        return Ok(());
+    };
     // RFC 4861 section 6.2.6: unicast when the solicitation carries a source
     // link-layer address, otherwise multicast to all nodes.
     let (dst, eth_dst) = if lladdr.is_some() && !ipv6_src.is_unspecified() {
@@ -94,23 +103,22 @@ fn router_solicit(
         )
     };
 
-    // ADDRCONF without ON_LINK: global addresses are off-link, so the guest
-    // routes everything through the gateway.
-    let prefix_info = cfg.advertise_routable_ipv6.then(|| NdiscPrefixInformation {
-        prefix_len: cfg.prefix_len_ipv6,
-        prefix: mask_prefix(NETWORK_PREFIX_BASE, cfg.prefix_len_ipv6),
-        valid_lifetime: smoltcp::time::Duration::from_secs(2_592_000),
-        preferred_lifetime: smoltcp::time::Duration::from_secs(604_800),
-        flags: NdiscPrefixInfoFlags::ADDRCONF,
+    let prefix_info = Some(NdiscPrefixInformation {
+        prefix_len: PREFIX_LEN,
+        prefix: mask_prefix(assigned, PREFIX_LEN),
+        valid_lifetime: INFINITE_LIFETIME,
+        preferred_lifetime: INFINITE_LIFETIME,
+        flags: NdiscPrefixInfoFlags::ON_LINK | NdiscPrefixInfoFlags::ADDRCONF,
     });
     let ndp = NdiscRepr::RouterAdvert {
         hop_limit: 255,
-        flags: NdiscRouterFlags::empty(),
+        // The assigned address itself comes from DHCPv6.
+        flags: NdiscRouterFlags::MANAGED,
         router_lifetime: smoltcp::time::Duration::from_secs(9000),
         reachable_time: smoltcp::time::Duration::from_millis(30_000),
         retrans_time: smoltcp::time::Duration::from_millis(1000),
-        lladdr: Some(RawHardwareAddress::from(cfg.gateway_mac_ipv6)),
-        mtu: None,
+        lladdr: Some(RawHardwareAddress::from(cfg.gateway_mac)),
+        mtu: Some(u32::from(cfg.mtu)),
         prefix_info,
     };
     let dns: Vec<Ipv6Address> = cfg
@@ -132,7 +140,7 @@ fn router_solicit(
         hop_limit: 255,
     };
     let eth = EthernetRepr {
-        src_addr: cfg.gateway_mac_ipv6,
+        src_addr: cfg.gateway_mac,
         dst_addr: eth_dst,
         ethertype: EthernetProtocol::Ipv6,
     };
@@ -156,7 +164,7 @@ fn router_solicit(
     Icmpv6Packet::new_unchecked(icmp_buf).fill_checksum(&ipv6.src_addr, &ipv6.dst_addr);
 
     let len = eth.buffer_len() + ipv6.buffer_len() + icmp_len;
-    sink.send_frame(&buffer[..len], &ChecksumState::NONE);
+    sink.recv(&buffer[..len], &ChecksumState::NONE);
     Ok(())
 }
 
@@ -182,18 +190,16 @@ fn neighbor_solicit(
         }
         return Ok(());
     }
-    if !lladdr.is_some_and(|l| lladdr_is_client(cfg, l)) {
+    if lladdr.is_some_and(|l| !lladdr_is_client(cfg, l)) {
         return Ok(());
     }
-    if !is_same_ipv6_subnet(cfg.gateway_link_local_ipv6, target, cfg.prefix_len_ipv6) {
-        return Ok(());
-    }
-    // Don't claim the guest's own addresses. Until the guest's address is
-    // known, answer only for the gateway to avoid disturbing its configuration.
-    let target_is_client =
-        cfg.client_ip_ipv6 == Some(target) || cfg.client_ip_ipv6_routable == Some(target);
-    let client_known = cfg.client_ip_ipv6.is_some() || cfg.client_ip_ipv6_routable.is_some();
-    if target_is_client || (!client_known && cfg.gateway_link_local_ipv6 != target) {
+    // Every other node appears to be on the link, behind the gateway's MAC.
+    // Don't claim the guest's own addresses.
+    let target_is_client = target == ipv6_src
+        || cfg.client_ip_ipv6 == Some(target)
+        || cfg.client_ip_ipv6_routable == Some(target)
+        || cfg.assigned_ipv6 == Some(target);
+    if target_is_client || target.is_multicast() || target.is_unspecified() {
         return Ok(());
     }
 
@@ -202,7 +208,7 @@ fn neighbor_solicit(
             | NdiscNeighborFlags::SOLICITED
             | NdiscNeighborFlags::ROUTER,
         target_addr: target,
-        lladdr: Some(RawHardwareAddress::from(cfg.gateway_mac_ipv6)),
+        lladdr: Some(RawHardwareAddress::from(cfg.gateway_mac)),
     };
     let ipv6 = Ipv6Repr {
         src_addr: target,
@@ -212,7 +218,7 @@ fn neighbor_solicit(
         hop_limit: 255,
     };
     let eth = EthernetRepr {
-        src_addr: cfg.gateway_mac_ipv6,
+        src_addr: cfg.gateway_mac,
         dst_addr: frame.src_addr,
         ethertype: EthernetProtocol::Ipv6,
     };
@@ -225,7 +231,7 @@ fn neighbor_solicit(
     ndp.emit(&mut icmp);
     icmp.fill_checksum(&ipv6.src_addr, &ipv6.dst_addr);
     let len = eth.buffer_len() + ipv6.buffer_len() + ndp.buffer_len();
-    sink.send_frame(&buffer[..len], &ChecksumState::NONE);
+    sink.recv(&buffer[..len], &ChecksumState::NONE);
     Ok(())
 }
 

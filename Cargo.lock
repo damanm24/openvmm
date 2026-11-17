@@ -926,11 +926,11 @@ dependencies = [
  "inspect_counters",
  "libc",
  "mesh_channel_core",
+ "net_usermode",
  "open_enum",
  "pal",
  "pal_async",
  "parking_lot",
- "resolv-conf",
  "slab",
  "smoltcp",
  "socket2",
@@ -4738,6 +4738,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "memory_range"
 version = "0.0.0"
 dependencies = [
@@ -4971,8 +4980,9 @@ version = "0.0.0"
 dependencies = [
  "heapless",
  "libc",
+ "net_usermode",
+ "nix 0.30.1",
  "pal_async",
- "resolv-conf",
  "smoltcp",
  "socket2",
  "test_with_tracing",
@@ -5198,17 +5208,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "consomme",
- "guestmem",
  "inspect",
- "inspect_counters",
  "mesh",
  "net_backend",
  "net_backend_resources",
+ "net_usermode",
  "pal_async",
  "parking_lot",
- "smoltcp",
  "socket2",
- "test_with_tracing",
  "thiserror 2.0.16",
  "tracing",
  "vm_resource",
@@ -5269,13 +5276,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "inspect",
- "inspect_counters",
  "minestrone",
  "net_backend",
  "net_backend_resources",
+ "net_usermode",
  "pal_async",
  "parking_lot",
- "smoltcp",
  "thiserror 2.0.16",
  "tracelimit",
  "tracing",
@@ -5321,6 +5327,23 @@ dependencies = [
  "tracing",
  "vm_resource",
  "zerocopy",
+]
+
+[[package]]
+name = "net_usermode"
+version = "0.0.0"
+dependencies = [
+ "guestmem",
+ "inspect",
+ "inspect_counters",
+ "net_backend",
+ "pal_async",
+ "resolv-conf",
+ "smoltcp",
+ "test_with_tracing",
+ "thiserror 2.0.16",
+ "tracelimit",
+ "windows-sys 0.61.0",
 ]
 
 [[package]]
@@ -5403,6 +5426,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

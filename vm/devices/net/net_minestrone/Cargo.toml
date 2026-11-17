@@ -10,18 +10,17 @@ rust-version.workspace = true
 minestrone.workspace = true
 net_backend.workspace = true
 net_backend_resources.workspace = true
+net_usermode = { workspace = true, features = ["endpoint"] }
 
 vm_resource.workspace = true
 
 inspect.workspace = true
-inspect_counters.workspace = true
 pal_async.workspace = true
 tracelimit.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
 parking_lot.workspace = true
-smoltcp.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

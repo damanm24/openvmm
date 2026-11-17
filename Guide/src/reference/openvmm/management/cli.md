@@ -1,6 +1,27 @@
 # CLI
 
 ```admonish note title="CLI compatibility and reference"
+
+`--net minestrone` selects the experimental passt-style socket translator.
+On Linux, it gives the guest the IPv4/IPv6 addresses and default gateways of
+the host's default-route interfaces; without a default route it uses the first
+interface with another usable route. Without a usable address, it falls back
+to IPv4 `169.254.2.1/16` via `169.254.2.2`, and IPv6 link-local only.
+`--net minestrone:<CIDR>` overrides IPv4 with a private network (the first two
+usable addresses are the gateway and guest). Other hosts currently use the
+link-local fallback.
+
+The backend supports an IP MTU up to 65520. The frontend and backend negotiate
+the actual MTU, which DHCP and IPv6 router advertisements announce to the guest.
+Virtio-net can use 65520; VMBus retains its own smaller frame-size limit.
+DHCPv4 leases have an infinite lifetime.
+
+```admonish warning
+Minestrone maps the guest's gateway address to host loopback, making host-local
+TCP/UDP services accessible to the guest. DNS traffic to that address instead
+goes to the host's configured resolver when needed. The guest shadows the host's
+own IP address, so use the gateway address to reach services on host loopback.
+```admonish note title="CLI compatibility and reference"
 The CLI is not a stable compatibility interface and may change between
 releases. This page summarizes OpenVMM's command-line options. The generated
 `openvmm --help` output is authoritative for the binary being run, and the

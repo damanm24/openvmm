@@ -625,6 +625,8 @@ options:
     ///
     /// `minestrone[:<cidr>]` is an experimental passt-style alternative to
     /// consomme that translates guest TCP onto host sockets without buffering.
+    /// As in passt, the guest is given the host's IPv4 and IPv6 addresses and
+    /// default gateways; `<cidr>` instead places IPv4 on a private network.
     #[clap(long)]
     pub net: Vec<NicConfigCli>,
 

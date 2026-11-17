@@ -355,6 +355,10 @@ impl Endpoint for PacketCaptureEndpoint {
     fn link_speed(&self) -> u64 {
         self.current().link_speed()
     }
+
+    fn max_mtu(&self) -> u16 {
+        self.current().max_mtu()
+    }
 }
 
 struct Pcap {

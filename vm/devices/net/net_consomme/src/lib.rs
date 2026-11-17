@@ -7,47 +7,35 @@
 mod egress;
 pub mod resolver;
 
-#[cfg(test)]
-mod tests;
-
 use anyhow::Context as _;
 use async_trait::async_trait;
 use consomme::ChecksumState;
 use consomme::Consomme;
 use consomme::ConsommeParams;
+use consomme::FrameSink;
 pub use consomme::IpVersion;
 pub use consomme::StaticDnsRecord;
 pub use consomme::StaticDnsRecordError;
-use inspect::Inspect;
 use inspect::InspectMut;
-use inspect_counters::Counter;
 use mesh::rpc::Rpc;
 use mesh::rpc::RpcError;
 use mesh::rpc::RpcSend;
 use net_backend::BufferAccess;
-use net_backend::L4Protocol;
 use net_backend::QueueConfig;
 use net_backend::RssConfig;
-use net_backend::RxChecksumState;
-use net_backend::RxGsoProtocol;
 use net_backend::RxId;
-use net_backend::RxMetadata;
-use net_backend::RxOffload;
 use net_backend::RxOffloadSupport;
 use net_backend::TxError;
 use net_backend::TxId;
 use net_backend::TxOffloadSupport;
-use net_backend::TxSegment;
 use net_backend_resources::consomme::ConsommeRequest;
 use net_backend_resources::consomme::HostPortConfig;
 use net_backend_resources::consomme::HostPortProtocol;
+use net_usermode::endpoint::QueueClient;
+use net_usermode::endpoint::QueueState;
+use net_usermode::endpoint::QueueStats;
 use pal_async::driver::Driver;
 use parking_lot::Mutex;
-use smoltcp::wire::ETHERNET_HEADER_LEN;
-use smoltcp::wire::IPV4_HEADER_LEN;
-use smoltcp::wire::IPV6_HEADER_LEN;
-use smoltcp::wire::TcpPacket;
-use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -379,14 +367,9 @@ impl net_backend::Endpoint for ConsommeEndpoint {
         let mut queue = Box::new(ConsommeQueue {
             slot: self.endpoint_state.clone(),
             endpoint_state: self.endpoint_state.lock().take(),
-            state: QueueState {
-                rx_avail: VecDeque::new(),
-                rx_ready: VecDeque::new(),
-                tx_avail: VecDeque::new(),
-                tx_ready: VecDeque::new(),
-                tx_scratch: Vec::new(),
-            },
+            state: QueueState::default(),
             stats: Default::default(),
+            tx_scratch: Vec::new(),
             driver: config.driver,
             enabled_rx_offloads: config.enabled_rx_offloads,
         });
@@ -452,7 +435,10 @@ pub struct ConsommeQueue {
     slot: Arc<Mutex<Option<EndpointState>>>,
     endpoint_state: Option<EndpointState>,
     state: QueueState,
-    stats: Stats,
+    stats: QueueStats,
+    /// Reusable scratch buffer for assembling outbound packets from guest memory.
+    /// The max TSO size is 64KB which limits the maximum size of the scratch buffer.
+    tx_scratch: Vec<u8>,
     driver: Box<dyn Driver>,
     enabled_rx_offloads: RxOffloadSupport,
 }
@@ -461,10 +447,7 @@ impl InspectMut for ConsommeQueue {
     fn inspect_mut(&mut self, req: inspect::Request<'_>) {
         req.respond()
             .merge(&mut self.endpoint_state.as_mut().unwrap().consomme)
-            .field("rx_avail", self.state.rx_avail.len())
-            .field("rx_ready", self.state.rx_ready.len())
-            .field("tx_avail", self.state.tx_avail.len())
-            .field("tx_ready", self.state.tx_ready.len())
+            .merge(&self.state)
             .field("stats", &self.stats);
     }
 }
@@ -492,19 +475,19 @@ impl ConsommeQueue {
 
     fn with_consomme<F, R>(&mut self, pool: &mut dyn BufferAccess, f: F) -> R
     where
-        F: FnOnce(&mut consomme::Access<'_, Client<'_>>) -> R,
+        F: FnOnce(&mut consomme::Access<'_, QueueClient<'_>>) -> R,
     {
         f(&mut self
             .endpoint_state
             .as_mut()
             .unwrap()
             .consomme
-            .access(&mut Client {
+            .access(&mut QueueClient {
                 state: &mut self.state,
                 stats: &mut self.stats,
                 driver: &self.driver,
                 pool,
-                enabled_rx_offloads: self.enabled_rx_offloads,
+                offloads: self.enabled_rx_offloads,
             }))
     }
 
@@ -522,12 +505,12 @@ impl ConsommeQueue {
                     break;
                 }
                 Poll::Ready(Ok(message)) => process_message(
-                    &mut state.consomme.access(&mut Client {
+                    &mut state.consomme.access(&mut QueueClient {
                         state: &mut self.state,
                         stats: &mut self.stats,
                         driver: &self.driver,
                         pool,
-                        enabled_rx_offloads: self.enabled_rx_offloads,
+                        offloads: self.enabled_rx_offloads,
                     }),
                     message,
                 ),
@@ -547,12 +530,12 @@ impl ConsommeQueue {
                     return;
                 }
                 Poll::Ready(Ok(request)) => process_port_request(
-                    &mut state.consomme.access(&mut Client {
+                    &mut state.consomme.access(&mut QueueClient {
                         state: &mut self.state,
                         stats: &mut self.stats,
                         driver: &self.driver,
                         pool,
-                        enabled_rx_offloads: self.enabled_rx_offloads,
+                        offloads: self.enabled_rx_offloads,
                     }),
                     request,
                 ),
@@ -733,7 +716,7 @@ impl net_backend::Queue for ConsommeQueue {
 
         self.with_consomme(pool, |c| c.poll(cx));
 
-        if !self.state.tx_ready.is_empty() || !self.state.rx_ready.is_empty() {
+        if self.state.has_completions() {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -741,7 +724,7 @@ impl net_backend::Queue for ConsommeQueue {
     }
 
     fn rx_avail(&mut self, _pool: &mut dyn BufferAccess, done: &[RxId]) {
-        self.state.rx_avail.extend(done);
+        self.state.rx_avail(done);
     }
 
     fn rx_poll(
@@ -749,19 +732,15 @@ impl net_backend::Queue for ConsommeQueue {
         _pool: &mut dyn BufferAccess,
         packets: &mut [RxId],
     ) -> anyhow::Result<usize> {
-        let n = packets.len().min(self.state.rx_ready.len());
-        for (x, y) in packets.iter_mut().zip(self.state.rx_ready.drain(..n)) {
-            *x = y;
-        }
-        Ok(n)
+        Ok(self.state.rx_poll(packets))
     }
 
     fn tx_avail(
         &mut self,
         _pool: &mut dyn BufferAccess,
-        segments: &[TxSegment],
+        segments: &[net_backend::TxSegment],
     ) -> anyhow::Result<(bool, usize)> {
-        self.state.tx_avail.extend(segments.iter().cloned());
+        self.state.tx_avail(segments);
         Ok((false, segments.len()))
     }
 
@@ -770,38 +749,8 @@ impl net_backend::Queue for ConsommeQueue {
         _pool: &mut dyn BufferAccess,
         done: &mut [TxId],
     ) -> Result<usize, TxError> {
-        let n = done.len().min(self.state.tx_ready.len());
-        for (x, y) in done.iter_mut().zip(self.state.tx_ready.drain(..n)) {
-            *x = y;
-        }
-        Ok(n)
+        Ok(self.state.tx_poll(done))
     }
-}
-
-struct QueueState {
-    rx_avail: VecDeque<RxId>,
-    rx_ready: VecDeque<RxId>,
-    tx_avail: VecDeque<TxSegment>,
-    tx_ready: VecDeque<TxId>,
-    /// Reusable scratch buffer for assembling outbound packets from guest memory.
-    /// The max TSO size is 64KB which limits the maximum size of the scratch buffer.
-    tx_scratch: Vec<u8>,
-}
-
-#[derive(Inspect, Default)]
-struct Stats {
-    rx_dropped: Counter,
-    tx_dropped: Counter,
-    tx_errors: Counter,
-    tx_unknown: Counter,
-}
-
-struct Client<'a> {
-    state: &'a mut QueueState,
-    stats: &'a mut Stats,
-    driver: &'a dyn Driver,
-    pool: &'a mut dyn BufferAccess,
-    enabled_rx_offloads: RxOffloadSupport,
 }
 
 /// Minimal client for consomme operations that don't need BufferAccess
@@ -810,11 +759,7 @@ struct ClientNoPool<'a> {
     driver: &'a dyn Driver,
 }
 
-impl consomme::Client for ClientNoPool<'_> {
-    fn driver(&self) -> &dyn Driver {
-        self.driver
-    }
-
+impl FrameSink for ClientNoPool<'_> {
     fn recv(&mut self, _data: &[u8], _checksum: &ChecksumState) {}
 
     fn rx_mtu(&mut self) -> usize {
@@ -822,109 +767,8 @@ impl consomme::Client for ClientNoPool<'_> {
     }
 }
 
-impl consomme::Client for Client<'_> {
+impl consomme::Client for ClientNoPool<'_> {
     fn driver(&self) -> &dyn Driver {
         self.driver
-    }
-
-    fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
-        self.recv_segments(&[data], checksum);
-    }
-
-    fn recv_segments(&mut self, segments: &[&[u8]], checksum: &ChecksumState) {
-        let Some(rx_id) = self.state.rx_avail.pop_front() else {
-            // This should be rare, only affecting unbuffered protocols. TCP and
-            // UDP are buffered and they won't indicate packets unless rx_mtu()
-            // returns a non-zero value.
-            self.stats.rx_dropped.increment();
-            return;
-        };
-        let max = self.pool.capacity(rx_id) as usize;
-        let len: usize = segments.iter().map(|s| s.len()).sum();
-        if len <= max {
-            let offload = if let Some(mss) = checksum.tso {
-                // Consomme-generated TCP frames have fixed Ethernet/IP headers,
-                // and the first segment contains the entire TCP header.
-                let (protocol, start) = if checksum.ipv4 {
-                    (RxGsoProtocol::TcpV4, ETHERNET_HEADER_LEN + IPV4_HEADER_LEN)
-                } else {
-                    (RxGsoProtocol::TcpV6, ETHERNET_HEADER_LEN + IPV6_HEADER_LEN)
-                };
-                assert!(checksum.tcp && self.rx_gso_supported(!checksum.ipv4));
-                let tcp_header_len =
-                    u16::from(TcpPacket::new_unchecked(&segments[0][start..]).header_len());
-                RxOffload::tcp_gso(
-                    protocol,
-                    start as u16 + tcp_header_len,
-                    mss,
-                    Some(start as u16),
-                )
-            } else if checksum.partial {
-                assert!(self.rx_checksum_supported() && (checksum.tcp != checksum.udp));
-                let start = ETHERNET_HEADER_LEN
-                    + if checksum.ipv4 {
-                        IPV4_HEADER_LEN
-                    } else {
-                        IPV6_HEADER_LEN
-                    };
-                RxOffload::checksum(start as u16, if checksum.tcp { 16 } else { 6 })
-            } else {
-                RxOffload::default()
-            };
-            self.pool.write_packet_segments(
-                rx_id,
-                &RxMetadata {
-                    offset: 0,
-                    len,
-                    ip_checksum: if checksum.ipv4 {
-                        RxChecksumState::Good
-                    } else {
-                        RxChecksumState::Unknown
-                    },
-                    l4_checksum: if checksum.partial {
-                        RxChecksumState::Unknown
-                    } else if checksum.tcp || checksum.udp {
-                        RxChecksumState::Good
-                    } else {
-                        RxChecksumState::Unknown
-                    },
-                    l4_protocol: if checksum.tcp {
-                        L4Protocol::Tcp
-                    } else if checksum.udp {
-                        L4Protocol::Udp
-                    } else {
-                        L4Protocol::Unknown
-                    },
-                    offload,
-                    vlan: None,
-                },
-                segments,
-            );
-            self.state.rx_ready.push_back(rx_id);
-        } else {
-            tracing::warn!(len, max, "dropping rx packet: too large");
-            self.state.rx_avail.push_front(rx_id);
-        }
-    }
-
-    fn rx_mtu(&mut self) -> usize {
-        if let Some(&rx_id) = self.state.rx_avail.front() {
-            self.pool.capacity(rx_id) as usize
-        } else {
-            0
-        }
-    }
-
-    fn rx_checksum_supported(&self) -> bool {
-        self.enabled_rx_offloads.checksum
-    }
-
-    fn rx_gso_supported(&self, ipv6: bool) -> bool {
-        self.rx_checksum_supported()
-            && if ipv6 {
-                self.enabled_rx_offloads.tcpv6_gso
-            } else {
-                self.enabled_rx_offloads.tcpv4_gso
-            }
     }
 }

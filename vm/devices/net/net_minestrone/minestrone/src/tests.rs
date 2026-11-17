@@ -42,13 +42,13 @@ struct TestClient {
 }
 
 impl FrameSink for TestClient {
-    fn send_frame_segments(&mut self, segments: &[&[u8]], checksum: &ChecksumState) {
+    fn recv(&mut self, data: &[u8], checksum: &ChecksumState) {
         // Without client checksum support, every frame must be complete.
         assert!(!checksum.partial && checksum.tso.is_none());
-        self.frames.push(segments.concat());
+        self.frames.push(data.to_vec());
     }
 
-    fn max_frame_len(&mut self) -> usize {
+    fn rx_mtu(&mut self) -> usize {
         1514
     }
 }
@@ -61,6 +61,7 @@ impl Client for TestClient {
 
 /// A TCP segment received by the guest.
 struct Segment {
+    mss: Option<u16>,
     control: TcpControl,
     seq: u32,
     ack: Option<u32>,
@@ -81,6 +82,7 @@ fn parse(frame: &[u8]) -> Segment {
     assert!(tcp.verify_checksum(&src, &dst), "bad tcp checksum");
     let repr = TcpRepr::parse(&tcp, &src, &dst, &ChecksumCapabilities::default()).unwrap();
     Segment {
+        mss: repr.max_seg_size,
         control: repr.control,
         seq: repr.seq_number.0 as u32,
         ack: repr.ack_number.map(|a| a.0 as u32),
@@ -150,7 +152,7 @@ fn remote_of(listener: &TcpListener) -> SocketAddrV4 {
 
 impl Harness {
     fn new(driver: DefaultDriver) -> Self {
-        let mut params = MinestroneParams::new();
+        let mut params = MinestroneParams::local();
         params.allow_host_local_access = true;
         Self {
             minestrone: Minestrone::new(params),
@@ -221,6 +223,7 @@ async fn tcp_round_trip_respects_guest_window(driver: DefaultDriver) {
     // Handshake: the SYN-ACK only arrives once the host connect completes.
     const GUEST_ISN: u32 = 1000;
     const GUEST_WINDOW: u16 = 4096;
+    h.minestrone.set_mtu(9000);
     h.send(&guest_frame(
         remote,
         TcpControl::Syn,
@@ -231,6 +234,7 @@ async fn tcp_round_trip_respects_guest_window(driver: DefaultDriver) {
     ));
     let syn_ack = h.recv().await.remove(0);
     assert_eq!(syn_ack.control, TcpControl::Syn);
+    assert_eq!(syn_ack.mss, Some(8960));
     assert_eq!(syn_ack.ack, Some(GUEST_ISN + 1));
     let (mut server, _) = listener.accept().unwrap();
     server
@@ -471,4 +475,106 @@ async fn tcp_partial_write_requests_fast_retransmit(driver: DefaultDriver) {
         assert_eq!(a.window, acks[0].window);
         assert!(a.payload.is_empty());
     }
+}
+
+#[async_test]
+async fn gateway_dns_and_guest_address_aliases(driver: DefaultDriver) {
+    let mut params = MinestroneParams::local();
+    params.gateway.gateway_ip = Ipv4Addr::new(192, 0, 2, 1);
+    params.gateway.client_ip = Ipv4Addr::new(192, 0, 2, 2);
+    params.gateway.assigned_ipv6 = Some("2001:db8::2".parse().unwrap());
+    let v4_gateway: std::net::IpAddr = params.gateway.gateway_ip.into();
+    let stub: std::net::IpAddr = Ipv4Addr::new(127, 0, 0, 53).into();
+    let v6_gateway: std::net::IpAddr = params.host_ipv6_gateway.unwrap().into();
+    params.configure_dns(vec![stub.into(), v6_gateway.into()]);
+    assert_eq!(
+        params.gateway.nameservers,
+        vec![v4_gateway.into(), v6_gateway.into()]
+    );
+    assert!(params.map_guest_addr4.is_none() && params.map_guest_addr6.is_none());
+    let link_local_dns: std::net::IpAddr = "fe80::53".parse().unwrap();
+    params.gateway.nameservers.push(link_local_dns.into());
+    params.host_ipv6_interface_index = 7;
+    let alias4: Ipv4Addr = "192.0.2.254".parse().unwrap();
+    let alias6: std::net::Ipv6Addr = "2001:db8::ff".parse().unwrap();
+    params.map_guest_addr4 = Some(alias4);
+    params.map_guest_addr6 = Some(alias6);
+    let mut m = Minestrone::new(params.clone());
+    let mut client = TestClient {
+        driver,
+        frames: Vec::new(),
+    };
+    let access = m.access(&mut client);
+    assert_eq!(
+        access.host_socket_address(link_local_dns, 53).unwrap(),
+        std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+            "fe80::53".parse().unwrap(),
+            53,
+            0,
+            7
+        ))
+    );
+    assert!(access.host_socket_address(link_local_dns, 80).is_err());
+    assert_eq!(
+        access.host_destination(v4_gateway).unwrap(),
+        Ipv4Addr::LOCALHOST
+    );
+    assert_eq!(access.host_destination_port(v4_gateway, 53).unwrap(), stub);
+    assert_eq!(
+        access.host_destination(v6_gateway).unwrap(),
+        std::net::IpAddr::V6("::1".parse().unwrap())
+    );
+    assert_eq!(
+        access.host_destination_port(v6_gateway, 53).unwrap(),
+        v6_gateway
+    );
+    assert_eq!(
+        access.host_destination(alias4.into()).unwrap(),
+        params.gateway.client_ip
+    );
+    assert_eq!(
+        access.host_destination(alias6.into()).unwrap(),
+        params.gateway.assigned_ipv6.unwrap()
+    );
+    assert_eq!(
+        crate::guest_visible(&params, std::net::SocketAddr::new(stub, 53)),
+        std::net::SocketAddr::new(v4_gateway, 53)
+    );
+    assert_eq!(
+        crate::guest_visible(&params, (params.gateway.client_ip, 8080).into()),
+        std::net::SocketAddr::new(alias4.into(), 8080)
+    );
+}
+
+/// A virtual gateway address is not a real destination, but a gateway
+/// mirrored from the host is reached like any other address.
+#[async_test]
+async fn mirrored_gateway_is_an_ordinary_destination(driver: DefaultDriver) {
+    let gateway = std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+    let mut params = MinestroneParams::local();
+    params.allow_host_local_access = false;
+    params.gateway.gateway_ip = Ipv4Addr::new(192, 0, 2, 1);
+    params.host_ipv4_gateway = true;
+    let mut client = TestClient {
+        driver,
+        frames: Vec::new(),
+    };
+    let destination = |params: &MinestroneParams, client: &mut TestClient| {
+        Minestrone::new(params.clone())
+            .access(client)
+            .host_destination(gateway)
+            .ok()
+    };
+    assert_eq!(destination(&params, &mut client), Some(gateway));
+
+    params.allow_host_local_access = true;
+    assert_eq!(
+        destination(&params, &mut client),
+        Some(Ipv4Addr::LOCALHOST.into())
+    );
+
+    params.allow_host_local_access = false;
+    params.set_cidr("192.0.2.0/24").unwrap();
+    assert!(!params.host_ipv4_gateway);
+    assert_eq!(destination(&params, &mut client), None);
 }

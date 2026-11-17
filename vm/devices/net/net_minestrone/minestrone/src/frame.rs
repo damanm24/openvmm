@@ -54,11 +54,7 @@ pub(crate) fn send_l4<C: Client + ?Sized>(
     let (src_ip, dst_ip): (IpAddress, IpAddress) = (src.ip().into(), dst.ip().into());
     let (eth_src, ethertype, base) = match dst {
         SocketAddr::V4(_) => (cfg.gateway_mac, EthernetProtocol::Ipv4, ChecksumState::TCP4),
-        SocketAddr::V6(_) => (
-            cfg.gateway_mac_ipv6,
-            EthernetProtocol::Ipv6,
-            ChecksumState::TCP6,
-        ),
+        SocketAddr::V6(_) => (cfg.gateway_mac, EthernetProtocol::Ipv6, ChecksumState::TCP6),
     };
     let ip = IpRepr::new(src_ip, dst_ip, protocol, l4_len, 64);
 
@@ -111,13 +107,13 @@ pub(crate) fn send_l4<C: Client + ?Sized>(
         ..base
     };
     match payload {
-        [] => client.send_frame_segments(&[&buf[..header_len]], &state),
-        [a] => client.send_frame_segments(&[&buf[..header_len], a], &state),
-        [a, b] => client.send_frame_segments(&[&buf[..header_len], a, b], &state),
+        [] => client.recv_segments(&[&buf[..header_len]], &state),
+        [a] => client.recv_segments(&[&buf[..header_len], a], &state),
+        [a, b] => client.recv_segments(&[&buf[..header_len], a, b], &state),
         _ => {
             let mut segments = vec![&buf[..header_len]];
             segments.extend_from_slice(payload);
-            client.send_frame_segments(&segments, &state)
+            client.recv_segments(&segments, &state)
         }
     }
 }

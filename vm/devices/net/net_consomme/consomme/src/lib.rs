@@ -17,9 +17,6 @@
 mod arp;
 mod dhcp;
 mod dhcpv6;
-#[cfg_attr(unix, path = "dns_unix.rs")]
-#[cfg_attr(windows, path = "dns_windows.rs")]
-mod dns;
 mod dns_resolver;
 mod icmp;
 pub mod limits;
@@ -30,9 +27,6 @@ mod udp;
 
 mod unix;
 mod windows;
-
-/// Standard DNS port number.
-const DNS_PORT: u16 = 53;
 
 /// Default per-connection TCP ring buffer bounds: start small and autotune up
 /// to a few MiB so idle/short connections stay cheap while bulk flows ramp.
@@ -45,9 +39,19 @@ pub use dns_resolver::StaticDnsRecord;
 pub use dns_resolver::StaticDnsRecordError;
 use inspect::Inspect;
 use inspect::InspectMut;
-use pal_async::driver::Driver;
-use smoltcp::phy::Checksum;
-use smoltcp::phy::ChecksumCapabilities;
+pub use net_usermode::ChecksumState;
+pub use net_usermode::Client;
+use net_usermode::DNS_PORT;
+pub use net_usermode::FrameSink;
+pub use net_usermode::MIN_MTU;
+pub use net_usermode::addr::InvalidCidr;
+use net_usermode::addr::Ipv4Network;
+use net_usermode::addr::is_host_local_ipv4;
+use net_usermode::addr::is_host_local_ipv6;
+pub(crate) use net_usermode::addr::is_same_ipv4_subnet;
+pub(crate) use net_usermode::addr::is_same_ipv6_subnet;
+use net_usermode::addr::link_local_from_mac;
+use net_usermode::dns;
 use smoltcp::wire::DhcpMessageType;
 use smoltcp::wire::EthernetAddress;
 use smoltcp::wire::EthernetFrame;
@@ -231,11 +235,6 @@ impl TcpBufferBounds {
     }
 }
 
-/// An error indicating that the CIDR is invalid.
-#[derive(Debug, Error)]
-#[error("invalid CIDR")]
-pub struct InvalidCidr;
-
 impl ConsommeParams {
     /// Create default dynamic network state. The default state is
     ///     IP address: 10.0.0.2 / 24
@@ -244,7 +243,7 @@ impl ConsommeParams {
     ///     gateway IPv6 link-local address: fe80::5055:aff:fe00:102 (EUI-64 derived from
     ///     gateway MAC address 52-55-0A-00-01-02)
     pub fn new() -> Result<Self, Error> {
-        let nameservers = dns::nameservers()?;
+        let nameservers = dns::nameservers(dns::ScopedIpv6::Skip)?;
         let gateway_mac_ipv6 = EthernetAddress([0x52, 0x55, 0x0A, 0x00, 0x01, 0x02]);
 
         Ok(Self {
@@ -257,7 +256,7 @@ impl ConsommeParams {
             prefix_len_ipv6: 64,
             advertise_routable_ipv6: true,
             gateway_mac_ipv6,
-            gateway_link_local_ipv6: Self::compute_link_local_address(gateway_mac_ipv6),
+            gateway_link_local_ipv6: link_local_from_mac(gateway_mac_ipv6),
             client_ip_ipv6: None,
             client_ip_ipv6_routable: None,
             // Per RFC 4787, UDP NAT bindings, by default, should timeout after 5 minutes, but can be configured.
@@ -278,48 +277,11 @@ impl ConsommeParams {
     /// Setting, for example, 192.168.0.0/24 will set the gateway to
     /// 192.168.0.1 and the client IP to 192.168.0.2.
     pub fn set_cidr(&mut self, cidr: &str) -> Result<(), InvalidCidr> {
-        let cidr: smoltcp::wire::Ipv4Cidr = cidr.parse().map_err(|()| InvalidCidr)?;
-        let base_address = cidr.network().address();
-        let mut gateway_octets = base_address.octets();
-        gateway_octets[3] += 1;
-        self.gateway_ip = Ipv4Address::from(gateway_octets);
-        let mut client_octets = base_address.octets();
-        client_octets[3] += 2;
-        self.client_ip = Ipv4Address::from(client_octets);
-        self.net_mask = cidr.netmask();
+        let network = Ipv4Network::parse(cidr)?;
+        self.gateway_ip = network.gateway;
+        self.client_ip = network.client;
+        self.net_mask = network.net_mask;
         Ok(())
-    }
-
-    /// Compute a link-local IPv6 address from a MAC address using EUI-64 format.
-    ///
-    /// RFC 4291 Section 2.5.6: Link-local addresses are formed by combining
-    /// the link-local prefix (fe80::/64) with an interface identifier derived
-    /// from the MAC address using the EUI-64 format.
-    ///
-    /// EUI-64 format (RFC 2464 Section 4):
-    /// - Insert 0xFFFE in the middle of the 48-bit MAC address
-    /// - Invert the universal/local bit (bit 6 of the first byte)
-    pub fn compute_link_local_address(mac: EthernetAddress) -> Ipv6Address {
-        const LINK_LOCAL_PREFIX: [u8; 8] = [0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-
-        let mut addr = [0u8; 16];
-
-        // Set link-local prefix (fe80::/64)
-        addr[0..8].copy_from_slice(&LINK_LOCAL_PREFIX);
-
-        // Create EUI-64 interface identifier from MAC address
-        // MAC: AB:CD:EF:11:22:33
-        // EUI-64: AB:CD:EF:FF:FE:11:22:33 with universal/local bit flipped
-        addr[8] = mac.0[0] ^ 0x02; // Flip the universal/local bit
-        addr[9] = mac.0[1];
-        addr[10] = mac.0[2];
-        addr[11] = 0xFF;
-        addr[12] = 0xFE;
-        addr[13] = mac.0[3];
-        addr[14] = mac.0[4];
-        addr[15] = mac.0[5];
-
-        Ipv6Address::from_octets(addr)
     }
 
     /// Infer the guest's link-local IPv6 address from a learned routable SLAAC address.
@@ -340,7 +302,7 @@ impl ConsommeParams {
             return;
         }
 
-        let link_local = Self::compute_link_local_address(self.client_mac);
+        let link_local = link_local_from_mac(self.client_mac);
         if routable.octets()[8..] != link_local.octets()[8..] {
             return;
         }
@@ -534,156 +496,6 @@ pub struct Access<'a, T> {
     client: &'a mut T,
 }
 
-/// A consomme client.
-pub trait Client {
-    /// Gets the driver to use for handling new connections.
-    ///
-    /// TODO: generalize connection creation to allow pluggable model (not just
-    /// OS sockets) and remove this.
-    fn driver(&self) -> &dyn Driver;
-
-    /// Transmits a packet to the client.
-    ///
-    /// If `checksum.ipv4`, `checksum.tcp`, or `checksum.udp` are set, then the
-    /// packet contains an IPv4 header, TCP header, and/or UDP header with a
-    /// valid checksum, except that `checksum.partial` indicates an uncomplemented
-    /// pseudo-header TCP or UDP checksum for the client to complete.
-    fn recv(&mut self, data: &[u8], checksum: &ChecksumState);
-
-    /// Transmits a packet whose bytes are provided as multiple discontiguous
-    /// segments, delivered in order as a single logical packet.
-    ///
-    /// This lets callers avoid linearizing a frame into a scratch buffer when
-    /// its payload is not contiguous (for example, a header segment followed by
-    /// TCP window bytes that wrap a ring buffer). The `checksum` argument has
-    /// the same meaning as for [`Client::recv`].
-    ///
-    /// The default implementation copies the segments into a contiguous buffer
-    /// and forwards to [`Client::recv`]. Clients that can write discontiguous
-    /// data directly to the guest should override this to eliminate the copy.
-    fn recv_segments(&mut self, segments: &[&[u8]], checksum: &ChecksumState) {
-        if let [segment] = segments {
-            self.recv(segment, checksum);
-            return;
-        }
-        let total = segments.iter().map(|s| s.len()).sum();
-        let mut data = Vec::with_capacity(total);
-        for segment in segments {
-            data.extend_from_slice(segment);
-        }
-        self.recv(&data, checksum);
-    }
-
-    /// Specifies the maximum size for the next call to `recv`.
-    ///
-    /// This is the MTU including the Ethernet frame header. This must be at
-    /// least [`MIN_MTU`]. When [`Client::rx_gso_supported`] is true, larger
-    /// buffers allow TCP data to be coalesced into a single GSO packet.
-    ///
-    /// Return 0 to indicate that there are no buffers available for receiving
-    /// data.
-    fn rx_mtu(&mut self) -> usize;
-
-    /// Whether the client can complete partial TCP and UDP receive checksums
-    /// independently of GSO. Disabled by default.
-    fn rx_checksum_supported(&self) -> bool {
-        false
-    }
-
-    /// Whether the client can receive TCP GSO packets with partial checksums
-    /// for the specified IP version. Disabled by default.
-    fn rx_gso_supported(&self, _ipv6: bool) -> bool {
-        false
-    }
-}
-
-/// Specifies the checksum state for a packet being transmitted.
-#[derive(Debug, Copy, Clone)]
-pub struct ChecksumState {
-    /// On receive, the data has a valid IPv4 header checksum. On send, the
-    /// checksum should be ignored.
-    pub ipv4: bool,
-    /// On receive, the data has a valid TCP checksum, or a pseudo-header
-    /// partial checksum when `partial` is set. On send, the checksum should be ignored.
-    pub tcp: bool,
-    /// On receive, the data has a valid UDP checksum, or a pseudo-header
-    /// partial checksum when `partial` is set. On send, the checksum should be ignored.
-    pub udp: bool,
-    /// On receive, the TCP or UDP checksum contains only the uncomplemented
-    /// pseudo-header sum, including the transport length. The client must
-    /// complete the checksum. Not used on send.
-    pub partial: bool,
-    /// The data consists of multiple TCP segments, each with the provided
-    /// segment size.
-    ///
-    /// The IP header's length field may be invalid and should be ignored.
-    pub tso: Option<u16>,
-    /// The data is a large UDP payload that should be sent with OS-level UDP
-    /// GSO, splitting into UDP datagrams of this segment size.
-    pub gso: Option<u16>,
-}
-
-impl ChecksumState {
-    const NONE: Self = Self {
-        ipv4: false,
-        tcp: false,
-        udp: false,
-        partial: false,
-        tso: None,
-        gso: None,
-    };
-    const IPV4_ONLY: Self = Self {
-        ipv4: true,
-        tcp: false,
-        udp: false,
-        partial: false,
-        tso: None,
-        gso: None,
-    };
-    const TCP4: Self = Self {
-        ipv4: true,
-        tcp: true,
-        udp: false,
-        partial: false,
-        tso: None,
-        gso: None,
-    };
-    const UDP4: Self = Self {
-        ipv4: true,
-        tcp: false,
-        udp: true,
-        partial: false,
-        tso: None,
-        gso: None,
-    };
-    const TCP6: Self = Self {
-        ipv4: false,
-        tcp: true,
-        udp: false,
-        partial: false,
-        tso: None,
-        gso: None,
-    };
-
-    fn caps(&self) -> ChecksumCapabilities {
-        let mut caps = ChecksumCapabilities::default();
-        if self.ipv4 {
-            caps.ipv4 = Checksum::None;
-        }
-        if self.tcp {
-            caps.tcp = Checksum::None;
-        }
-        if self.udp {
-            caps.udp = Checksum::None;
-        }
-        caps
-    }
-}
-
-/// The minimum MTU for receives supported by Consomme (including the Ethernet
-/// frame).
-pub const MIN_MTU: usize = 1514;
-
 /// The reason a packet was dropped without being handled.
 #[derive(Debug, Error)]
 pub enum DropReason {
@@ -803,42 +615,6 @@ impl IpAddresses {
             IpAddresses::V6(addrs) => IpAddress::Ipv6(addrs.dst_addr),
         }
     }
-}
-
-/// Returns `true` if the given IPv4 destination is host-local
-/// (loopback, unspecified, or link-local) and should be blocked
-/// when `allow_host_local_access` is disabled.
-fn is_blocked_host_local_ipv4(addr: Ipv4Address) -> bool {
-    addr.is_loopback() || addr.is_unspecified() || addr.is_link_local()
-}
-
-/// Returns `true` if the given IPv6 destination is host-local
-/// (loopback, unspecified, or link-local) and should be blocked
-/// when `allow_host_local_access` is disabled.
-fn is_blocked_host_local_ipv6(addr: Ipv6Address) -> bool {
-    addr.is_loopback() || addr.is_unspecified() || addr.is_unicast_link_local()
-}
-
-/// Returns `true` if two IPv4 addresses are in the same subnet given a mask.
-pub(crate) fn is_same_ipv4_subnet(
-    addr1: Ipv4Address,
-    addr2: Ipv4Address,
-    subnet_mask: Ipv4Address,
-) -> bool {
-    let subnet_mask = subnet_mask.to_bits();
-    (addr1.to_bits() & subnet_mask) == (addr2.to_bits() & subnet_mask)
-}
-
-/// Returns `true` if two IPv6 addresses share the same prefix of the given length.
-pub(crate) fn is_same_ipv6_subnet(addr1: Ipv6Address, addr2: Ipv6Address, prefix_len: u8) -> bool {
-    if prefix_len == 0 {
-        return true;
-    }
-    if prefix_len >= 128 {
-        return addr1 == addr2;
-    }
-    let mask = u128::MAX << (128 - prefix_len);
-    (addr1.to_bits() & mask) == (addr2.to_bits() & mask)
 }
 
 /// Returns `true` if the given IPv6 address is a globally routable unicast
@@ -1089,7 +865,7 @@ impl<T: Client> Access<'_, T> {
 
         // Reject guest traffic to host-local-only destinations.
         if !self.inner.state.params.allow_host_local_access
-            && is_blocked_host_local_ipv4(ipv4.dst_addr())
+            && is_host_local_ipv4(ipv4.dst_addr())
             && self
                 .inner
                 .state
@@ -1144,7 +920,7 @@ impl<T: Client> Access<'_, T> {
 
         // Reject guest traffic to host-local-only destinations.
         if !self.inner.state.params.allow_host_local_access
-            && is_blocked_host_local_ipv6(ipv6.dst_addr())
+            && is_host_local_ipv6(ipv6.dst_addr())
             && self
                 .inner
                 .state
