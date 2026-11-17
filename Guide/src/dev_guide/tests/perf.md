@@ -116,6 +116,10 @@ The report records TCP throughput and UDP packet-rate metrics. Keep the NIC,
 network backend, host CPU placement, and MTU constant between compared runs.
 Virtio-net benchmarks enable receive GSO with both Consomme and TAP backends.
 
+TCP metrics also include the sender's retransmit count and the guest's average
+frame size for each direction. An average above the MTU means segmentation
+offload produced superframes.
+
 Compare shared vs. private memory overhead:
 
 ```bash

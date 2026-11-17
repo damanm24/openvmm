@@ -32,6 +32,7 @@ use pal_async::timer::PolledTimer;
 use services::Disposition;
 use services::GatewayServices;
 use smoltcp::phy::ChecksumCapabilities;
+use smoltcp::wire::ETHERNET_HEADER_LEN;
 use smoltcp::wire::EthernetAddress;
 use smoltcp::wire::EthernetFrame;
 use smoltcp::wire::EthernetProtocol;
@@ -336,9 +337,47 @@ impl<T: Client> Access<'_, T> {
 
     /// Processes a frame sent by the guest.
     pub fn send(&mut self, frame: &[u8], checksum: &ChecksumState) -> Result<(), DropReason> {
-        let frame = EthernetFrame::new_checked(frame)?;
-        let eth = EthernetRepr::parse(&frame)?;
-        let payload = frame.payload();
+        let mut pending = tcp::PendingWrites::default();
+        let result = self.send_frame(frame, checksum, &mut pending);
+        self.flush(pending);
+        result
+    }
+
+    /// Processes a batch of frames sent by the guest, calling `on_drop` for
+    /// each frame that is dropped.
+    ///
+    /// Guest data for each TCP flow is written to the host socket with one
+    /// call per batch, so prefer this to [`Self::send`] when several frames
+    /// are available.
+    pub fn send_batch<'f>(
+        &mut self,
+        frames: impl IntoIterator<Item = (&'f [u8], ChecksumState)>,
+        mut on_drop: impl FnMut(DropReason),
+    ) {
+        let mut pending = tcp::PendingWrites::default();
+        for (frame, checksum) in frames {
+            if let Err(err) = self.send_frame(frame, &checksum, &mut pending) {
+                on_drop(err);
+            }
+        }
+        self.flush(pending);
+    }
+
+    fn flush(&mut self, pending: tcp::PendingWrites<'_>) {
+        let inner = &mut *self.inner;
+        inner
+            .tcp
+            .flush(&inner.params.gateway, &mut *self.client, pending);
+    }
+
+    fn send_frame<'f>(
+        &mut self,
+        frame: &'f [u8],
+        checksum: &ChecksumState,
+        pending: &mut tcp::PendingWrites<'f>,
+    ) -> Result<(), DropReason> {
+        let eth = EthernetRepr::parse(&EthernetFrame::new_checked(frame)?)?;
+        let payload = &frame[ETHERNET_HEADER_LEN..];
         match self.inner.services.handle_frame(
             &mut self.inner.params.gateway,
             &eth,
@@ -355,7 +394,7 @@ impl<T: Client> Access<'_, T> {
         };
         let host_dst = self.host_destination(ip.dst)?;
         match ip.protocol {
-            IpProtocol::Tcp => self.handle_tcp(&ip, host_dst, checksum),
+            IpProtocol::Tcp => self.handle_tcp(&ip, host_dst, checksum, pending),
             IpProtocol::Udp => self.handle_udp(&ip, host_dst, checksum),
             other => Err(DropReason::UnsupportedIpProtocol(other)),
         }
@@ -402,11 +441,12 @@ impl<T: Client> Access<'_, T> {
         }
     }
 
-    fn handle_tcp(
+    fn handle_tcp<'f>(
         &mut self,
-        ip: &IpView<'_>,
+        ip: &IpView<'f>,
         host_dst: IpAddr,
         checksum: &ChecksumState,
+        pending: &mut tcp::PendingWrites<'f>,
     ) -> Result<(), DropReason> {
         let packet = TcpPacket::new_checked(ip.payload)?;
         let (src, dst) = (IpAddress::from(ip.src), IpAddress::from(ip.dst));
@@ -424,6 +464,7 @@ impl<T: Client> Access<'_, T> {
             key,
             SocketAddr::new(host_dst, repr.dst_port),
             &repr,
+            pending,
         )
     }
 

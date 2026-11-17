@@ -347,33 +347,55 @@ impl crate::harness::WarmPerfTest for NetworkTest {
 
         // TCP TX (guest sends to host)
         let name = format!("{prefix}_tcp_tx_gbps");
+        let before = read_net_counters(&state.agent).await?;
         recorder.start(&name)?;
-        let m = self
+        let run = self
             .run_iperf3(state, host_ip, base_port, &name, IperfMode::TcpTx)
             .await
             .context("TCP TX test failed")?;
         recorder.stop()?;
-        metrics.push(m);
+        let after = read_net_counters(&state.agent).await?;
+        metrics.push(parse_tcp_throughput(&run.server_json, &name, false)?);
+        metrics.push(parse_retransmits(
+            &run.client_json,
+            &format!("{prefix}_tcp_tx_retransmits"),
+        )?);
+        metrics.push(avg_frame_bytes(
+            after.tx_bytes - before.tx_bytes,
+            after.tx_packets - before.tx_packets,
+            &format!("{prefix}_tcp_tx_avg_frame_bytes"),
+        )?);
 
         // TCP RX (host sends to guest, -R flag)
         let name = format!("{prefix}_tcp_rx_gbps");
+        let before = read_net_counters(&state.agent).await?;
         recorder.start(&name)?;
-        let m = self
+        let run = self
             .run_iperf3(state, host_ip, base_port + 1, &name, IperfMode::TcpRx)
             .await
             .context("TCP RX test failed")?;
         recorder.stop()?;
-        metrics.push(m);
+        let after = read_net_counters(&state.agent).await?;
+        metrics.push(parse_tcp_throughput(&run.server_json, &name, true)?);
+        metrics.push(parse_retransmits(
+            &run.server_json,
+            &format!("{prefix}_tcp_rx_retransmits"),
+        )?);
+        metrics.push(avg_frame_bytes(
+            after.rx_bytes - before.rx_bytes,
+            after.rx_packets - before.rx_packets,
+            &format!("{prefix}_tcp_rx_avg_frame_bytes"),
+        )?);
 
         // UDP TX (guest sends to host)
         let name = format!("{prefix}_udp_tx_pps");
         recorder.start(&name)?;
-        let m = self
+        let run = self
             .run_iperf3(state, host_ip, base_port + 2, &name, IperfMode::UdpTx)
             .await
             .context("UDP TX test failed")?;
         recorder.stop()?;
-        metrics.push(m);
+        metrics.push(parse_udp_pps(&run.server_json, &name)?);
 
         Ok(metrics)
     }
@@ -403,6 +425,14 @@ enum IperfMode {
     UdpTx,
 }
 
+/// Raw iperf3 JSON from one sub-test.
+struct IperfRun {
+    /// Output of the host-side server.
+    server_json: String,
+    /// Output of the guest-side client.
+    client_json: String,
+}
+
 impl NetworkTest {
     /// Run a single iperf3 sub-test via the helper child process.
     async fn run_iperf3(
@@ -412,7 +442,7 @@ impl NetworkTest {
         port: u16,
         metric_name: &str,
         mode: IperfMode,
-    ) -> anyhow::Result<MetricResult> {
+    ) -> anyhow::Result<IperfRun> {
         use mesh::rpc::RpcSend;
 
         // Ask the helper to start an iperf3 server (blocks until client done).
@@ -435,7 +465,8 @@ impl NetworkTest {
             .await;
 
         // Run guest iperf3 client.
-        run_guest_iperf3_client(&state.agent, host_ip, port, &mode, metric_name).await?;
+        let client_json =
+            run_guest_iperf3_client(&state.agent, host_ip, port, &mode, metric_name).await?;
 
         // Collect JSON from the helper.
         let json = json_future.await.context("iperf3 helper RPC failed")?;
@@ -449,18 +480,22 @@ impl NetworkTest {
             "iperf3 server produced no output for {metric_name}"
         );
 
-        parse_result(&json, metric_name, &mode)
+        Ok(IperfRun {
+            server_json: json,
+            client_json,
+        })
     }
 }
 
-/// Run guest iperf3 client with the given mode. Returns after the client exits.
+/// Run guest iperf3 client with the given mode. Returns the client's JSON
+/// output after it exits.
 async fn run_guest_iperf3_client(
     agent: &petri::pipette::PipetteClient,
     host_ip: &str,
     port: u16,
     mode: &IperfMode,
     metric_name: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     let mut sh = agent.unix_shell();
     sh.chroot("/perf");
     let port_str = port.to_string();
@@ -468,32 +503,94 @@ async fn run_guest_iperf3_client(
         IperfMode::TcpTx => {
             cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t 10 -J")
                 .ignore_status()
-                .run()
+                .read()
                 .await
         }
         IperfMode::TcpRx => {
             cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t 10 -R -J")
                 .ignore_status()
-                .run()
+                .read()
                 .await
         }
         IperfMode::UdpTx => {
             cmd!(sh, "iperf3 -c {host_ip} -p {port_str} -t 10 -u -b 0 -J")
                 .ignore_status()
-                .run()
+                .read()
                 .await
         }
     }
     .with_context(|| format!("guest iperf3 client failed for {metric_name}"))
 }
 
-/// Parse iperf3 JSON into a MetricResult based on the test mode.
-fn parse_result(json: &str, metric_name: &str, mode: &IperfMode) -> anyhow::Result<MetricResult> {
-    match mode {
-        IperfMode::TcpTx => parse_tcp_throughput(json, metric_name, false),
-        IperfMode::TcpRx => parse_tcp_throughput(json, metric_name, true),
-        IperfMode::UdpTx => parse_udp_pps(json, metric_name),
+/// Guest interface counters, summed over all non-loopback interfaces.
+struct NetCounters {
+    rx_bytes: u64,
+    rx_packets: u64,
+    tx_bytes: u64,
+    tx_packets: u64,
+}
+
+async fn read_net_counters(agent: &petri::pipette::PipetteClient) -> anyhow::Result<NetCounters> {
+    let sh = agent.unix_shell();
+    let text = cmd!(sh, "cat /proc/net/dev")
+        .read()
+        .await
+        .context("failed to read guest /proc/net/dev")?;
+    parse_net_dev(&text)
+}
+
+fn parse_net_dev(text: &str) -> anyhow::Result<NetCounters> {
+    let mut counters = NetCounters {
+        rx_bytes: 0,
+        rx_packets: 0,
+        tx_bytes: 0,
+        tx_packets: 0,
+    };
+    // The first two lines are column headers.
+    for line in text.lines().skip(2) {
+        let Some((name, stats)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() == "lo" {
+            continue;
+        }
+        let fields = stats
+            .split_whitespace()
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("malformed /proc/net/dev line: {line}"))?;
+        anyhow::ensure!(fields.len() >= 10, "malformed /proc/net/dev line: {line}");
+        counters.rx_bytes += fields[0];
+        counters.rx_packets += fields[1];
+        counters.tx_bytes += fields[8];
+        counters.tx_packets += fields[9];
     }
+    Ok(counters)
+}
+
+/// Average frame size as seen by the guest driver. Values above the MTU
+/// mean segmentation offload produced superframes.
+fn avg_frame_bytes(bytes: u64, packets: u64, metric_name: &str) -> anyhow::Result<MetricResult> {
+    anyhow::ensure!(packets > 0, "no packets counted for {metric_name}");
+    Ok(MetricResult {
+        name: metric_name.to_string(),
+        unit: "bytes".to_string(),
+        value: bytes as f64 / packets as f64,
+    })
+}
+
+/// Parse the sender's TCP retransmit count from iperf3 JSON output. Only the
+/// sending side reports retransmits.
+fn parse_retransmits(json: &str, metric_name: &str) -> anyhow::Result<MetricResult> {
+    let v: serde_json::Value = serde_json::from_str(json).context("failed to parse iperf3 JSON")?;
+    let retransmits = v["end"]["sum_sent"]["retransmits"]
+        .as_f64()
+        .with_context(|| format!("missing retransmits in iperf3 output for {metric_name}"))?;
+    Ok(MetricResult {
+        name: metric_name.to_string(),
+        unit: "count".to_string(),
+        value: retransmits,
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -44,6 +44,9 @@ use std::task::Poll;
 
 /// Largest frame accepted from the guest, bounded by the 64 KiB TSO limit.
 const MAX_TX_FRAME: usize = 64 * 1024 + 256;
+/// Bytes of guest frames processed as one batch. Guest data for a TCP flow
+/// within a batch is written to the host with a single call.
+const TX_BATCH_LEN: usize = 1024 * 1024;
 
 /// A Minestrone network endpoint.
 #[derive(InspectMut)]
@@ -147,7 +150,9 @@ struct QueueState {
     rx_ready: VecDeque<RxId>,
     tx_avail: VecDeque<TxSegment>,
     tx_ready: VecDeque<TxId>,
-    tx_scratch: Vec<u8>,
+    /// Guest frames copied for the current transmit batch.
+    tx_arena: Vec<u8>,
+    tx_frames: Vec<(std::ops::Range<usize>, ChecksumState)>,
 }
 
 #[derive(Inspect, Default)]
@@ -178,57 +183,90 @@ impl MinestroneQueue {
     }
 
     fn process_tx(&mut self, pool: &mut dyn BufferAccess) {
-        while let Some(head) = self.state.tx_avail.front() {
-            let TxSegmentType::Head(meta) = &head.ty else {
-                unreachable!("tx packets start with a head segment")
-            };
-            let tx_id = meta.id;
-            let len = meta.len as usize;
-            let segment_count = meta.segment_count as usize;
-            let checksum = ChecksumState {
-                ipv4: meta.flags.offload_ip_header_checksum(),
-                tcp: meta.flags.offload_tcp_checksum(),
-                udp: meta.flags.offload_udp_checksum(),
-                partial: false,
-                tso: meta
-                    .flags
-                    .offload_tcp_segmentation()
-                    .then_some(meta.max_segment_size),
-                gso: None,
-            };
-
-            let mut buf = std::mem::take(&mut self.state.tx_scratch);
-            let segments = self.state.tx_avail.drain(..segment_count);
-            if len > MAX_TX_FRAME {
-                drop(segments);
-                tracelimit::warn_ratelimited!(len, "dropping oversized tx frame");
-                self.stats.tx_errors.increment();
-            } else {
-                buf.clear();
-                buf.resize(len, 0);
-                let gm = pool.guest_memory();
-                let mut offset = 0;
-                for segment in segments {
-                    let end = offset + segment.len as usize;
-                    let Some(dest) = buf.get_mut(offset..end) else {
-                        break;
-                    };
-                    if let Err(err) = gm.read_at(segment.gpa, dest) {
-                        tracelimit::error_ratelimited!(
-                            error = &err as &dyn std::error::Error,
-                            "failed to read tx frame from guest memory"
-                        );
-                    }
-                    offset = end;
-                }
-
-                if let Err(err) = self.with_minestrone(pool, |m| m.send(&buf, &checksum)) {
-                    tracing::debug!(error = &err as &dyn std::error::Error, "tx frame dropped");
-                    self.count_drop(&err);
-                }
+        while !self.state.tx_avail.is_empty() {
+            let mut arena = std::mem::take(&mut self.state.tx_arena);
+            // Sized once; frames overwrite it without clearing.
+            if arena.len() < TX_BATCH_LEN {
+                arena.resize(TX_BATCH_LEN, 0);
             }
-            self.state.tx_scratch = buf;
-            self.state.tx_ready.push_back(tx_id);
+            let mut frames = std::mem::take(&mut self.state.tx_frames);
+            frames.clear();
+            let mut used = 0;
+            while let Some(head) = self.state.tx_avail.front() {
+                let TxSegmentType::Head(meta) = &head.ty else {
+                    unreachable!("tx packets start with a head segment")
+                };
+                let tx_id = meta.id;
+                let len = meta.len as usize;
+                if len <= MAX_TX_FRAME && used + len > arena.len() {
+                    // The batch is full.
+                    break;
+                }
+                let segment_count = meta.segment_count as usize;
+                let checksum = ChecksumState {
+                    ipv4: meta.flags.offload_ip_header_checksum(),
+                    tcp: meta.flags.offload_tcp_checksum(),
+                    udp: meta.flags.offload_udp_checksum(),
+                    partial: false,
+                    tso: meta
+                        .flags
+                        .offload_tcp_segmentation()
+                        .then_some(meta.max_segment_size),
+                    gso: None,
+                };
+
+                let segments = self.state.tx_avail.drain(..segment_count);
+                if len > MAX_TX_FRAME {
+                    drop(segments);
+                    tracelimit::warn_ratelimited!(len, "dropping oversized tx frame");
+                    self.stats.tx_errors.increment();
+                } else {
+                    let frame = &mut arena[used..used + len];
+                    let gm = pool.guest_memory();
+                    let mut offset = 0;
+                    let mut ok = true;
+                    for segment in segments {
+                        let end = offset + segment.len as usize;
+                        let Some(dest) = frame.get_mut(offset..end) else {
+                            break;
+                        };
+                        if let Err(err) = gm.read_at(segment.gpa, dest) {
+                            tracelimit::error_ratelimited!(
+                                error = &err as &dyn std::error::Error,
+                                "failed to read tx frame from guest memory"
+                            );
+                            ok = false;
+                        }
+                        offset = end;
+                    }
+                    if ok {
+                        // Don't expose an earlier frame's bytes if the
+                        // segments are shorter than the frame.
+                        frame[offset..].fill(0);
+                        frames.push((used..used + len, checksum));
+                        used += len;
+                    } else {
+                        self.stats.tx_errors.increment();
+                    }
+                }
+                self.state.tx_ready.push_back(tx_id);
+            }
+
+            let mut drops = Vec::new();
+            self.with_minestrone(pool, |m| {
+                m.send_batch(
+                    frames
+                        .iter()
+                        .map(|(range, checksum)| (&arena[range.clone()], *checksum)),
+                    |err| drops.push(err),
+                )
+            });
+            for err in &drops {
+                tracing::debug!(error = err as &dyn std::error::Error, "tx frame dropped");
+                self.count_drop(err);
+            }
+            self.state.tx_arena = arena;
+            self.state.tx_frames = frames;
         }
     }
 

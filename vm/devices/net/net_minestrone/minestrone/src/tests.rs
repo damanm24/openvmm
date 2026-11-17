@@ -144,6 +144,10 @@ struct Harness {
     timer: PolledTimer,
 }
 
+fn remote_of(listener: &TcpListener) -> SocketAddrV4 {
+    SocketAddrV4::new(Ipv4Addr::LOCALHOST, listener.local_addr().unwrap().port())
+}
+
 impl Harness {
     fn new(driver: DefaultDriver) -> Self {
         let mut params = MinestroneParams::new();
@@ -163,6 +167,31 @@ impl Harness {
             .access(&mut self.client)
             .send(frame, &ChecksumState::NONE)
             .unwrap();
+    }
+
+    fn send_batch(&mut self, frames: &[Vec<u8>]) {
+        self.minestrone.access(&mut self.client).send_batch(
+            frames.iter().map(|f| (f.as_slice(), ChecksumState::NONE)),
+            |err| panic!("frame dropped: {err}"),
+        );
+    }
+
+    /// Opens a flow to `listener`. Returns the host side of the connection
+    /// and the guest's next sequence and acknowledgment numbers.
+    async fn connect(
+        &mut self,
+        listener: &TcpListener,
+        window: u16,
+    ) -> (std::net::TcpStream, u32, u32) {
+        let remote = remote_of(listener);
+        self.send(&guest_frame(remote, TcpControl::Syn, 0, None, window, &[]));
+        let syn_ack = self.recv().await.remove(0);
+        assert_eq!(syn_ack.control, TcpControl::Syn);
+        let (server, _) = listener.accept().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        (server, 1, syn_ack.seq.wrapping_add(1))
     }
 
     /// Polls until at least one frame is sent to the guest, then returns all
@@ -361,4 +390,85 @@ async fn unknown_flow_segment_is_reset(driver: DefaultDriver) {
     assert_eq!(rst.control, TcpControl::Rst);
     assert_eq!(rst.seq, 77);
     assert_eq!(rst.ack, None);
+}
+
+/// Data from a batch of guest frames reaches the host in order, a segment
+/// retransmitted within the batch is not duplicated, and a FIN in the batch
+/// follows the data.
+#[async_test]
+async fn tcp_batch_writes_data_before_fin(driver: DefaultDriver) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let remote = remote_of(&listener);
+    let mut h = Harness::new(driver);
+    const WINDOW: u16 = 4096;
+    let (mut server, seq, ack) = h.connect(&listener, WINDOW).await;
+
+    let frame = |control: TcpControl, offset: u32, payload: &[u8]| {
+        guest_frame(remote, control, seq + offset, Some(ack), WINDOW, payload)
+    };
+    h.send_batch(&[
+        frame(TcpControl::None, 0, b"abc"),
+        frame(TcpControl::None, 3, b"def"),
+        frame(TcpControl::None, 3, b"def"),
+        frame(TcpControl::Fin, 6, b"ghi"),
+    ]);
+    let mut received = Vec::new();
+    server.read_to_end(&mut received).unwrap();
+    assert_eq!(received, b"abcdefghi");
+    assert_eq!(h.recv().await.pop().unwrap().ack, Some(seq + 10));
+}
+
+/// When the host socket accepts only part of a batch, the window closes.
+/// Once it reopens, the window update is followed by duplicate ACKs so the
+/// guest retransmits the dropped data without waiting for a timeout.
+#[async_test]
+async fn tcp_partial_write_requests_fast_retransmit(driver: DefaultDriver) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    // A fixed receive buffer keeps the host from accepting the whole batch.
+    socket2::SockRef::from(&listener)
+        .set_recv_buffer_size(64 * 1024)
+        .unwrap();
+    let remote = remote_of(&listener);
+    let mut h = Harness::new(driver);
+    const WINDOW: u16 = 4096;
+    let (mut server, seq, ack) = h.connect(&listener, WINDOW).await;
+
+    // Ignore the advertised window and send more than the socket can hold.
+    const FRAME: usize = 60_000;
+    const FRAMES: usize = 150;
+    let payload = vec![0x5a; FRAME];
+    let frames: Vec<_> = (0..FRAMES)
+        .map(|i| {
+            let seq = seq.wrapping_add((i * FRAME) as u32);
+            guest_frame(remote, TcpControl::None, seq, Some(ack), WINDOW, &payload)
+        })
+        .collect();
+    h.send_batch(&frames);
+    let blocked = h.recv().await.pop().unwrap();
+    let accepted = blocked.ack.unwrap().wrapping_sub(seq) as usize;
+    assert!(
+        accepted > 0 && accepted < FRAME * FRAMES,
+        "accepted {accepted}"
+    );
+    assert_eq!(blocked.window, 0);
+
+    let reader = std::thread::spawn(move || {
+        let mut buf = vec![0; 1 << 20];
+        let mut total = 0;
+        while total < accepted {
+            total += server.read(&mut buf).unwrap();
+        }
+        // Return the socket so that the host side stays open.
+        (server, total)
+    });
+    let acks = h.recv().await;
+    let (_server, total) = reader.join().unwrap();
+    assert_eq!(total, accepted);
+    assert_eq!(acks.len(), 4, "window update and three duplicates");
+    assert!(acks[0].window > 0);
+    for a in &acks {
+        assert_eq!(a.ack, blocked.ack);
+        assert_eq!(a.window, acks[0].window);
+        assert!(a.payload.is_empty());
+    }
 }

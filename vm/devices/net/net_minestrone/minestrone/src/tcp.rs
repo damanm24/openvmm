@@ -7,8 +7,13 @@
 //!
 //! * Guest-to-host data is written directly to the host socket. Only bytes the
 //!   socket accepts are acknowledged, and the advertised window is the free
-//!   space in the socket's send buffer. Out-of-order segments are dropped with
-//!   a duplicate ACK; there is no reassembly.
+//!   space in the socket's send buffer, less a margin for per-buffer
+//!   overhead. A window too small to be useful is closed and reopened with an
+//!   update once the socket drains. Out-of-order segments are dropped with
+//!   a duplicate ACK; there is no reassembly. In-order data from a batch of
+//!   guest frames is gathered per flow, without copying, and written with one
+//!   vectored send. If the socket accepts only part of it, the rest is
+//!   dropped and duplicate ACKs prompt the guest to retransmit it at once.
 //! * Host-to-guest data is read only up to the guest's advertised window and
 //!   kept until the guest acknowledges it, either in the kernel socket (Linux
 //!   `SO_PEEK_OFF`) or in an [`unacked_ring::UnackedRing`].
@@ -65,14 +70,24 @@ const RTO_MAX: Duration = Duration::from_secs(60);
 const MAX_RETRIES: u8 = 8;
 /// Advertised window where the send-buffer space cannot be queried.
 const DEFAULT_SEND_SPACE: usize = 256 * 1024;
+/// The advertised window withholds this fraction (1/N) of the free
+/// send-buffer space to cover per-buffer overhead.
+const SEND_SPACE_MARGIN_DIVISOR: usize = 16;
 /// Send-buffer space required before reopening a closed window, to avoid
 /// silly-window syndrome.
 const REOPEN_SPACE: usize = 16 * 1024;
+/// How often a closed window is checked for reopening when no writability
+/// notification arrives.
+const REOPEN_CHECK_INTERVAL: Duration = Duration::from_millis(1);
 /// Ceiling for unacknowledged data held in a ring.
 const RING_MAX: usize = 4 * 1024 * 1024;
 const TCP_HEADER_LEN: usize = 20;
 /// Largest GSO payload whose IPv4 total length fits in 16 bits.
 const MAX_GSO_PAYLOAD: usize = 65535 - 20 - TCP_HEADER_LEN;
+/// Duplicate ACKs that trigger the guest's fast retransmit (RFC 5681).
+const DUP_ACK_THRESHOLD: usize = 3;
+/// Buffers per vectored send, within Linux's `IOV_MAX`.
+const MAX_IOVECS: usize = 1024;
 
 /// A TCP flow, as the guest sees it.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -114,6 +129,9 @@ struct TcpFlow {
     // Guest to host.
     /// Next sequence number expected from the guest.
     rcv_nxt: Seq,
+    /// In-order guest data after `rcv_nxt` gathered in the current batch and
+    /// not yet written to the socket.
+    rcv_pending: usize,
     guest_fin: bool,
     /// The host socket refused data; the advertised window is closed until it
     /// drains.
@@ -121,6 +139,9 @@ struct TcpFlow {
     /// Without a send-space query, the first writability wait only arms the
     /// notification.
     write_armed: bool,
+    /// Guest data was dropped after a partial write; send duplicate ACKs once
+    /// the window reopens.
+    request_retransmit: bool,
     ack_due: bool,
     our_wscale: u8,
 
@@ -145,6 +166,9 @@ struct TcpFlow {
     rto: Duration,
     retries: u8,
     deadline: Option<Instant>,
+    /// While the window is closed, when to next check whether the socket
+    /// has drained.
+    reopen_check: Option<Instant>,
 }
 
 /// Fields needed to emit a segment while `host_rx` is borrowed.
@@ -153,6 +177,33 @@ struct SegmentHeader {
     key: FlowKey,
     ack: Seq,
     window: u16,
+}
+
+/// In-order guest data gathered per flow during a batch of guest frames,
+/// borrowed from the frames until [`Tcp::flush`] writes it.
+#[derive(Default)]
+pub(crate) struct PendingWrites<'a> {
+    flows: Vec<(FlowKey, Vec<io::IoSlice<'a>>)>,
+}
+
+impl<'a> PendingWrites<'a> {
+    fn push(&mut self, key: FlowKey, data: &'a [u8]) {
+        let bufs = match self.flows.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, bufs)) => bufs,
+            None => {
+                self.flows.push((key, Vec::new()));
+                &mut self.flows.last_mut().expect("just pushed").1
+            }
+        };
+        bufs.push(io::IoSlice::new(data));
+    }
+
+    fn take(&mut self, key: FlowKey) -> Vec<io::IoSlice<'a>> {
+        match self.flows.iter().position(|(k, _)| *k == key) {
+            Some(i) => self.flows.swap_remove(i).1,
+            None => Vec::new(),
+        }
+    }
 }
 
 pub(crate) struct Tcp {
@@ -175,14 +226,16 @@ impl Tcp {
     }
 
     /// Handles a TCP segment from the guest. `host_dst` is the address to
-    /// connect to on the host for a new flow.
-    pub fn handle<C: Client + ?Sized>(
+    /// connect to on the host for a new flow. In-order data is added to
+    /// `pending`, to be written by [`Self::flush`].
+    pub fn handle<'a, C: Client + ?Sized>(
         &mut self,
         cfg: &GatewayConfig,
         client: &mut C,
         key: FlowKey,
         host_dst: SocketAddr,
-        tcp: &TcpRepr<'_>,
+        tcp: &TcpRepr<'a>,
+        pending: &mut PendingWrites<'a>,
     ) -> Result<(), DropReason> {
         let Some(flow) = self.flows.get_mut(&key) else {
             if tcp.control == TcpControl::Syn && tcp.ack_number.is_none() {
@@ -193,17 +246,37 @@ impl Tcp {
             }
             return Ok(());
         };
-        match flow.on_segment(tcp) {
+        match flow.on_segment(tcp, key, pending) {
             Verdict::Keep => {}
             Verdict::Remove => {
+                pending.take(key);
                 self.flows.remove(&key);
             }
             Verdict::Reset => {
+                pending.take(key);
                 let flow = self.flows.remove(&key).expect("flow exists");
                 flow.reset(cfg, client, key);
             }
         }
         Ok(())
+    }
+
+    /// Writes the data gathered in `pending` to the host sockets.
+    pub fn flush<C: Client + ?Sized>(
+        &mut self,
+        cfg: &GatewayConfig,
+        client: &mut C,
+        pending: PendingWrites<'_>,
+    ) {
+        for (key, bufs) in pending.flows {
+            let Some(flow) = self.flows.get_mut(&key) else {
+                continue;
+            };
+            if flow.write_pending(&bufs).is_err() {
+                let flow = self.flows.remove(&key).expect("flow exists");
+                flow.reset(cfg, client, key);
+            }
+        }
     }
 
     fn connect<C: Client + ?Sized>(
@@ -259,9 +332,11 @@ impl Tcp {
             phase: Phase::Connecting,
             host_rx,
             rcv_nxt: Seq(syn.seq_number.0 as u32).add(1),
+            rcv_pending: 0,
             guest_fin: false,
             write_blocked: false,
             write_armed: false,
+            request_retransmit: false,
             ack_due: false,
             our_wscale,
             isn,
@@ -278,6 +353,7 @@ impl Tcp {
             rto: RTO_INIT,
             retries: 0,
             deadline: None,
+            reopen_check: None,
         };
         tracing::debug!(guest = %key.guest, remote = %key.remote, peek = matches!(flow.host_rx, HostRx::Peek), "tcp connecting");
         self.flows.insert(key, flow);
@@ -307,7 +383,7 @@ impl Tcp {
                     return false;
                 }
             }
-            if let Some(d) = flow.deadline {
+            for d in [flow.deadline, flow.reopen_check].into_iter().flatten() {
                 next = Some(next.map_or(d, |n| n.min(d)));
             }
             true
@@ -335,6 +411,12 @@ fn is_connect_incomplete(err: &io::Error) -> bool {
 
 fn to_tcp_seq(seq: Seq) -> TcpSeqNumber {
     TcpSeqNumber(seq.0 as i32)
+}
+
+/// Returns the window to advertise for `space` bytes of free send-buffer
+/// space, less a margin for the overhead charged per buffer.
+fn window_for_space(space: usize) -> usize {
+    space - space / SEND_SPACE_MARGIN_DIVISOR
 }
 
 /// Emits a TCP segment from the flow's remote address to the guest.
@@ -448,22 +530,31 @@ impl TcpFlow {
     }
 
     /// Returns the window to advertise to the guest, in bytes.
+    ///
+    /// Each write is charged its payload plus per-buffer overhead, so the
+    /// window keeps a margin below the free send-buffer space. Otherwise a
+    /// guest filling the window could overrun the socket and lose data.
     fn advertised_window(&self) -> usize {
         if self.write_blocked || self.guest_fin {
             return 0;
         }
-        sys::send_space(self.socket.get()).unwrap_or(DEFAULT_SEND_SPACE)
+        window_for_space(sys::send_space(self.socket.get()).unwrap_or(DEFAULT_SEND_SPACE))
     }
 
     fn window_field(&self, window: usize) -> u16 {
         (window >> self.our_wscale).min(u16::MAX.into()) as u16
     }
 
-    fn on_segment(&mut self, tcp: &TcpRepr<'_>) -> Verdict {
+    fn on_segment<'a>(
+        &mut self,
+        tcp: &TcpRepr<'a>,
+        key: FlowKey,
+        pending: &mut PendingWrites<'a>,
+    ) -> Verdict {
         if tcp.control == TcpControl::Rst {
             // Accept a reset only at the expected sequence number (RFC 5961
             // section 3), so a blind reset cannot tear down the host side.
-            if Seq(tcp.seq_number.0 as u32) == self.rcv_nxt {
+            if Seq(tcp.seq_number.0 as u32) == self.rcv_expected() {
                 let _ = self.socket.get().set_linger(Some(Duration::ZERO));
                 return Verdict::Remove;
             }
@@ -503,7 +594,7 @@ impl TcpFlow {
                 return Verdict::Reset;
             }
         }
-        if self.on_data(tcp).is_err() {
+        if self.on_data(tcp, key, pending).is_err() {
             return Verdict::Reset;
         }
         if self.guest_fin && self.fin_acked {
@@ -556,22 +647,34 @@ impl TcpFlow {
         Ok(())
     }
 
-    fn on_data(&mut self, tcp: &TcpRepr<'_>) -> Result<(), ()> {
+    /// The sequence number of the next guest byte, after any data gathered
+    /// in the current batch.
+    fn rcv_expected(&self) -> Seq {
+        self.rcv_nxt.add(self.rcv_pending as u32)
+    }
+
+    fn on_data<'a>(
+        &mut self,
+        tcp: &TcpRepr<'a>,
+        key: FlowKey,
+        pending: &mut PendingWrites<'a>,
+    ) -> Result<(), ()> {
         let fin = tcp.control == TcpControl::Fin;
         let mut data = tcp.payload;
         if data.is_empty() && !fin {
             return Ok(());
         }
         let seq = Seq(tcp.seq_number.0 as u32);
-        if seq.before(self.rcv_nxt) {
+        let expected = self.rcv_expected();
+        if seq.before(expected) {
             // Retransmitted data; acknowledge again and keep any new part.
             self.ack_due = true;
-            let skip = self.rcv_nxt.since(seq) as usize;
+            let skip = expected.since(seq) as usize;
             if skip > data.len() || (skip == data.len() && !fin) {
                 return Ok(());
             }
             data = &data[skip..];
-        } else if seq != self.rcv_nxt {
+        } else if seq != expected {
             // Out of order: no reassembly. A duplicate ACK prompts the guest
             // to retransmit from `rcv_nxt`.
             self.ack_due = true;
@@ -582,34 +685,64 @@ impl TcpFlow {
                 return Ok(());
             }
             self.ack_due = true;
-            match self.socket.get().send(data) {
-                Ok(n) => {
-                    self.rcv_nxt = self.rcv_nxt.add(n as u32);
-                    if n < data.len() {
-                        self.write_blocked = true;
-                        return Ok(());
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    self.write_blocked = true;
-                    return Ok(());
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        error = &err as &dyn std::error::Error,
-                        "tcp host write failed"
-                    );
-                    return Err(());
-                }
-            }
+            pending.push(key, data);
+            self.rcv_pending += data.len();
         }
         if fin && !self.guest_fin {
+            // The FIN must follow all of the data on the host socket.
+            self.write_pending(&pending.take(key))?;
+            if self.rcv_nxt != seq.add(tcp.payload.len() as u32) {
+                // Not all data was written; the guest retransmits the FIN.
+                return Ok(());
+            }
             self.guest_fin = true;
             self.rcv_nxt = self.rcv_nxt.add(1);
             self.ack_due = true;
             let _ = self.socket.get().shutdown(std::net::Shutdown::Write);
         }
         Ok(())
+    }
+
+    /// Writes the data gathered in the current batch to the host socket.
+    /// Data the socket does not accept is dropped; the guest is asked to
+    /// retransmit it once the window reopens.
+    fn write_pending(&mut self, bufs: &[io::IoSlice<'_>]) -> Result<(), ()> {
+        let total = std::mem::take(&mut self.rcv_pending);
+        if total == 0 {
+            return Ok(());
+        }
+        let mut written = 0;
+        let mut result = Ok(());
+        for chunk in bufs.chunks(MAX_IOVECS) {
+            let len: usize = chunk.iter().map(|b| b.len()).sum();
+            match self.socket.get().send_vectored(chunk) {
+                Ok(n) => {
+                    written += n;
+                    if n < len {
+                        break;
+                    }
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) => {
+                    tracing::debug!(
+                        error = &err as &dyn std::error::Error,
+                        "tcp host write failed"
+                    );
+                    result = Err(());
+                    break;
+                }
+            }
+        }
+        self.rcv_nxt = self.rcv_nxt.add(written as u32);
+        if result.is_ok() {
+            // Data at `rcv_nxt` arriving means the guest has already resent
+            // anything dropped earlier.
+            self.request_retransmit = written < total;
+            if written < total {
+                self.write_blocked = true;
+            }
+        }
+        result
     }
 
     /// Rewinds so all unacknowledged data is sent again.
@@ -718,6 +851,14 @@ impl TcpFlow {
             return Verdict::Keep;
         }
 
+        let mut window = self.advertised_window();
+        if window < REOPEN_SPACE && !self.write_blocked && !self.guest_fin {
+            // Avoid a silly window: close it, and send an update once the
+            // socket drains, rather than leave the guest stalled on a small
+            // window until its persist timer probes.
+            self.write_blocked = true;
+            window = 0;
+        }
         if self.write_blocked {
             let write_armed = &mut self.write_armed;
             let r = self
@@ -727,7 +868,9 @@ impl TcpFlow {
                     InterestSlot::Write,
                     PollEvents::OUT,
                     |s| match sys::send_space(s.get()) {
-                        Ok(space) if space < REOPEN_SPACE => Err(io::ErrorKind::WouldBlock.into()),
+                        Ok(space) if window_for_space(space) < REOPEN_SPACE => {
+                            Err(io::ErrorKind::WouldBlock.into())
+                        }
                         Ok(_) => Ok(()),
                         Err(err) if err.kind() == io::ErrorKind::Unsupported => {
                             if std::mem::replace(write_armed, true) {
@@ -739,25 +882,42 @@ impl TcpFlow {
                         Err(err) => Err(err),
                     },
                 );
-            match r {
-                Poll::Ready(Ok(())) => {
-                    self.write_blocked = false;
-                    self.write_armed = false;
-                    self.ack_due = true;
-                }
+            let reopened = match r {
+                Poll::Ready(Ok(())) => true,
                 Poll::Ready(Err(_)) => return Verdict::Reset,
-                Poll::Pending => {}
+                // A window closed here, while the socket still had some
+                // space, may never be followed by a writability notification.
+                // Check directly, which also arms the notification, and
+                // periodically until the window reopens. Requiring the kernel
+                // to consider the socket writable reopens the window only
+                // once a useful amount of space is free.
+                Poll::Pending => {
+                    let socket = self.socket.get();
+                    sys::poll_writable(socket).is_ok_and(|writable| writable)
+                        && sys::send_space(socket)
+                            .is_ok_and(|space| window_for_space(space) >= REOPEN_SPACE)
+                }
+            };
+            if reopened {
+                self.write_blocked = false;
+                self.write_armed = false;
+                self.reopen_check = None;
+                self.ack_due = true;
+                window = self.advertised_window();
+            } else {
+                self.reopen_check = Some(now.saturating_add(REOPEN_CHECK_INTERVAL));
             }
         }
 
-        let window = self.advertised_window();
         if self
             .send_data(cx, cfg, client, key, scratch, window, now)
             .is_err()
         {
             return Verdict::Reset;
         }
-        if self.ack_due && client.max_frame_len() != 0 {
+        if (self.ack_due || self.request_retransmit && !self.write_blocked)
+            && client.max_frame_len() != 0
+        {
             let repr = segment(
                 key,
                 TcpControl::None,
@@ -767,6 +927,17 @@ impl TcpFlow {
             );
             emit(cfg, client, key, &repr, &[], None);
             self.ack_due = false;
+            if self.request_retransmit && !self.write_blocked {
+                // Guest data was dropped. Duplicates of this window update
+                // trigger the guest's fast retransmit rather than waiting for
+                // its retransmission timeout.
+                let mut sent = 0;
+                while sent < DUP_ACK_THRESHOLD && client.max_frame_len() != 0 {
+                    emit(cfg, client, key, &repr, &[], None);
+                    sent += 1;
+                }
+                self.request_retransmit = sent < DUP_ACK_THRESHOLD;
+            }
         }
         if self.guest_fin && self.fin_acked {
             return Verdict::Remove;
